@@ -7,15 +7,12 @@ import mysql from "mysql2/promise";
 //   database: "auth_db",
 // });
 
-// const db = mysql.createPool({
-//   host: "containers-xxx.railway.app",
-//   user: "root",
-//   password: "WRSjIegBMbKrthVZvihkRRDKEaIkQNyW",
-//   database: "railway",
-//   port: 3306,
-// });
-
-const db = mysql.createPool("mysql://root:cuquXHarOGofWPUWLlqIeZVytwfmwpxR@mysql.railway.internal:3306/db");
-
+const db = mysql.createPool({
+  host: "mysql.railway.internal",
+  user: "root",
+  password: "cuquXHarOGofWPUWLlqIeZVytwfmwpxR",
+  database: "railway", 
+  port: "3306"
+});
 
 export default db;
