@@ -4,7 +4,7 @@ import routes from "./routes/authRoutes.js";
 
 const app = express();
 app.use(cors({
-  origin: "https://lpg-frontend-001.vercel.app/",
+  origin: true,
   credentials: true
 }));
 app.use(express.json());
