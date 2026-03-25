@@ -8,7 +8,7 @@ import mysql from "mysql2/promise";
 // });
 
 const db = mysql.createPool({
-  host: "mysql.railway.internal",
+  host: "containers-xxx.railway.app",
   user: "root",
   password: "WRSjIegBMbKrthVZvihkRRDKEaIkQNyW",
   database: "railway",
