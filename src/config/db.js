@@ -15,7 +15,7 @@ import mysql from "mysql2/promise";
 //   port: 3306,
 // });
 
-const db = mysql.createPool(process.env.DATABASE_URL);
+const db = mysql.createPool("mysql://root:cuquXHarOGofWPUWLlqIeZVytwfmwpxR@mysql.railway.internal:3306/db");
 
 
 export default db;
