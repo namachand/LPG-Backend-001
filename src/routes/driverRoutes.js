@@ -2,7 +2,8 @@ import express from "express";
 import { getDriverDashboard } from "../controllers/driverController.js";
 import { createDriver, getDriverDeliveriesApp, markSaleAsDelivered, createDriverSale, getDriverCollectionSummary, 
     settleDriverCollectionsByMethod, getDriverInHandSummary, returnInHandToGodown, getDriverCollectionHistory,
-getDriverEmptyCylindersToday, getDriverEmptyCylindersHistory, approveTodayEmptyCylinderReturns, getDriverProfileHistory} from "../controllers/driverController.js";
+getDriverEmptyCylindersToday, getDriverEmptyCylindersHistory, approveTodayEmptyCylinderReturns, getDriverProfileHistory,
+searchProductsForDriverApp, findCustomerForDriverApp} from "../controllers/driverController.js";
 
 const router = express.Router();
 
@@ -21,5 +22,7 @@ router.get("/:driverId/empty-cylinders/today", getDriverEmptyCylindersToday);
 router.get("/:driverId/empty-cylinders/history", getDriverEmptyCylindersHistory);
 router.put("/:driverId/empty-cylinders/approve-today", approveTodayEmptyCylinderReturns);
 router.get("/:driverId/profile-history", getDriverProfileHistory);
+router.get("/products/search", searchProductsForDriverApp);
+router.get("/customers/find", findCustomerForDriverApp);
 
 export default router;

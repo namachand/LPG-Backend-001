@@ -194,6 +194,69 @@ export const createDriver = async (req, res) => {
   }
 };
 
+export const findCustomerForDriverApp = async (req, res) => {
+  try {
+    const { query } = req.query;
+
+    if (!query || !String(query).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "query is required",
+      });
+    }
+
+    const searchValue = String(query).trim();
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        u.id,
+        u.name,
+        u.phone,
+        u.email,
+        a.address
+      FROM users u
+      LEFT JOIN addresses a
+        ON a.user_id = u.id
+      WHERE u.role = 'CUSTOMER'
+        AND (
+          u.phone = ?
+          OR u.id = ?
+        )
+      ORDER BY a.is_default DESC, a.id DESC
+      LIMIT 1
+      `,
+      [searchValue, Number(searchValue) || 0]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Customer found successfully",
+      data: {
+        id: Number(rows[0].id),
+        name: rows[0].name,
+        phone: rows[0].phone,
+        email: rows[0].email,
+        address: rows[0].address || "",
+      },
+    });
+  } catch (error) {
+    console.error("findCustomerForDriverApp error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to find customer",
+      error: error.message,
+    });
+  }
+};
+
 export const getDriverDeliveriesApp = async (req, res) => {
   try {
     const { driverId } = req.params;
@@ -221,6 +284,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         COALESCE(SUM(CASE WHEN s.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS allocated,
         COALESCE(SUM(CASE WHEN s.status = 'DELIVERED' THEN 1 ELSE 0 END), 0) AS delivered,
         COALESCE(SUM(CASE WHEN s.status IN ('ASSIGNED', 'PENDING') THEN 1 ELSE 0 END), 0) AS in_hand,
+        COALESCE(SUM(CASE WHEN s.empty_cylinder_status IN ('PARTIAL_PENDING', 'PENDING') THEN 1 ELSE 0 END), 0) AS empties,
         COALESCE(SUM(CASE WHEN s.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS new_delivery
       FROM sales s
       WHERE s.driver_id = ?
@@ -600,14 +664,16 @@ export const createDriverSale = async (req, res) => {
       phone,
       address,
       cylinder_type,
-      quantity,
+      product_id,
+      quantity = 1,
       payment_method,
       amount,
-      empty_cylinder_collected,
+      empty_cylinder_collected = false,
+      empty_cylinder_qty = 0,
     } = req.body;
 
     // =========================
-    // VALIDATION
+    // VALIDATIONS
     // =========================
     if (!driver_id) {
       return res.status(400).json({
@@ -616,58 +682,46 @@ export const createDriverSale = async (req, res) => {
       });
     }
 
-    if (!customer_name?.trim()) {
+    if (!customer_name || !customer_name.trim()) {
       return res.status(400).json({
         success: false,
         message: "customer_name is required",
       });
     }
 
-    if (!phone?.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "phone is required",
-      });
-    }
-
-    if (!address?.trim()) {
+    if (!address || !address.trim()) {
       return res.status(400).json({
         success: false,
         message: "address is required",
       });
     }
 
-    if (!["DOMESTIC", "COMMERCIAL"].includes(cylinder_type)) {
+    if (!cylinder_type || !["DOMESTIC", "COMMERCIAL"].includes(cylinder_type)) {
       return res.status(400).json({
         success: false,
         message: "cylinder_type must be DOMESTIC or COMMERCIAL",
       });
     }
 
-    if (!quantity || Number(quantity) <= 0) {
+    if (!product_id) {
       return res.status(400).json({
         success: false,
-        message: "quantity must be greater than 0",
+        message: "product_id is required",
       });
     }
 
-    if (!["CASH", "UPI", "ONLINE", "CREDIT"].includes(payment_method)) {
+    if (!payment_method || !["CASH", "UPI", "ONLINE", "CREDIT"].includes(payment_method)) {
       return res.status(400).json({
         success: false,
         message: "payment_method must be CASH, UPI, ONLINE or CREDIT",
       });
     }
 
-    if (amount === undefined || amount === null || Number(amount) < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "amount must be a valid non-negative number",
-      });
-    }
-
     const numericDriverId = Number(driver_id);
+    const numericProductId = Number(product_id);
     const numericQuantity = Number(quantity);
     const numericAmount = Number(amount);
+    const numericEmptyCylinderQty = Number(empty_cylinder_qty || 0);
 
     if (Number.isNaN(numericDriverId)) {
       return res.status(400).json({
@@ -676,14 +730,59 @@ export const createDriverSale = async (req, res) => {
       });
     }
 
+    if (Number.isNaN(numericProductId)) {
+      return res.status(400).json({
+        success: false,
+        message: "product_id must be a valid number",
+      });
+    }
+
+    if (Number.isNaN(numericQuantity) || numericQuantity <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "quantity must be greater than 0",
+      });
+    }
+
+    if (Number.isNaN(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be greater than 0",
+      });
+    }
+
+    if (Number.isNaN(numericEmptyCylinderQty) || numericEmptyCylinderQty < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "empty_cylinder_qty must be 0 or greater",
+      });
+    }
+
+    if (numericEmptyCylinderQty > numericQuantity) {
+      return res.status(400).json({
+        success: false,
+        message: "empty_cylinder_qty cannot be greater than ordered quantity",
+      });
+    }
+
+    const emptyCylinderStatus =
+      numericEmptyCylinderQty === numericQuantity ? "PENDING" : "PARTIAL_PENDING";
+
+    // =========================
+    // START TRANSACTION
+    // =========================
     await connection.beginTransaction();
 
     // =========================
     // CHECK DRIVER EXISTS
-    // sales.driver_id references drivers.id
     // =========================
     const [driverRows] = await connection.execute(
-      `SELECT id FROM drivers WHERE id = ? LIMIT 1`,
+      `
+      SELECT id
+      FROM drivers
+      WHERE id = ?
+      LIMIT 1
+      `,
       [numericDriverId]
     );
 
@@ -696,135 +795,109 @@ export const createDriverSale = async (req, res) => {
     }
 
     // =========================
-    // CREATE / REUSE CUSTOMER
-    // users.role = CUSTOMER
-    // reuse by phone if already exists
+    // CHECK PRODUCT EXISTS
     // =========================
-    let customerId;
-
-    const [existingCustomerRows] = await connection.execute(
+    const [productRows] = await connection.execute(
       `
-      SELECT id, name
-      FROM users
-      WHERE phone = ?
-        AND role = 'CUSTOMER'
+      SELECT id, name, type, price
+      FROM products
+      WHERE id = ?
       LIMIT 1
       `,
-      [phone.trim()]
+      [numericProductId]
     );
 
-    if (existingCustomerRows.length) {
-      customerId = existingCustomerRows[0].id;
+    if (!productRows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Selected product not found",
+      });
+    }
 
-      await connection.execute(
-        `
-        UPDATE users
-        SET name = ?, status = 'ACTIVE'
-        WHERE id = ?
-        `,
-        [customer_name.trim(), customerId]
-      );
-    } else {
-      const [customerInsertResult] = await connection.execute(
-        `
-        INSERT INTO users (name, phone, role, status)
-        VALUES (?, ?, 'CUSTOMER', 'ACTIVE')
-        `,
-        [customer_name.trim(), phone.trim()]
-      );
+    const selectedProduct = productRows[0];
 
-      customerId = customerInsertResult.insertId;
+    if (selectedProduct.type !== cylinder_type) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Selected product does not match selected cylinder type",
+      });
     }
 
     // =========================
-    // CREATE / REUSE ADDRESS
-    // use exact address match for this customer
+    // FIND OR CREATE CUSTOMER
     // =========================
-    let addressId;
+    let customerId = null;
 
-    const [existingAddressRows] = await connection.execute(
+    if (phone && phone.trim()) {
+      const [existingCustomerRows] = await connection.execute(
+        `
+        SELECT id
+        FROM users
+        WHERE phone = ?
+        LIMIT 1
+        `,
+        [phone.trim()]
+      );
+
+      if (existingCustomerRows.length) {
+        customerId = existingCustomerRows[0].id;
+
+        await connection.execute(
+          `
+          UPDATE users
+          SET name = ?, role = 'CUSTOMER', status = 'ACTIVE'
+          WHERE id = ?
+          `,
+          [customer_name.trim(), customerId]
+        );
+      }
+    }
+
+    if (!customerId) {
+      const [userInsertResult] = await connection.execute(
+        `
+        INSERT INTO users (
+          name,
+          phone,
+          role,
+          status
+        )
+        VALUES (?, ?, 'CUSTOMER', 'ACTIVE')
+        `,
+        [customer_name.trim(), phone?.trim() || null]
+      );
+
+      customerId = userInsertResult.insertId;
+    }
+
+    // =========================
+    // CREATE ADDRESS
+    // =========================
+    const [addressInsertResult] = await connection.execute(
       `
-      SELECT id
-      FROM addresses
-      WHERE user_id = ?
-        AND address = ?
-      LIMIT 1
+      INSERT INTO addresses (
+        user_id,
+        address,
+        is_default
+      )
+      VALUES (?, ?, 1)
       `,
       [customerId, address.trim()]
     );
 
-    if (existingAddressRows.length) {
-      addressId = existingAddressRows[0].id;
-    } else {
-      const [addressInsertResult] = await connection.execute(
-        `
-        INSERT INTO addresses (user_id, address, is_default)
-        VALUES (?, ?, 1)
-        `,
-        [customerId, address.trim()]
-      );
-
-      addressId = addressInsertResult.insertId;
-    }
-
-    // =========================
-    // FIND / CREATE PRODUCT
-    // pick first product for type, else create generic
-    // =========================
-    let productId;
-    let productPrice = numericAmount;
-
-    const [existingProductRows] = await connection.execute(
-      `
-      SELECT id, price
-      FROM products
-      WHERE type = ?
-      ORDER BY id ASC
-      LIMIT 1
-      `,
-      [cylinder_type]
-    );
-
-    if (existingProductRows.length) {
-      productId = existingProductRows[0].id;
-      productPrice =
-        existingProductRows[0].price !== null
-          ? Number(existingProductRows[0].price)
-          : numericAmount;
-    } else {
-      const defaultProductName =
-        cylinder_type === "DOMESTIC"
-          ? "Domestic Cylinder"
-          : "Commercial Cylinder";
-
-      const [productInsertResult] = await connection.execute(
-        `
-        INSERT INTO products (name, type, price)
-        VALUES (?, ?, ?)
-        `,
-        [defaultProductName, cylinder_type, numericAmount]
-      );
-
-      productId = productInsertResult.insertId;
-      productPrice = numericAmount;
-    }
-
-    // =========================
-    // MAP PAYMENT METHOD FOR sales
-    // CREDIT is not supported by current sales enum
-    // so store NULL and skip payment row
-    // =========================
-    let salesPaymentMethod = null;
-
-    if (payment_method === "CASH") salesPaymentMethod = "CASH";
-    if (payment_method === "UPI") salesPaymentMethod = "UPI";
-    if (payment_method === "ONLINE") salesPaymentMethod = "ONLINE";
+    const addressId = addressInsertResult.insertId;
 
     // =========================
     // CREATE SALE
-    // Driver is confirming delivery from app
-    // so create as DELIVERED
     // =========================
+    const salePaymentMethod =
+      payment_method === "ONLINE" ? "ONLINE" :
+      payment_method === "UPI" ? "UPI" :
+      payment_method === "CASH" ? "CASH" :
+      "PART_PAYMENT";
+
     const [saleInsertResult] = await connection.execute(
       `
       INSERT INTO sales (
@@ -833,99 +906,147 @@ export const createDriverSale = async (req, res) => {
         total_amount,
         payment_method,
         status,
+        address_id,
         assigned_at,
-        delivered_at,
-        address_id
+        empty_cylinder_qty,
+        empty_cylinder_status
       )
-      VALUES (?, ?, ?, ?, 'DELIVERED', NOW(), NOW(), ?)
+      VALUES (?, ?, ?, ?, 'DELIVERED', ?, NOW(), ?, ?)
       `,
       [
         customerId,
         numericDriverId,
         numericAmount,
-        salesPaymentMethod,
+        salePaymentMethod,
         addressId,
+        numericEmptyCylinderQty,
+        emptyCylinderStatus,
       ]
     );
+
 
     const saleId = saleInsertResult.insertId;
 
     // =========================
     // CREATE SALES ITEM
-    // use per unit price from amount/qty
     // =========================
-    const unitPrice =
-      numericQuantity > 0 ? numericAmount / numericQuantity : productPrice;
-
     await connection.execute(
       `
-      INSERT INTO sales_items (sale_id, product_id, quantity, price)
+      INSERT INTO sales_items (
+        sale_id,
+        product_id,
+        quantity,
+        price
+      )
       VALUES (?, ?, ?, ?)
       `,
-      [saleId, productId, numericQuantity, unitPrice]
+      [saleId, selectedProduct.id, numericQuantity, numericAmount]
     );
 
     // =========================
     // CREATE PAYMENT
-    // only when money is actually collected now
-    // CREDIT => no payment row
-    // ONLINE -> CARD in payments table
     // =========================
-    if (payment_method !== "CREDIT") {
-      let paymentMethodForPaymentTable = "CASH";
+    let paymentMethodForPayments = null;
+    let paymentStatus = "PENDING";
 
-      if (payment_method === "CASH") paymentMethodForPaymentTable = "CASH";
-      if (payment_method === "UPI") paymentMethodForPaymentTable = "UPI";
-      if (payment_method === "ONLINE") paymentMethodForPaymentTable = "CARD";
-
-      const [paymentInsertResult] = await connection.execute(
-        `INSERT INTO payments (sale_id, amount, method, status, type)
-        VALUES (?, ?, ?, 'SUCCESS', 'DRIVER')
-        `,
-        [saleId, numericAmount, paymentMethodForPaymentTable]
-      );
-
-      const paymentId = paymentInsertResult.insertId;
-
-      // only create settlement rows for CASH / UPI
-      if (paymentMethodForPaymentTable === "CASH" || paymentMethodForPaymentTable === "UPI") {
-        await connection.execute(
-          `INSERT INTO settlement_history (
-            driver_id,
-            sale_id,
-            payment_id,
-            method,
-            amount,
-            status
-          )
-          VALUES (?, ?, ?, ?, ?, 'PENDING')
-          `,
-          [numericDriverId, saleId, paymentId, paymentMethodForPaymentTable, numericAmount]
-        );
-      }
-
+    if (payment_method === "CASH") {
+      paymentMethodForPayments = "CASH";
+      paymentStatus = "SUCCESS";
+    } else if (payment_method === "UPI") {
+      paymentMethodForPayments = "UPI";
+      paymentStatus = "SUCCESS";
+    } else if (payment_method === "ONLINE") {
+      paymentMethodForPayments = "CARD";
+      paymentStatus = "SUCCESS";
+    } else {
+      paymentMethodForPayments = null; // CREDIT
+      paymentStatus = "PENDING";
     }
 
+    const [paymentInsertResult] = await connection.execute(
+      `
+      INSERT INTO payments (
+        sale_id,
+        amount,
+        method,
+        status,
+        type
+      )
+      VALUES (?, ?, ?, ?, 'DRIVER')
+      `,
+      [saleId, numericAmount, paymentMethodForPayments, paymentStatus]
+    );
+
+    const paymentId = paymentInsertResult.insertId;
+
+    // =========================
+    // CREATE SETTLEMENT HISTORY
+    // ONLY FOR CASH / UPI
+    // =========================
+    if (payment_method === "CASH" || payment_method === "UPI") {
+      await connection.execute(
+        `
+        INSERT INTO settlement_history (
+          driver_id,
+          sale_id,
+          payment_id,
+          method,
+          amount,
+          status
+        )
+        VALUES (?, ?, ?, ?, ?, 'PENDING')
+        `,
+        [
+          numericDriverId,
+          saleId,
+          paymentId,
+          payment_method,
+          numericAmount,
+        ]
+      );
+    }
+
+    // =========================
+    // COMMIT
+    // =========================
     await connection.commit();
 
     return res.status(201).json({
       success: true,
-      message: "Driver sale created successfully",
+      message: "Sale created successfully",
       data: {
-        sale_id: saleId,
-        customer_id: customerId,
-        address_id: addressId,
-        product_id: productId,
-        empty_cylinder_collected: !!empty_cylinder_collected,
+        saleId,
+        customerId,
+        addressId,
+        paymentId,
+        product: {
+          id: Number(selectedProduct.id),
+          name: selectedProduct.name,
+          type: selectedProduct.type,
+        },
+        quantity: numericQuantity,
+        amount: numericAmount,
+        paymentMethod: payment_method,
+        emptyCylinderCollected: Boolean(empty_cylinder_collected),
+        emptyCylinderQty: numericEmptyCylinderQty,
+        emptyCylinderStatus,
       },
     });
   } catch (error) {
     await connection.rollback();
     console.error("createDriverSale error:", error);
 
+    if (error?.code === "ER_DUP_ENTRY") {
+      return res.status(400).json({
+        success: false,
+        message: "Phone number already exists with another customer",
+        error: error.message,
+      });
+    }
+
     return res.status(500).json({
       success: false,
-      message: "Failed to create driver sale",
+      message: "Failed to create sale",
       error: error.message,
     });
   } finally {
@@ -953,32 +1074,12 @@ export const getDriverCollectionSummary = async (req, res) => {
       });
     }
 
-    // =========================
-    // TOP SUMMARY
-    // =========================
-    const [summaryRows] = await db.execute(
-      `SELECT
-        COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cash_collected,
-        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upi_collected
-      FROM settlement_history sh
-      WHERE sh.driver_id = ?
-      `,
-      [numericDriverId]
-    );
-
-    // =========================
-    // PENDING SETTLEMENT ITEMS
-    // =========================
-    const [settlementRows] = await db.execute(
+    const [cashRows] = await db.execute(
       `
       SELECT
-        sh.id AS settlement_id,
-        sh.driver_id,
+        sh.id,
         sh.sale_id,
-        sh.payment_id,
-        sh.method,
         sh.amount,
-        sh.status,
         sh.created_at,
         u.name AS customer_name
       FROM settlement_history sh
@@ -987,48 +1088,68 @@ export const getDriverCollectionSummary = async (req, res) => {
       LEFT JOIN users u
         ON u.id = s.customer_id
       WHERE sh.driver_id = ?
+        AND sh.method = 'CASH'
         AND sh.status = 'PENDING'
-      ORDER BY
-        CASE WHEN sh.method = 'CASH' THEN 0 ELSE 1 END,
-        sh.created_at DESC,
-        sh.id DESC
+      ORDER BY sh.created_at ASC, sh.id ASC
       `,
       [numericDriverId]
     );
 
-    const cashItems = settlementRows
-      .filter((item) => item.method === "CASH")
-      .map((item) => ({
-        settlementId: item.settlement_id,
-        customerName: item.customer_name || "Unknown Customer",
-        amount: Number(item.amount || 0),
-        createdAt: item.created_at,
-        method: item.method,
-        status: item.status,
-      }));
+    const [upiRows] = await db.execute(
+      `
+      SELECT
+        sh.id,
+        sh.sale_id,
+        sh.amount,
+        sh.created_at,
+        u.name AS customer_name
+      FROM settlement_history sh
+      INNER JOIN sales s
+        ON s.id = sh.sale_id
+      LEFT JOIN users u
+        ON u.id = s.customer_id
+      WHERE sh.driver_id = ?
+        AND sh.method = 'UPI'
+        AND sh.status = 'PENDING'
+      ORDER BY sh.created_at ASC, sh.id ASC
+      `,
+      [numericDriverId]
+    );
 
-    const upiItems = settlementRows
-      .filter((item) => item.method === "UPI")
-      .map((item) => ({
-        settlementId: item.settlement_id,
-        customerName: item.customer_name || "Unknown Customer",
-        amount: Number(item.amount || 0),
-        createdAt: item.created_at,
-        method: item.method,
-        status: item.status,
-      }));
+    const cashCollected = cashRows.reduce(
+      (sum, row) => sum + Number(row.amount || 0),
+      0
+    );
+
+    const upiCollected = upiRows.reduce(
+      (sum, row) => sum + Number(row.amount || 0),
+      0
+    );
 
     return res.status(200).json({
       success: true,
-      message: "Collection summary fetched successfully",
+      message: "Driver collection summary fetched successfully",
       data: {
         summary: {
-          cashCollected: Number(summaryRows[0]?.cash_collected || 0),
-          upiCollected: Number(summaryRows[0]?.upi_collected || 0),
+          cashCollected: Number(cashCollected || 0),
+          upiCollected: Number(upiCollected || 0),
+          totalCollected: Number(cashCollected || 0) + Number(upiCollected || 0),
         },
         settlements: {
-          cash: cashItems,
-          upi: upiItems,
+          cash: cashRows.map((row) => ({
+            id: Number(row.id),
+            saleId: Number(row.sale_id),
+            amount: Number(row.amount || 0),
+            customerName: row.customer_name || "Unknown Customer",
+            createdAt: row.created_at,
+          })),
+          upi: upiRows.map((row) => ({
+            id: Number(row.id),
+            saleId: Number(row.sale_id),
+            amount: Number(row.amount || 0),
+            customerName: row.customer_name || "Unknown Customer",
+            createdAt: row.created_at,
+          })),
         },
       },
     });
@@ -1036,16 +1157,18 @@ export const getDriverCollectionSummary = async (req, res) => {
     console.error("getDriverCollectionSummary error:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch collection summary",
+      message: "Failed to fetch driver collection summary",
       error: error.message,
     });
   }
 };
 
 export const settleDriverCollectionsByMethod = async (req, res) => {
+  const connection = await db.getConnection();
+
   try {
     const { driverId } = req.params;
-    const { method, denominations } = req.body;
+    const { method, denominations } = req.body || {};
 
     if (!driverId) {
       return res.status(400).json({
@@ -1063,100 +1186,219 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
       });
     }
 
-    if (!["CASH", "UPI"].includes(method)) {
+    if (!["CASH", "UPI", "TOTAL_UPI"].includes(method)) {
       return res.status(400).json({
         success: false,
-        message: "method must be CASH or UPI",
+        message: "method must be CASH, UPI or TOTAL_UPI",
       });
     }
 
-    let enteredCashTotal = null;
+    await connection.beginTransaction();
 
-    if (method === "CASH" && denominations) {
-      const d500 = Number(denominations?.["500"] || 0);
-      const d100 = Number(denominations?.["100"] || 0);
-      const d50 = Number(denominations?.["50"] || 0);
-      const d20 = Number(denominations?.["20"] || 0);
-      const d10 = Number(denominations?.["10"] || 0);
-      const coins = Number(denominations?.coins || 0);
+    // CASH
+    if (method === "CASH") {
+      let enteredCashTotal = null;
 
-      if ([d500, d100, d50, d20, d10, coins].some((v) => Number.isNaN(v) || v < 0)) {
-        return res.status(400).json({
+      if (denominations) {
+        const d500 = Number(denominations?.["500"] || 0);
+        const d100 = Number(denominations?.["100"] || 0);
+        const d50 = Number(denominations?.["50"] || 0);
+        const d20 = Number(denominations?.["20"] || 0);
+        const d10 = Number(denominations?.["10"] || 0);
+        const coins = Number(denominations?.coins || 0);
+
+        if ([d500, d100, d50, d20, d10, coins].some((v) => Number.isNaN(v) || v < 0)) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: "Invalid denomination values",
+          });
+        }
+
+        enteredCashTotal =
+          d500 * 500 +
+          d100 * 100 +
+          d50 * 50 +
+          d20 * 20 +
+          d10 * 10 +
+          coins;
+      }
+
+      const [pendingRows] = await connection.execute(
+        `
+        SELECT sh.id, sh.amount
+        FROM settlement_history sh
+        WHERE sh.driver_id = ?
+          AND sh.method = 'CASH'
+          AND sh.status = 'PENDING'
+        FOR UPDATE
+        `,
+        [numericDriverId]
+      );
+
+      if (!pendingRows.length) {
+        await connection.rollback();
+        return res.status(404).json({
           success: false,
-          message: "Invalid denomination values",
+          message: "No pending CASH settlements found",
         });
       }
 
-      enteredCashTotal =
-        d500 * 500 +
-        d100 * 100 +
-        d50 * 50 +
-        d20 * 20 +
-        d10 * 10 +
-        coins;
-    }
+      const expectedTotal = pendingRows.reduce(
+        (sum, row) => sum + Number(row.amount || 0),
+        0
+      );
 
-    const [pendingRows] = await db.execute(
-      `
-      SELECT id, amount
-      FROM settlement_history
-      WHERE driver_id = ?
-        AND method = ?
-        AND status = 'PENDING'
-      `,
-      [numericDriverId, method]
-    );
+      if (enteredCashTotal !== null && enteredCashTotal !== expectedTotal) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Entered cash total ₹${enteredCashTotal} does not match expected ₹${expectedTotal}`,
+        });
+      }
 
-    if (!pendingRows.length) {
-      return res.status(404).json({
-        success: false,
-        message: `No pending ${method} settlements found`,
+      const [updateResult] = await connection.execute(
+        `
+        UPDATE settlement_history
+        SET status = 'SETTLED'
+        WHERE driver_id = ?
+          AND method = 'CASH'
+          AND status = 'PENDING'
+        `,
+        [numericDriverId]
+      );
+
+      await connection.commit();
+
+      return res.status(200).json({
+        success: true,
+        message: "CASH settlements marked as settled successfully",
+        data: {
+          updatedCount: updateResult.affectedRows || 0,
+          method: "CASH",
+          expectedTotal,
+          enteredTotal: enteredCashTotal,
+          denominations: denominations || null,
+        },
       });
     }
 
-    const expectedTotal = pendingRows.reduce(
-      (sum, row) => sum + Number(row.amount || 0),
-      0
-    );
+    // UPI
+    if (method === "UPI") {
+      const [pendingRows] = await connection.execute(
+        `
+        SELECT sh.id, sh.amount
+        FROM settlement_history sh
+        WHERE sh.driver_id = ?
+          AND sh.method = 'UPI'
+          AND sh.status = 'PENDING'
+        FOR UPDATE
+        `,
+        [numericDriverId]
+      );
 
-    if (method === "CASH" && enteredCashTotal !== null && enteredCashTotal !== expectedTotal) {
-      return res.status(400).json({
-        success: false,
-        message: `Entered cash total ₹${enteredCashTotal} does not match expected ₹${expectedTotal}`,
+      if (!pendingRows.length) {
+        await connection.rollback();
+        return res.status(404).json({
+          success: false,
+          message: "No pending UPI settlements found",
+        });
+      }
+
+      const expectedTotal = pendingRows.reduce(
+        (sum, row) => sum + Number(row.amount || 0),
+        0
+      );
+
+      const [updateResult] = await connection.execute(
+        `
+        UPDATE settlement_history
+        SET status = 'SETTLED'
+        WHERE driver_id = ?
+          AND method = 'UPI'
+          AND status = 'PENDING'
+        `,
+        [numericDriverId]
+      );
+
+      await connection.commit();
+
+      return res.status(200).json({
+        success: true,
+        message: "UPI settlements marked as settled successfully",
+        data: {
+          updatedCount: updateResult.affectedRows || 0,
+          method: "UPI",
+          expectedTotal,
+        },
       });
     }
 
-    const [updateResult] = await db.execute(
-      `
-      UPDATE settlement_history
-      SET status = 'SETTLED'
-      WHERE driver_id = ?
-        AND method = ?
-        AND status = 'PENDING'
-      `,
-      [numericDriverId, method]
-    );
+    // TOTAL COLLECTION -> SETTLE EVERYTHING AS UPI
+    if (method === "TOTAL_UPI") {
+      const [pendingRows] = await connection.execute(
+        `
+        SELECT id, amount, method
+        FROM settlement_history
+        WHERE driver_id = ?
+          AND status = 'PENDING'
+          AND method IN ('CASH', 'UPI')
+        FOR UPDATE
+        `,
+        [numericDriverId]
+      );
 
-    return res.status(200).json({
-      success: true,
-      message: `${method} settlements marked as settled successfully`,
-      data: {
-        updatedCount: updateResult.affectedRows || 0,
-        method,
-        expectedTotal,
-        enteredTotal: enteredCashTotal,
-        denominations: method === "CASH" ? denominations || null : null,
-      },
-    });
+      if (!pendingRows.length) {
+        await connection.rollback();
+        return res.status(404).json({
+          success: false,
+          message: "No pending collections found to settle in UPI mode",
+        });
+      }
+
+      const expectedTotal = pendingRows.reduce(
+        (sum, row) => sum + Number(row.amount || 0),
+        0
+      );
+
+      const [updateResult] = await connection.execute(
+        `
+        UPDATE settlement_history
+        SET
+          method = 'UPI',
+          status = 'SETTLED'
+        WHERE driver_id = ?
+          AND status = 'PENDING'
+          AND method IN ('CASH', 'UPI')
+        `,
+        [numericDriverId]
+      );
+
+      await connection.commit();
+
+      return res.status(200).json({
+        success: true,
+        message: "All pending collections settled successfully in UPI mode",
+        data: {
+          updatedCount: updateResult.affectedRows || 0,
+          method: "TOTAL_UPI",
+          expectedTotal,
+        },
+      });
+    }
   } catch (error) {
+    await connection.rollback();
     console.error("settleDriverCollectionsByMethod error:", error);
     return res.status(500).json({
       success: false,
       message: "Failed to settle collections",
       error: error.message,
     });
+  } finally {
+    connection.release();
   }
 };
+
 
 export const getDriverInHandSummary = async (req, res) => {
   try {
@@ -1628,69 +1870,77 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
       });
     }
 
-    // summary
+    // =========================
+    // SUMMARY FROM SALES
+    // =========================
     const [summaryRows] = await db.execute(
       `
       SELECT
-        COALESCE(SUM(st.quantity), 0) AS collected,
-        COALESCE(SUM(CASE WHEN st.isApproved = 1 THEN st.quantity ELSE 0 END), 0) AS returned_qty,
-        COALESCE(SUM(CASE WHEN st.isApproved = 0 THEN st.quantity ELSE 0 END), 0) AS in_hand_qty
-      FROM stock_transactions st
-      INNER JOIN products p
-        ON p.id = st.product_id
-      INNER JOIN categories c
-        ON c.id = p.category_id
-      WHERE st.created_by = ?
-        AND c.name = 'Empty Cylinder'
-        AND st.type = 'ADJUSTMENT_ADD'
-        AND DATE(st.created_at) = CURDATE()
+        COALESCE(SUM(s.empty_cylinder_qty), 0) AS collected,
+        COALESCE(SUM(
+          CASE
+            WHEN s.empty_cylinder_status = 'DELIVERED'
+            THEN s.empty_cylinder_qty
+            ELSE 0
+          END
+        ), 0) AS returned_qty,
+        COALESCE(SUM(
+          CASE
+            WHEN s.empty_cylinder_status IN ('PENDING', 'PARTIAL_PENDING')
+            THEN s.empty_cylinder_qty
+            ELSE 0
+          END
+        ), 0) AS in_hand_qty
+      FROM sales s
+      WHERE s.driver_id = ?
+        AND s.empty_cylinder_qty > 0
+        AND DATE(s.created_at) = CURDATE()
       `,
       [numericDriverId]
     );
 
-    // collected from
+    // =========================
+    // COLLECTED FROM
+    // =========================
     const [collectedFromRows] = await db.execute(
       `
       SELECT
-        st.id,
-        st.quantity,
-        st.created_at,
-        p.type AS product_type,
-        u.name AS customer_name
-      FROM stock_transactions st
-      INNER JOIN products p
-        ON p.id = st.product_id
-      INNER JOIN categories c
-        ON c.id = p.category_id
+        s.id AS sale_id,
+        s.empty_cylinder_qty,
+        s.empty_cylinder_status,
+        s.created_at,
+        u.name AS customer_name,
+        p.type AS product_type
+      FROM sales s
       LEFT JOIN users u
-        ON u.id = st.reference_id
-      WHERE st.created_by = ?
-        AND c.name = 'Empty Cylinder'
-        AND st.type = 'ADJUSTMENT_ADD'
-        AND DATE(st.created_at) = CURDATE()
-      ORDER BY st.created_at ASC, st.id ASC
+        ON u.id = s.customer_id
+      LEFT JOIN sales_items si
+        ON si.sale_id = s.id
+      LEFT JOIN products p
+        ON p.id = si.product_id
+      WHERE s.driver_id = ?
+        AND s.empty_cylinder_qty > 0
+        AND DATE(s.created_at) = CURDATE()
+      ORDER BY s.created_at ASC, s.id ASC
       `,
       [numericDriverId]
     );
 
-    // return requests
+    // =========================
+    // RETURN REQUESTS
+    // =========================
     const [returnRequestRows] = await db.execute(
       `
       SELECT
-        st.id,
-        st.quantity,
-        st.created_at,
-        st.isApproved
-      FROM stock_transactions st
-      INNER JOIN products p
-        ON p.id = st.product_id
-      INNER JOIN categories c
-        ON c.id = p.category_id
-      WHERE st.created_by = ?
-        AND c.name = 'Empty Cylinder'
-        AND st.type = 'ADJUSTMENT_ADD'
-        AND DATE(st.created_at) = CURDATE()
-      ORDER BY st.created_at ASC, st.id ASC
+        s.id AS sale_id,
+        s.empty_cylinder_qty,
+        s.empty_cylinder_status,
+        s.created_at
+      FROM sales s
+      WHERE s.driver_id = ?
+        AND s.empty_cylinder_qty > 0
+        AND DATE(s.created_at) = CURDATE()
+      ORDER BY s.created_at ASC, s.id ASC
       `,
       [numericDriverId]
     );
@@ -1704,18 +1954,26 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
           returned: Number(summaryRows[0]?.returned_qty || 0),
           inHand: Number(summaryRows[0]?.in_hand_qty || 0),
         },
+
         collectedFrom: collectedFromRows.map((row) => ({
-          id: Number(row.id),
+          id: Number(row.sale_id),
+          saleId: Number(row.sale_id),
           customerName: row.customer_name || "Unknown Customer",
           productType: row.product_type || "N/A",
-          quantity: Number(row.quantity || 0),
+          quantity: Number(row.empty_cylinder_qty || 0),
+          status: row.empty_cylinder_status || "PENDING",
           createdAt: row.created_at,
         })),
+
         returnRequests: returnRequestRows.map((row) => ({
-          id: Number(row.id),
-          quantity: Number(row.quantity || 0),
+          id: Number(row.sale_id),
+          saleId: Number(row.sale_id),
+          quantity: Number(row.empty_cylinder_qty || 0),
           createdAt: row.created_at,
-          isApproved: Number(row.isApproved || 0),
+          status: row.empty_cylinder_status || "PENDING",
+
+          // keeping this only if your frontend still expects isApproved
+          isApproved: row.empty_cylinder_status === "DELIVERED" ? 1 : 0,
         })),
       },
     });
@@ -1817,20 +2075,18 @@ export const approveTodayEmptyCylinderReturns = async (req, res) => {
     const [pendingRows] = await connection.execute(
       `
       SELECT
-        st.id,
-        st.product_id,
-        st.stock_area_id,
-        st.quantity
-      FROM stock_transactions st
-      INNER JOIN products p
-        ON p.id = st.product_id
-      INNER JOIN categories c
-        ON c.id = p.category_id
-      WHERE st.created_by = ?
-        AND c.name = 'Empty Cylinder'
-        AND st.type = 'ADJUSTMENT_ADD'
-        AND st.isApproved = 0
-        AND DATE(st.created_at) = CURDATE()
+        s.id AS sale_id,
+        s.empty_cylinder_qty,
+        s.empty_cylinder_status,
+        COALESCE(SUM(si.quantity), 0) AS sale_quantity
+      FROM sales s
+      LEFT JOIN sales_items si
+        ON si.sale_id = s.id
+      WHERE s.driver_id = ?
+        AND s.empty_cylinder_qty > 0
+        AND s.empty_cylinder_status IN ('PENDING', 'PARTIAL_PENDING')
+        AND DATE(s.created_at) = CURDATE()
+      GROUP BY s.id, s.empty_cylinder_qty, s.empty_cylinder_status
       FOR UPDATE
       `,
       [numericDriverId]
@@ -1845,65 +2101,23 @@ export const approveTodayEmptyCylinderReturns = async (req, res) => {
     }
 
     for (const row of pendingRows) {
-      const productId = Number(row.product_id);
-      const stockAreaId = Number(row.stock_area_id);
-      const qty = Number(row.quantity || 0);
+      const saleId = Number(row.sale_id);
+      const emptyCylinderQty = Number(row.empty_cylinder_qty || 0);
+      const saleQuantity = Number(row.sale_quantity || 0);
 
-      const [stockRows] = await connection.execute(
+      const nextStatus =
+        emptyCylinderQty === saleQuantity ? "DELIVERED" : "PARTIAL_DELIVERED";
+
+      await connection.execute(
         `
-        SELECT id
-        FROM stock
-        WHERE product_id = ?
-          AND stock_area_id = ?
-        LIMIT 1
-        FOR UPDATE
+        UPDATE sales
+        SET empty_cylinder_status = ?
+        WHERE id = ?
+          AND driver_id = ?
         `,
-        [productId, stockAreaId]
+        [nextStatus, saleId, numericDriverId]
       );
-
-      if (stockRows.length) {
-        await connection.execute(
-          `
-          UPDATE stock
-          SET quantity = quantity + ?,
-              quantity_return = quantity_return + ?
-          WHERE product_id = ?
-            AND stock_area_id = ?
-          `,
-          [qty, qty, productId, stockAreaId]
-        );
-      } else {
-        await connection.execute(
-          `
-          INSERT INTO stock (
-            product_id,
-            stock_area_id,
-            quantity,
-            quantity_return
-          )
-          VALUES (?, ?, ?, ?)
-          `,
-          [productId, stockAreaId, qty, qty]
-        );
-      }
     }
-
-    await connection.execute(
-      `
-      UPDATE stock_transactions st
-      INNER JOIN products p
-        ON p.id = st.product_id
-      INNER JOIN categories c
-        ON c.id = p.category_id
-      SET st.isApproved = 1
-      WHERE st.created_by = ?
-        AND c.name = 'Empty Cylinder'
-        AND st.type = 'ADJUSTMENT_ADD'
-        AND st.isApproved = 0
-        AND DATE(st.created_at) = CURDATE()
-      `,
-      [numericDriverId]
-    );
 
     await connection.commit();
 
@@ -2141,6 +2355,66 @@ export const getDriverProfileHistory = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to fetch driver profile history",
+      error: error.message,
+    });
+  }
+};
+
+export const searchProductsForDriverApp = async (req, res) => {
+  try {
+    const { type, search = "" } = req.query;
+
+    if (!type) {
+      return res.status(400).json({
+        success: false,
+        message: "type is required",
+      });
+    }
+
+    if (!["DOMESTIC", "COMMERCIAL"].includes(type)) {
+      return res.status(400).json({
+        success: false,
+        message: "type must be DOMESTIC or COMMERCIAL",
+      });
+    }
+
+    const searchText = String(search).trim();
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.type,
+        p.price,
+        c.name AS category_name
+      FROM products p
+      LEFT JOIN categories c
+        ON c.id = p.category_id
+      WHERE p.type = ?
+        AND p.name LIKE ?
+      ORDER BY p.name ASC
+      LIMIT 20
+      `,
+      [type, `%${searchText}%`]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Products fetched successfully",
+      data: rows.map((item) => ({
+        id: Number(item.id),
+        name: item.name,
+        type: item.type,
+        price: Number(item.price || 0),
+        categoryName: item.category_name || "",
+      })),
+    });
+  } catch (error) {
+    console.error("searchProductsForDriverApp error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch products",
       error: error.message,
     });
   }
