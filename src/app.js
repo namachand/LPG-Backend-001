@@ -8,6 +8,8 @@ import settlementRoutes from "./routes/settlementRoutes.js"
 import customerIssueRoutes from "./routes/customerIssueRoutes.js"
 import getUserSettingRoutes from "./routes/userRoutes.js"
 import getExpenseRoutes from "./routes/expenseRoutes.js"
+import godownRoutes from "./routes/godownRoutes.js";
+
 
 const app = express();
 app.use(cors({
@@ -24,6 +26,8 @@ app.use("/api/settlements", settlementRoutes);
 app.use("/api/issues", customerIssueRoutes);
 app.use("/api/users", getUserSettingRoutes);
 app.use("/api/expenses", getExpenseRoutes);
+app.use("/api/godown", godownRoutes);
+
 
 
 
