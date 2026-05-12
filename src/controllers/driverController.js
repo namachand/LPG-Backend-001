@@ -281,12 +281,34 @@ export const getDriverDeliveriesApp = async (req, res) => {
     const [statsRows] = await db.execute(
       `
       SELECT
-        COALESCE(SUM(CASE WHEN s.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS allocated,
-        COALESCE(SUM(CASE WHEN s.status = 'DELIVERED' THEN 1 ELSE 0 END), 0) AS delivered,
-        COALESCE(SUM(CASE WHEN s.status IN ('ASSIGNED', 'PENDING') THEN 1 ELSE 0 END), 0) AS in_hand,
-        COALESCE(SUM(CASE WHEN s.empty_cylinder_status IN ('PARTIAL_PENDING', 'PENDING') THEN 1 ELSE 0 END), 0) AS empties,
-        COALESCE(SUM(CASE WHEN s.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS new_delivery
+        COALESCE(SUM(
+          CASE
+            WHEN s.status = 'ASSIGNED'
+              AND si.status = 'ASSIGNED'
+            THEN COALESCE(si.quantity, 0)
+            ELSE 0
+          END
+        ), 0) AS allocated,
+
+        COALESCE(SUM(
+          CASE
+            WHEN s.status = 'DELIVERED'
+              AND si.status = 'DELIVERED'
+            THEN COALESCE(si.delivered_qty, si.quantity, 0)
+            ELSE 0
+          END
+        ), 0) AS delivered,
+
+        COALESCE(SUM(
+          CASE
+            WHEN si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
+            THEN COALESCE(si.empty_cylinder_qty, 0)
+            ELSE 0
+          END
+        ), 0) AS empties
+
       FROM sales s
+      LEFT JOIN sales_items si ON si.sale_id = s.id
       WHERE s.driver_id = ?
       `,
       [numericDriverId]
@@ -294,31 +316,27 @@ export const getDriverDeliveriesApp = async (req, res) => {
 
     const [collectionRows] = await db.execute(
       `
-      SELECT
-        COALESCE(SUM(p.amount), 0) AS collection
+      SELECT COALESCE(SUM(p.amount), 0) AS collection
       FROM payments p
-      INNER JOIN sales s
-        ON s.id = p.sale_id
+      INNER JOIN sales s ON s.id = p.sale_id
       WHERE s.driver_id = ?
+        AND s.status = 'DELIVERED'
         AND p.status = 'SUCCESS'
       `,
       [numericDriverId]
     );
 
     let statusFilterQuery = "";
-    let queryParams = [numericDriverId];
 
     if (flag === "allocated") {
       statusFilterQuery = `
-        AND s.status IN ('DELIVERED', 'PENDING', 'ASSIGNED')
-      `;
-    } else if (flag === "delivered") {
-      statusFilterQuery = `
-        AND s.status = 'DELIVERED'
+        AND s.status IN ('PENDING', 'ASSIGNED')
+        AND si.status IN ('PENDING', 'ASSIGNED')
       `;
     } else {
       statusFilterQuery = `
-        AND s.status IN ('DELIVERED', 'PENDING', 'ASSIGNED', 'CANCELLED')
+        AND s.status = 'DELIVERED'
+        AND si.status = 'DELIVERED'
       `;
     }
 
@@ -328,42 +346,36 @@ export const getDriverDeliveriesApp = async (req, res) => {
         s.id AS sale_id,
         u.name AS customer_name,
         a.address,
-        COALESCE(GROUP_CONCAT(DISTINCT pr.name ORDER BY pr.name SEPARATOR ', '), 'N/A') AS product_name,
-        COALESCE(SUM(si.quantity), 0) AS quantity,
+        COALESCE(
+          GROUP_CONCAT(DISTINCT pr.name ORDER BY pr.name SEPARATOR ', '),
+          'N/A'
+        ) AS product_name,
+        COALESCE(SUM(si.delivered_qty), 0) AS quantity,
         COALESCE(MAX(pr.type), 'N/A') AS cylinder_type,
         s.status AS raw_status,
         CASE
           WHEN s.status = 'DELIVERED' THEN 'Delivered'
-          WHEN s.status IN ('PENDING', 'ASSIGNED') THEN 'Pending'
-          WHEN s.status = 'CANCELLED' THEN 'Cancelled'
+          WHEN s.status = 'ASSIGNED' THEN 'Pending'
+          WHEN s.status = 'PENDING' THEN 'Pending'
           ELSE s.status
         END AS display_status,
         COALESCE(s.total_amount, 0) AS total_amount,
         s.created_at,
         s.delivered_at,
         COALESCE(
-          MAX(
-            CASE
-              WHEN p.status = 'SUCCESS' THEN p.method
-              ELSE NULL
-            END
-          ),
+          MAX(CASE WHEN p.status = 'SUCCESS' THEN p.method ELSE NULL END),
           s.payment_method,
           'N/A'
         ) AS payment_mode
       FROM sales s
-      LEFT JOIN users u
-        ON u.id = s.customer_id
-      LEFT JOIN addresses a
-        ON a.id = s.address_id
-      LEFT JOIN sales_items si
-        ON si.sale_id = s.id
-      LEFT JOIN products pr
-        ON pr.id = si.product_id
-      LEFT JOIN payments p
-        ON p.sale_id = s.id
+      LEFT JOIN users u ON u.id = s.customer_id
+      LEFT JOIN addresses a ON a.id = s.address_id
+      LEFT JOIN sales_items si ON si.sale_id = s.id
+      LEFT JOIN products pr ON pr.id = si.product_id
+      LEFT JOIN payments p ON p.sale_id = s.id
       WHERE s.driver_id = ?
         ${statusFilterQuery}
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) = CURDATE()
       GROUP BY
         s.id,
         u.name,
@@ -373,26 +385,21 @@ export const getDriverDeliveriesApp = async (req, res) => {
         s.created_at,
         s.delivered_at,
         s.payment_method
-      ORDER BY
-        CASE
-          WHEN s.status IN ('PENDING', 'ASSIGNED') THEN 0
-          WHEN s.status = 'DELIVERED' THEN 1
-          WHEN s.status = 'CANCELLED' THEN 2
-          ELSE 3
-        END,
-        COALESCE(s.delivered_at, s.created_at) DESC,
-        s.id DESC
+      ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
       `,
-      queryParams
+      [numericDriverId]
     );
 
+    const allocated = Number(statsRows[0]?.allocated || 0);
+    const delivered = Number(statsRows[0]?.delivered || 0);
+
     const stats = {
-      allocated: Number(statsRows[0]?.allocated || 0),
-      delivered: Number(statsRows[0]?.delivered || 0),
+      allocated,
+      delivered,
       collection: Number(collectionRows[0]?.collection || 0),
-      empties: 0,
-      inHand: Number(statsRows[0]?.in_hand || 0),
-      newDelivery: Number(statsRows[0]?.new_delivery || 0)
+      empties: Number(statsRows[0]?.empties || 0),
+      inHand: Math.max(allocated - delivered, 0),
+      newDelivery: allocated,
     };
 
     const deliveries = deliveryRows.map((item) => ({
@@ -407,8 +414,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
       createdAt: item.created_at,
       deliveredAt: item.delivered_at,
       paymentMode: item.payment_mode || "N/A",
-      showMarkDelivered:
-        item.raw_status === "PENDING" || item.raw_status === "ASSIGNED",
+      showMarkDelivered: item.raw_status !== "DELIVERED",
       cylinderType: item.cylinder_type || "N/A",
     }));
 
@@ -422,7 +428,8 @@ export const getDriverDeliveriesApp = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("getAppDriverDeliveries error:", error);
+    console.error("getDriverDeliveriesApp error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Failed to fetch driver deliveries",
@@ -654,6 +661,19 @@ export const markSaleAsDelivered = async (req, res) => {
   }
 };
 
+const getEmptyCylinderStatus = (orderedQty, emptyQty) => {
+  const ordered = Number(orderedQty || 0);
+  const empty = Number(emptyQty || 0);
+
+  if (empty === 0) return "PENDING";
+
+  if (empty === ordered) return "DELIVERED";
+
+  if (empty > 0 && empty < ordered) return "PARTIAL_PENDING";
+
+  return "PENDING";
+};
+
 export const createDriverSale = async (req, res) => {
   const connection = await db.getConnection();
 
@@ -668,8 +688,13 @@ export const createDriverSale = async (req, res) => {
       quantity = 1,
       payment_method,
       amount,
+
       empty_cylinder_collected = false,
+
+      delivered_qty = quantity,
       empty_cylinder_qty = 0,
+      empty_cylinder_status = "PENDING",
+      defective_qty = 0,
     } = req.body;
 
     // =========================
@@ -710,7 +735,10 @@ export const createDriverSale = async (req, res) => {
       });
     }
 
-    if (!payment_method || !["CASH", "UPI", "ONLINE", "CREDIT"].includes(payment_method)) {
+    if (
+      !payment_method ||
+      !["CASH", "UPI", "ONLINE", "CREDIT"].includes(payment_method)
+    ) {
       return res.status(400).json({
         success: false,
         message: "payment_method must be CASH, UPI, ONLINE or CREDIT",
@@ -721,7 +749,10 @@ export const createDriverSale = async (req, res) => {
     const numericProductId = Number(product_id);
     const numericQuantity = Number(quantity);
     const numericAmount = Number(amount);
+
+    const numericDeliveredQty = Number(delivered_qty || quantity);
     const numericEmptyCylinderQty = Number(empty_cylinder_qty || 0);
+    const numericDefectiveQty = Number(defective_qty || 0);
 
     if (Number.isNaN(numericDriverId)) {
       return res.status(400).json({
@@ -765,8 +796,24 @@ export const createDriverSale = async (req, res) => {
       });
     }
 
-    const emptyCylinderStatus =
-      numericEmptyCylinderQty === numericQuantity ? "PENDING" : "PARTIAL_PENDING";
+    if (Number.isNaN(numericDefectiveQty) || numericDefectiveQty < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "defective_qty must be 0 or greater",
+      });
+    }
+
+    if (numericDefectiveQty > numericEmptyCylinderQty) {
+      return res.status(400).json({
+        success: false,
+        message: "defective_qty cannot be greater than empty_cylinder_qty",
+      });
+    }
+
+    const emptyCylinderStatus = getEmptyCylinderStatus(
+      numericQuantity,
+      numericEmptyCylinderQty
+    );
 
     // =========================
     // START TRANSACTION
@@ -891,12 +938,18 @@ export const createDriverSale = async (req, res) => {
 
     // =========================
     // CREATE SALE
+    // NOTE:
+    // empty_cylinder_qty and empty_cylinder_status removed from sales.
+    // They are now stored in sales_items.
     // =========================
     const salePaymentMethod =
-      payment_method === "ONLINE" ? "ONLINE" :
-      payment_method === "UPI" ? "UPI" :
-      payment_method === "CASH" ? "CASH" :
-      "PART_PAYMENT";
+      payment_method === "ONLINE"
+        ? "ONLINE"
+        : payment_method === "UPI"
+          ? "UPI"
+          : payment_method === "CASH"
+            ? "CASH"
+            : "PART_PAYMENT";
 
     const [saleInsertResult] = await connection.execute(
       `
@@ -907,11 +960,9 @@ export const createDriverSale = async (req, res) => {
         payment_method,
         status,
         address_id,
-        assigned_at,
-        empty_cylinder_qty,
-        empty_cylinder_status
+        assigned_at
       )
-      VALUES (?, ?, ?, ?, 'DELIVERED', ?, NOW(), ?, ?)
+      VALUES (?, ?, ?, ?, 'DELIVERED', ?, NOW())
       `,
       [
         customerId,
@@ -919,28 +970,45 @@ export const createDriverSale = async (req, res) => {
         numericAmount,
         salePaymentMethod,
         addressId,
-        numericEmptyCylinderQty,
-        emptyCylinderStatus,
       ]
     );
-
 
     const saleId = saleInsertResult.insertId;
 
     // =========================
     // CREATE SALES ITEM
+    // empty_cylinder_qty, empty_cylinder_status,
+    // delivered_qty and defective_qty are item-level now.
     // =========================
     await connection.execute(
       `
-      INSERT INTO sales_items (
-        sale_id,
-        product_id,
-        quantity,
-        price
-      )
-      VALUES (?, ?, ?, ?)
-      `,
-      [saleId, selectedProduct.id, numericQuantity, numericAmount]
+  INSERT INTO sales_items (
+    sale_id,
+    product_id,
+    quantity,
+    price,
+    status,
+    delivered_qty,
+    empty_cylinder_qty,
+    empty_cylinder_status,
+    defective_qty
+  )
+  VALUES (?, ?, ?, ?, 'DELIVERED', ?, ?, ?, ?)
+  `,
+      [
+        saleId,
+        selectedProduct.id,
+        numericQuantity,
+        numericAmount,
+
+        numericDeliveredQty,
+
+        numericEmptyCylinderQty,
+
+        empty_cylinder_status || emptyCylinderStatus,
+
+        numericDefectiveQty,
+      ]
     );
 
     // =========================
@@ -996,13 +1064,7 @@ export const createDriverSale = async (req, res) => {
         )
         VALUES (?, ?, ?, ?, ?, 'PENDING')
         `,
-        [
-          numericDriverId,
-          saleId,
-          paymentId,
-          payment_method,
-          numericAmount,
-        ]
+        [numericDriverId, saleId, paymentId, payment_method, numericAmount]
       );
     }
 
@@ -1025,11 +1087,13 @@ export const createDriverSale = async (req, res) => {
           type: selectedProduct.type,
         },
         quantity: numericQuantity,
+        deliveredQty: numericQuantity,
         amount: numericAmount,
         paymentMethod: payment_method,
-        emptyCylinderCollected: Boolean(empty_cylinder_collected),
+        emptyCylinderCollected: numericEmptyCylinderQty > 0,
         emptyCylinderQty: numericEmptyCylinderQty,
         emptyCylinderStatus,
+        defectiveQty: numericDefectiveQty,
       },
     });
   } catch (error) {
@@ -2415,6 +2479,226 @@ export const searchProductsForDriverApp = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to fetch products",
+      error: error.message,
+    });
+  }
+};
+
+export const getAllocatedCylinders = async (req, res) => {
+  try {
+    const { driverId } = req.params;
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.type AS product_type,
+
+        SUM(
+          CASE
+            WHEN si.status IN ('ASSIGNED')
+            THEN si.quantity
+            ELSE 0
+          END
+        ) AS total_allocated,
+
+        SUM(
+          CASE
+            WHEN si.status = 'DELIVERED'
+            THEN si.delivered_qty
+            ELSE 0
+          END
+        ) AS delivered,
+
+        SUM(
+          CASE
+            WHEN si.status = 'ASSIGNED'
+            THEN (si.quantity - si.delivered_qty)
+            ELSE 0
+          END
+        ) AS pending,
+
+        MAX(s.created_at) AS last_allocated_at,
+
+        MAX(s.id) AS latest_sale_id
+
+      FROM sales s
+      INNER JOIN sales_items si
+        ON s.id = si.sale_id
+      INNER JOIN products p
+        ON p.id = si.product_id
+
+      WHERE s.driver_id = ?
+      AND si.status IN ('ASSIGNED', 'DELIVERED')
+
+      GROUP BY p.id, p.name, p.type
+
+      ORDER BY last_allocated_at DESC
+      `,
+      [driverId]
+    );
+
+    const totalAllocated = rows.reduce(
+      (sum, item) => sum + Number(item.total_allocated || 0),
+      0
+    );
+
+    const totalDelivered = rows.reduce(
+      (sum, item) => sum + Number(item.delivered || 0),
+      0
+    );
+
+    const totalPending = rows.reduce(
+      (sum, item) => sum + Number(item.pending || 0),
+      0
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        summary: {
+          totalAllocated,
+          delivered: totalDelivered,
+          pending: totalPending,
+        },
+
+        items: rows.map((item) => ({
+          productId: item.product_id,
+          productName: item.product_name,
+          productType: item.product_type,
+
+          totalAllocated: Number(item.total_allocated || 0),
+
+          delivered: Number(item.delivered || 0),
+
+          pending: Number(item.pending || 0),
+
+          lastAllocatedAt: item.last_allocated_at,
+
+          latestSaleId: item.latest_sale_id,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('getAllocatedCylinders error:', error);
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch allocated cylinders',
+    });
+  }
+};
+
+export const getDriverDeliveryDetails = async (req, res) => {
+  try {
+    const { saleId } = req.params;
+
+    if (!saleId) {
+      return res.status(400).json({
+        success: false,
+        message: "saleId is required",
+      });
+    }
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        s.id AS sale_id,
+        s.status AS sale_status,
+        s.total_amount,
+        s.payment_method,
+        s.created_at,
+        s.delivered_at,
+
+        u.name AS customer_name,
+        u.phone AS customer_phone,
+
+        a.address,
+
+        p.name AS product_name,
+        p.type AS product_type,
+        p.price AS product_price,
+
+        si.quantity,
+        si.delivered_qty,
+        si.empty_cylinder_qty,
+        si.empty_cylinder_status,
+        si.defective_qty,
+        si.price AS item_price,
+
+        pay.method AS payment_method_used,
+        pay.amount AS payment_amount,
+        pay.status AS payment_status
+
+      FROM sales s
+      LEFT JOIN users u ON u.id = s.customer_id
+      LEFT JOIN addresses a ON a.id = s.address_id
+      LEFT JOIN sales_items si ON si.sale_id = s.id
+      LEFT JOIN products p ON p.id = si.product_id
+      LEFT JOIN payments pay ON pay.sale_id = s.id
+
+      WHERE s.id = ?
+      LIMIT 1
+      `,
+      [saleId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery not found",
+      });
+    }
+
+    const row = rows[0];
+
+    return res.status(200).json({
+      success: true,
+      message: "Delivery details fetched successfully",
+      data: {
+        saleId: row.sale_id,
+        status: row.sale_status,
+        deliveredAt: row.delivered_at,
+        createdAt: row.created_at,
+
+        customer: {
+          name: row.customer_name || "N/A",
+          phone: row.customer_phone || "N/A",
+          address: row.address || "N/A",
+        },
+
+        sales: {
+          cylinderType:
+            row.product_type === "COMMERCIAL" ? "Commercial" : "Domestic",
+          productName: row.product_name || "N/A",
+          quantity: Number(row.quantity || 0),
+          deliveredQty: Number(row.delivered_qty || 0),
+          unitPrice: Number(row.item_price || row.product_price || 0),
+          total: Number(row.total_amount || 0),
+        },
+
+        returnCylinder: {
+          emptyCollected:
+            Number(row.empty_cylinder_qty || 0) > 0 ? "Yes" : "No",
+          emptyCount: Number(row.empty_cylinder_qty || 0),
+          emptyStatus: row.empty_cylinder_status || "PENDING",
+          defectiveQty: Number(row.defective_qty || 0),
+        },
+
+        payment: {
+          method: row.payment_method_used || row.payment_method || "N/A",
+          amount: Number(row.payment_amount || row.total_amount || 0),
+          status: row.payment_status || "PENDING",
+        },
+      },
+    });
+  } catch (error) {
+    console.error("getDriverDeliveryDetails error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch delivery details",
       error: error.message,
     });
   }

@@ -393,7 +393,10 @@ export const getStockOutLoads = async (req, res) => {
         COALESCE(st.reference_id, st.driver_id) AS load_id,
         DATE(st.created_at) AS load_date,
         MAX(st.created_at) AS created_at,
-        SUM(st.quantity) AS total_quantity,
+
+        SUM(CASE WHEN st.type = 'EMPTY_RETURN' THEN st.quantity ELSE 0 END) AS empty_quantity,
+        SUM(CASE WHEN st.type = 'PURCHASE_RETURN' AND st.is_defective = 1 THEN st.quantity ELSE 0 END) AS defective_quantity,
+
         MIN(st.isApproved) AS isApproved,
 
         d.id AS driver_id,
@@ -402,7 +405,11 @@ export const getStockOutLoads = async (req, res) => {
       FROM stock_transactions st
       LEFT JOIN drivers d ON d.id = st.driver_id
       LEFT JOIN users u ON u.id = d.user_id
-      WHERE st.type = 'EMPTY_RETURN'
+      WHERE st.type IN ('EMPTY_RETURN', 'PURCHASE_RETURN')
+        AND (
+          st.type = 'EMPTY_RETURN'
+          OR (st.type = 'PURCHASE_RETURN' AND st.is_defective = 1)
+        )
       GROUP BY
         COALESCE(st.reference_id, st.driver_id),
         DATE(st.created_at),
@@ -414,17 +421,25 @@ export const getStockOutLoads = async (req, res) => {
 
     return res.json({
       success: true,
-      data: rows.map((row, index) => ({
-        id: row.load_id,
-        load: `Load-${index + 1}`,
-        date: row.load_date,
-        driver_id: row.driver_id,
-        driver: row.driver_name || "Unknown Driver",
-        invoice: `DSP-${row.load_id}`,
-        vehicle: row.vehicle_number || "N/A",
-        qty: Number(row.total_quantity || 0),
-        status: Number(row.isApproved) === 1 ? "APPROVED" : "PENDING",
-      })),
+      data: rows.map((row, index) => {
+        const emptyQty = Number(row.empty_quantity || 0);
+        const defectiveQty = Number(row.defective_quantity || 0);
+        const totalQty = emptyQty + defectiveQty;
+
+        return {
+          id: row.load_id,
+          load: `Load-${index + 1}`,
+          date: row.load_date,
+          driver_id: row.driver_id,
+          driver: row.driver_name || "Unknown Driver",
+          invoice: `DSP-${row.load_id}`,
+          vehicle: row.vehicle_number || "N/A",
+          qty: totalQty,
+          empty_qty: emptyQty,
+          defective_qty: defectiveQty,
+          status: Number(row.isApproved) === 1 ? "APPROVED" : "PENDING",
+        };
+      }),
     });
   } catch (error) {
     console.error("getStockOutLoads error:", error);
@@ -448,14 +463,17 @@ export const createStockOutLoad = async (req, res) => {
       });
     }
 
-    const validItems = items.filter(
-      (item) => Number(item.product_id) && Number(item.quantity) > 0
-    );
+    const validItems = items.filter((item) => {
+      const emptyQty = Number(item.empty_quantity || 0);
+      const defectiveQty = Number(item.defective_quantity || 0);
+
+      return Number(item.product_id) && (emptyQty > 0 || defectiveQty > 0);
+    });
 
     if (!validItems.length) {
       return res.status(400).json({
         success: false,
-        message: "At least one quantity is required",
+        message: "At least one empty or defective quantity is required",
       });
     }
 
@@ -464,30 +482,66 @@ export const createStockOutLoad = async (req, res) => {
     const finalReferenceId = reference_id || Date.now();
 
     for (const item of validItems) {
-      await connection.execute(
-        `
-        INSERT INTO stock_transactions
-        (
-          product_id,
-          stock_area_id,
-          type,
-          quantity,
-          isApproved,
-          reference_id,
-          driver_id,
-          created_by
-        )
-        VALUES (?, ?, 'EMPTY_RETURN', ?, 0, ?, ?, ?)
-        `,
-        [
-          item.product_id,
-          1,
-          item.quantity,
-          finalReferenceId,
-          driver_id,
-          req.user?.id || null,
-        ]
-      );
+      const emptyQty = Number(item.empty_quantity || 0);
+      const defectiveQty = Number(item.defective_quantity || 0);
+
+      if (emptyQty > 0) {
+        await connection.execute(
+          `
+          INSERT INTO stock_transactions
+          (
+            product_id,
+            stock_area_id,
+            type,
+            quantity,
+            isApproved,
+            reference_id,
+            driver_id,
+            created_by,
+            is_defective,
+            stock_from
+          )
+          VALUES (?, ?, 'EMPTY_RETURN', ?, 0, ?, ?, ?, 0, 'driver')
+          `,
+          [
+            item.product_id,
+            1,
+            emptyQty,
+            finalReferenceId,
+            driver_id,
+            req.user?.id || null,
+          ]
+        );
+      }
+
+      if (defectiveQty > 0) {
+        await connection.execute(
+          `
+          INSERT INTO stock_transactions
+          (
+            product_id,
+            stock_area_id,
+            type,
+            quantity,
+            isApproved,
+            reference_id,
+            driver_id,
+            created_by,
+            is_defective,
+            stock_from
+          )
+          VALUES (?, ?, 'PURCHASE_RETURN', ?, 0, ?, ?, ?, 1, 'driver')
+          `,
+          [
+            item.product_id,
+            1,
+            defectiveQty,
+            finalReferenceId,
+            driver_id,
+            req.user?.id || null,
+          ]
+        );
+      }
     }
 
     await connection.commit();
@@ -506,6 +560,7 @@ export const createStockOutLoad = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to create stock out load",
+      error: error.message,
     });
   } finally {
     connection.release();
@@ -523,6 +578,8 @@ export const getStockOutLoadDetail = async (req, res) => {
         st.product_id,
         st.stock_area_id,
         st.quantity,
+        st.type AS transaction_type,
+        st.is_defective,
         st.isApproved,
         st.reference_id,
         st.driver_id,
@@ -539,8 +596,11 @@ export const getStockOutLoadDetail = async (req, res) => {
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN drivers d ON d.id = st.driver_id
       LEFT JOIN users u ON u.id = d.user_id
-      WHERE st.type = 'EMPTY_RETURN'
-        AND COALESCE(st.reference_id, st.driver_id) = ?
+      WHERE COALESCE(st.reference_id, st.driver_id) = ?
+        AND (
+          st.type = 'EMPTY_RETURN'
+          OR (st.type = 'PURCHASE_RETURN' AND st.is_defective = 1)
+        )
       ORDER BY st.id ASC
       `,
       [loadId]
@@ -553,7 +613,38 @@ export const getStockOutLoadDetail = async (req, res) => {
       });
     }
 
-    const totalQty = rows.reduce(
+    const emptyItems = rows
+      .filter((row) => row.transaction_type === "EMPTY_RETURN")
+      .map((row) => ({
+        transaction_id: row.id,
+        product_id: row.product_id,
+        item: row.product_name,
+        category: row.category_name,
+        type: row.product_type,
+        quantity: Number(row.quantity || 0),
+      }));
+
+    const defectiveItems = rows
+      .filter(
+        (row) =>
+          row.transaction_type === "PURCHASE_RETURN" &&
+          Number(row.is_defective) === 1
+      )
+      .map((row) => ({
+        transaction_id: row.id,
+        product_id: row.product_id,
+        item: row.product_name,
+        category: row.category_name,
+        type: row.product_type,
+        quantity: Number(row.quantity || 0),
+      }));
+
+    const emptyQty = emptyItems.reduce(
+      (sum, row) => sum + Number(row.quantity || 0),
+      0
+    );
+
+    const defectiveQty = defectiveItems.reduce(
       (sum, row) => sum + Number(row.quantity || 0),
       0
     );
@@ -568,16 +659,12 @@ export const getStockOutLoadDetail = async (req, res) => {
         vehicle: rows[0].vehicle_number || "N/A",
         depot: "HP Gas Depot - Sector 12",
         invoice: `DSP-${loadId}`,
-        qty: totalQty,
+        qty: emptyQty + defectiveQty,
+        empty_qty: emptyQty,
+        defective_qty: defectiveQty,
         status: Number(rows[0].isApproved) === 1 ? "APPROVED" : "PENDING",
-        items: rows.map((row) => ({
-          transaction_id: row.id,
-          product_id: row.product_id,
-          item: row.product_name,
-          category: row.category_name,
-          type: row.product_type,
-          quantity: Number(row.quantity || 0),
-        })),
+        items: emptyItems,
+        defective_items: defectiveItems,
       },
     });
   } catch (error) {
@@ -603,11 +690,16 @@ export const approveStockOutLoad = async (req, res) => {
         id,
         product_id,
         stock_area_id,
-        quantity
+        quantity,
+        type,
+        is_defective
       FROM stock_transactions
-      WHERE type = 'EMPTY_RETURN'
-        AND COALESCE(reference_id, driver_id) = ?
+      WHERE COALESCE(reference_id, driver_id) = ?
         AND isApproved = 0
+        AND (
+          type = 'EMPTY_RETURN'
+          OR (type = 'PURCHASE_RETURN' AND is_defective = 1)
+        )
       `,
       [loadId]
     );
@@ -621,28 +713,41 @@ export const approveStockOutLoad = async (req, res) => {
     }
 
     for (const row of rows) {
-      await connection.execute(
-        `
-        UPDATE stock
-        SET empty_quantity = COALESCE(empty_quantity, 0) + ?
-        WHERE product_id = ?
-          AND stock_area_id = ?
-        `,
-        [
-          Number(row.quantity || 0),
-          row.product_id,
-          row.stock_area_id || 1,
-        ]
-      );
+      if (row.type === "EMPTY_RETURN") {
+        await connection.execute(
+          `
+          UPDATE stock
+          SET empty_quantity = COALESCE(empty_quantity, 0) + ?
+          WHERE product_id = ?
+            AND stock_area_id = ?
+          `,
+          [Number(row.quantity || 0), row.product_id, row.stock_area_id || 1]
+        );
+      }
+
+      if (row.type === "PURCHASE_RETURN" && Number(row.is_defective) === 1) {
+        await connection.execute(
+          `
+          UPDATE stock
+          SET defective_quantity = COALESCE(defective_quantity, 0) + ?
+          WHERE product_id = ?
+            AND stock_area_id = ?
+          `,
+          [Number(row.quantity || 0), row.product_id, row.stock_area_id || 1]
+        );
+      }
     }
 
     await connection.execute(
       `
       UPDATE stock_transactions
       SET isApproved = 1
-      WHERE type = 'EMPTY_RETURN'
-        AND COALESCE(reference_id, driver_id) = ?
+      WHERE COALESCE(reference_id, driver_id) = ?
         AND isApproved = 0
+        AND (
+          type = 'EMPTY_RETURN'
+          OR (type = 'PURCHASE_RETURN' AND is_defective = 1)
+        )
       `,
       [loadId]
     );
@@ -655,7 +760,6 @@ export const approveStockOutLoad = async (req, res) => {
     });
   } catch (error) {
     await connection.rollback();
-
     console.error("approveStockOutLoad error:", error);
 
     return res.status(500).json({
@@ -666,7 +770,6 @@ export const approveStockOutLoad = async (req, res) => {
     connection.release();
   }
 };
-
 export const getDefectiveLoads = async (req, res) => {
   try {
     const [rows] = await db.execute(`
@@ -899,51 +1002,71 @@ export const getDeliveryDrivers = async (req, res) => {
         d.vehicle_number,
         u.name AS driver_name,
 
-        COALESCE(SUM(CASE 
-          WHEN ${dateCondition} AND si.status = 'ASSIGNED'
-          THEN si.quantity ELSE 0 END), 0) AS allocated,
+        COALESCE(SUM(
+          CASE
+            WHEN ${dateCondition}
+              AND s.status = 'ASSIGNED'
+              AND si.status = 'ASSIGNED'
+            THEN si.quantity
+            ELSE 0
+          END
+        ), 0) AS allocated,
 
-        COALESCE(SUM(CASE 
-          WHEN ${dateCondition} AND si.status = 'DELIVERED'
-          THEN si.delivered_qty ELSE 0 END), 0) AS delivered,
+        COALESCE(SUM(
+          CASE
+            WHEN ${dateCondition}
+              AND s.status = 'DELIVERED'
+              AND si.status = 'DELIVERED'
+            THEN COALESCE(si.delivered_qty, si.quantity, 0)
+            ELSE 0
+          END
+        ), 0) AS delivered,
 
-        COALESCE(SUM(CASE 
-          WHEN ${dateCondition}
-          THEN si.empty_cylinder_qty ELSE 0 END), 0) AS empty_collected,
-
-        COALESCE(SUM(CASE 
-          WHEN ${dateCondition} AND si.status = 'ASSIGNED'
-          THEN si.quantity ELSE 0 END), 0)
-        -
-        COALESCE(SUM(CASE 
-          WHEN ${dateCondition} AND si.status = 'DELIVERED'
-          THEN si.delivered_qty ELSE 0 END), 0) AS in_hand
+        COALESCE(SUM(
+          CASE
+            WHEN ${dateCondition}
+              AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
+            THEN COALESCE(si.empty_cylinder_qty, 0)
+            ELSE 0
+          END
+        ), 0) AS empty_collected
 
       FROM drivers d
       JOIN users u ON u.id = d.user_id
       LEFT JOIN sales s ON s.driver_id = d.id
       LEFT JOIN sales_items si ON si.sale_id = s.id
-      GROUP BY d.id, d.vehicle_number, u.name
+
+      GROUP BY
+        d.id,
+        d.vehicle_number,
+        u.name
+
       ORDER BY u.name ASC
     `);
 
     return res.json({
       success: true,
-      data: rows.map((row) => ({
-        id: row.driver_id,
-        name: row.driver_name,
-        vehicle: row.vehicle_number || "N/A",
-        allocated: Number(row.allocated || 0),
-        delivered: Number(row.delivered || 0),
-        empty: Number(row.empty_collected || 0),
-        inHand: Number(row.in_hand || 0),
-      })),
+      data: rows.map((row) => {
+        const allocated = Number(row.allocated || 0);
+        const delivered = Number(row.delivered || 0);
+
+        return {
+          id: row.driver_id,
+          name: row.driver_name,
+          vehicle: row.vehicle_number || "N/A",
+          allocated,
+          delivered,
+          empty: Number(row.empty_collected || 0),
+          inHand: Math.max(allocated - delivered, 0),
+        };
+      }),
     });
   } catch (error) {
     console.error("getDeliveryDrivers error:", error);
     return res.status(500).json({
       success: false,
       message: "Failed to fetch delivery drivers",
+      error: error.message,
     });
   }
 };
@@ -986,8 +1109,9 @@ export const createDriverAllocation = async (req, res) => {
         status,
         created_at,
         updated_at
+        assigned_at
       )
-      VALUES (?, ?, 'ONLINE', 'ASSIGNED', NOW(), NOW())
+      VALUES (?, ?, 'ONLINE', 'ASSIGNED', NOW(), NOW(), NOW())
       `,
       [driver_id, totalAmount]
     );
@@ -1126,8 +1250,8 @@ export const getReturnsToday = async (req, res) => {
             row.type === "EMPTY_RETURN"
               ? "empty"
               : Number(row.is_defective) === 1
-              ? "defective"
-              : "normal",
+                ? "defective"
+                : "normal",
         })),
       };
     });
@@ -1264,3 +1388,4 @@ export const approveReturnByCondition = async (req, res) => {
     connection.release();
   }
 };
+

@@ -3,7 +3,7 @@ import { getDriverDashboard } from "../controllers/driverController.js";
 import { createDriver, getDriverDeliveriesApp, markSaleAsDelivered, createDriverSale, getDriverCollectionSummary, 
     settleDriverCollectionsByMethod, getDriverInHandSummary, returnInHandToGodown, getDriverCollectionHistory,
 getDriverEmptyCylindersToday, getDriverEmptyCylindersHistory, approveTodayEmptyCylinderReturns, getDriverProfileHistory,
-searchProductsForDriverApp, findCustomerForDriverApp} from "../controllers/driverController.js";
+searchProductsForDriverApp, findCustomerForDriverApp, getAllocatedCylinders, getDriverDeliveryDetails} from "../controllers/driverController.js";
 
 const router = express.Router();
 
@@ -24,5 +24,7 @@ router.put("/:driverId/empty-cylinders/approve-today", approveTodayEmptyCylinder
 router.get("/:driverId/profile-history", getDriverProfileHistory);
 router.get("/products/search", searchProductsForDriverApp);
 router.get("/customers/find", findCustomerForDriverApp);
+router.get('/:driverId/allocated-cylinders', getAllocatedCylinders);
+router.get("/deliveries/:saleId/details", getDriverDeliveryDetails);
 
 export default router;
