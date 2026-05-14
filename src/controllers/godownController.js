@@ -1108,7 +1108,7 @@ export const createDriverAllocation = async (req, res) => {
         payment_method,
         status,
         created_at,
-        updated_at
+        updated_at,
         assigned_at
       )
       VALUES (?, ?, 'ONLINE', 'ASSIGNED', NOW(), NOW(), NOW())
