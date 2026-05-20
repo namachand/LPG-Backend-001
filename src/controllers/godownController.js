@@ -424,20 +424,25 @@ export const getStockOutLoads = async (req, res) => {
       data: rows.map((row, index) => {
         const emptyQty = Number(row.empty_quantity || 0);
         const defectiveQty = Number(row.defective_quantity || 0);
-        const totalQty = emptyQty + defectiveQty;
 
         return {
           id: row.load_id,
           load: `Load-${index + 1}`,
           date: row.load_date,
+          created_at: row.created_at,
           driver_id: row.driver_id,
           driver: row.driver_name || "Unknown Driver",
           invoice: `DSP-${row.load_id}`,
           vehicle: row.vehicle_number || "N/A",
-          qty: totalQty,
+          qty: emptyQty + defectiveQty,
           empty_qty: emptyQty,
           defective_qty: defectiveQty,
-          status: Number(row.isApproved) === 1 ? "APPROVED" : "PENDING",
+          status:
+            Number(row.isApproved) === 1
+              ? "APPROVED"
+              : Number(row.isApproved) === 2
+                ? "CANCELLED"
+                : "PENDING",
         };
       }),
     });
@@ -480,8 +485,11 @@ export const createStockOutLoad = async (req, res) => {
     await connection.beginTransaction();
 
     const finalReferenceId = reference_id || Date.now();
+    const stockAreaId = 1;
+    const createdBy = req.user?.id || null;
 
     for (const item of validItems) {
+      const productId = Number(item.product_id);
       const emptyQty = Number(item.empty_quantity || 0);
       const defectiveQty = Number(item.defective_quantity || 0);
 
@@ -501,16 +509,34 @@ export const createStockOutLoad = async (req, res) => {
             is_defective,
             stock_from
           )
-          VALUES (?, ?, 'EMPTY_RETURN', ?, 0, ?, ?, ?, 0, 'driver')
+          VALUES (?, ?, 'EMPTY_RETURN', ?, 1, ?, ?, ?, 0, 'godown')
           `,
           [
-            item.product_id,
-            1,
+            productId,
+            stockAreaId,
             emptyQty,
             finalReferenceId,
             driver_id,
-            req.user?.id || null,
+            createdBy,
           ]
+        );
+
+        await connection.execute(
+          `
+          INSERT INTO stock
+          (
+            product_id,
+            stock_area_id,
+            quantity,
+            empty_quantity,
+            defective_quantity
+          )
+          VALUES (?, ?, 0, ?, 0)
+          ON DUPLICATE KEY UPDATE
+            empty_quantity = COALESCE(empty_quantity, 0) + VALUES(empty_quantity),
+            updated_at = NOW()
+          `,
+          [productId, stockAreaId, emptyQty]
         );
       }
 
@@ -530,16 +556,34 @@ export const createStockOutLoad = async (req, res) => {
             is_defective,
             stock_from
           )
-          VALUES (?, ?, 'PURCHASE_RETURN', ?, 0, ?, ?, ?, 1, 'driver')
+          VALUES (?, ?, 'PURCHASE_RETURN', ?, 1, ?, ?, ?, 1, 'godown')
           `,
           [
-            item.product_id,
-            1,
+            productId,
+            stockAreaId,
             defectiveQty,
             finalReferenceId,
             driver_id,
-            req.user?.id || null,
+            createdBy,
           ]
+        );
+
+        await connection.execute(
+          `
+          INSERT INTO stock
+          (
+            product_id,
+            stock_area_id,
+            quantity,
+            empty_quantity,
+            defective_quantity
+          )
+          VALUES (?, ?, 0, 0, ?)
+          ON DUPLICATE KEY UPDATE
+            defective_quantity = COALESCE(defective_quantity, 0) + VALUES(defective_quantity),
+            updated_at = NOW()
+          `,
+          [productId, stockAreaId, defectiveQty]
         );
       }
     }
@@ -548,7 +592,7 @@ export const createStockOutLoad = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: "Stock out load created successfully",
+      message: "Stock out load created and approved successfully",
       data: {
         reference_id: finalReferenceId,
       },
@@ -662,7 +706,12 @@ export const getStockOutLoadDetail = async (req, res) => {
         qty: emptyQty + defectiveQty,
         empty_qty: emptyQty,
         defective_qty: defectiveQty,
-        status: Number(rows[0].isApproved) === 1 ? "APPROVED" : "PENDING",
+        status:
+          Number(rows[0].isApproved) === 1
+            ? "APPROVED"
+            : Number(rows[0].isApproved) === 2
+              ? "CANCELLED"
+              : "PENDING",
         items: emptyItems,
         defective_items: defectiveItems,
       },
@@ -1389,3 +1438,414 @@ export const approveReturnByCondition = async (req, res) => {
   }
 };
 
+
+export const cancelStockOutLoad = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const { loadId } = req.params;
+
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute(
+      `
+      SELECT
+        id,
+        product_id,
+        stock_area_id,
+        quantity,
+        type,
+        is_defective,
+        isApproved
+      FROM stock_transactions
+      WHERE COALESCE(reference_id, driver_id) = ?
+        AND isApproved = 1
+        AND (
+          type = 'EMPTY_RETURN'
+          OR (type = 'PURCHASE_RETURN' AND is_defective = 1)
+        )
+      `,
+      [loadId]
+    );
+
+    if (!rows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "No approved stock out load found to cancel",
+      });
+    }
+
+    for (const row of rows) {
+      const productId = Number(row.product_id);
+      const stockAreaId = Number(row.stock_area_id || 1);
+      const qty = Number(row.quantity || 0);
+
+      if (row.type === "EMPTY_RETURN") {
+        await connection.execute(
+          `
+          UPDATE stock
+          SET
+            empty_quantity = GREATEST(COALESCE(empty_quantity, 0) - ?, 0),
+            updated_at = NOW()
+          WHERE product_id = ?
+            AND stock_area_id = ?
+          `,
+          [qty, productId, stockAreaId]
+        );
+      }
+
+      if (row.type === "PURCHASE_RETURN" && Number(row.is_defective) === 1) {
+        await connection.execute(
+          `
+          UPDATE stock
+          SET
+            defective_quantity = GREATEST(COALESCE(defective_quantity, 0) - ?, 0),
+            updated_at = NOW()
+          WHERE product_id = ?
+            AND stock_area_id = ?
+          `,
+          [qty, productId, stockAreaId]
+        );
+      }
+    }
+
+    await connection.execute(
+      `
+      UPDATE stock_transactions
+      SET isApproved = 2
+      WHERE COALESCE(reference_id, driver_id) = ?
+        AND isApproved = 1
+        AND (
+          type = 'EMPTY_RETURN'
+          OR (type = 'PURCHASE_RETURN' AND is_defective = 1)
+        )
+      `,
+      [loadId]
+    );
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: "Stock out load cancelled successfully",
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("cancelStockOutLoad error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to cancel stock out load",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getCommercialDriverBookings = async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim();
+    const status = String(req.query.status || "ALL").toUpperCase();
+
+    const params = [];
+    let searchFilter = "";
+    let statusFilter = "";
+
+    if (search) {
+      searchFilter = `
+        AND (
+          du.name LIKE ?
+          OR cu.name LIKE ?
+          OR CAST(s.id AS CHAR) LIKE ?
+        )
+      `;
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    if (status === "PENDING") {
+      statusFilter = `AND st.isApproved = 0`;
+    }
+
+    if (status === "DONE") {
+      statusFilter = `AND st.isApproved = 1`;
+    }
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        s.id AS booking_id,
+        s.status AS booking_status,
+        s.total_amount,
+        s.created_at,
+
+        d.id AS driver_id,
+        d.vehicle_number,
+        du.name AS driver_name,
+        du.phone AS driver_phone,
+
+        cu.name AS customer_name,
+        cu.phone AS customer_phone,
+        a.address,
+
+        st.id AS stock_transaction_id,
+        st.product_id,
+        st.quantity,
+        st.isApproved,
+
+        p.name AS product_name,
+        p.type AS product_type,
+        p.price AS product_price
+      FROM stock_transactions st
+      INNER JOIN sales s
+        ON s.id = st.reference_id
+      INNER JOIN drivers d
+        ON d.id = st.driver_id
+      INNER JOIN users du
+        ON du.id = d.user_id
+      INNER JOIN users cu
+        ON cu.id = s.customer_id
+      LEFT JOIN addresses a
+        ON a.id = s.address_id
+      INNER JOIN products p
+        ON p.id = st.product_id
+      WHERE s.sale_type = 'BOOKING'
+        AND p.type = 'COMMERCIAL'
+        AND st.type = 'BOOKING_ADD'
+        AND st.stock_from = 'godown'
+        ${searchFilter}
+        ${statusFilter}
+      ORDER BY du.name ASC, s.created_at DESC, s.id DESC
+      `,
+      params
+    );
+
+    const bookingMap = new Map();
+
+    rows.forEach((row) => {
+      const bookingId = Number(row.booking_id);
+
+      if (!bookingMap.has(bookingId)) {
+        bookingMap.set(bookingId, {
+          bookingId,
+          status: row.booking_status,
+          isApproved: Number(row.isApproved || 0),
+          totalAmount: Number(row.total_amount || 0),
+          createdAt: row.created_at,
+          driverId: Number(row.driver_id),
+          driverName: row.driver_name || "Unknown Driver",
+          driverPhone: row.driver_phone || "",
+          vehicleNumber: row.vehicle_number || "N/A",
+          customerName: row.customer_name || "Unknown Customer",
+          customerPhone: row.customer_phone || "",
+          address: row.address || "",
+          totalQty: 0,
+          items: [],
+        });
+      }
+
+      const booking = bookingMap.get(bookingId);
+
+      booking.totalQty += Number(row.quantity || 0);
+
+      booking.items.push({
+        stockTransactionId: Number(row.stock_transaction_id),
+        productId: Number(row.product_id),
+        productName: row.product_name,
+        productType: row.product_type,
+        quantity: Number(row.quantity || 0),
+        price: Number(row.product_price || 0),
+      });
+    });
+
+    const bookings = Array.from(bookingMap.values());
+    const driverMap = new Map();
+
+    bookings.forEach((booking) => {
+      if (!driverMap.has(booking.driverId)) {
+        driverMap.set(booking.driverId, {
+          driverId: booking.driverId,
+          driverName: booking.driverName,
+          driverPhone: booking.driverPhone,
+          vehicleNumber: booking.vehicleNumber,
+          totalBookings: 0,
+          totalCylinders: 0,
+          openBookings: 0,
+          bookings: [],
+        });
+      }
+
+      const driver = driverMap.get(booking.driverId);
+      driver.totalBookings += 1;
+      driver.totalCylinders += booking.totalQty;
+
+      if (Number(booking.isApproved) === 0) {
+        driver.openBookings += 1;
+      }
+
+      driver.bookings.push(booking);
+    });
+
+    const drivers = Array.from(driverMap.values());
+
+    return res.json({
+      success: true,
+      data: {
+        summary: {
+          bookings: bookings.length,
+          cylinders: bookings.reduce((sum, item) => sum + item.totalQty, 0),
+          drivers: drivers.length,
+        },
+        drivers,
+      },
+    });
+  } catch (error) {
+    console.error("getCommercialDriverBookings error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch commercial bookings",
+      error: error.message,
+    });
+  }
+};
+
+export const approveCommercialDriverBooking = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const bookingId = Number(req.params.bookingId);
+
+    if (!bookingId) {
+      return res.status(400).json({
+        success: false,
+        message: "bookingId is required",
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [bookingRows] = await connection.execute(
+      `
+      SELECT id, status
+      FROM sales
+      WHERE id = ?
+        AND sale_type = 'BOOKING'
+      FOR UPDATE
+      `,
+      [bookingId]
+    );
+
+    if (!bookingRows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    const [transactions] = await connection.execute(
+      `
+      SELECT
+        st.id,
+        st.product_id,
+        st.stock_area_id,
+        st.quantity,
+        COALESCE(s.quantity, 0) AS available_qty
+      FROM stock_transactions st
+      LEFT JOIN stock s
+        ON s.product_id = st.product_id
+       AND s.stock_area_id = st.stock_area_id
+      WHERE st.reference_id = ?
+        AND st.type = 'BOOKING_ADD'
+        AND st.stock_from = 'godown'
+        AND st.isApproved = 0
+      FOR UPDATE
+      `,
+      [bookingId]
+    );
+
+    if (!transactions.length) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "No pending booking stock transaction found",
+      });
+    }
+
+    for (const item of transactions) {
+      const requiredQty = Number(item.quantity || 0);
+      const availableQty = Number(item.available_qty || 0);
+
+      if (availableQty < requiredQty) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for product ${item.product_id}. Available ${availableQty}, required ${requiredQty}`,
+        });
+      }
+    }
+
+    for (const item of transactions) {
+      await connection.execute(
+        `
+        UPDATE stock
+        SET quantity = GREATEST(COALESCE(quantity, 0) - ?, 0),
+            updated_at = NOW()
+        WHERE product_id = ?
+          AND stock_area_id = ?
+        `,
+        [Number(item.quantity || 0), item.product_id, item.stock_area_id || 1]
+      );
+    }
+
+    await connection.execute(
+      `
+      UPDATE stock_transactions
+      SET isApproved = 1
+      WHERE reference_id = ?
+        AND type = 'BOOKING_ADD'
+        AND stock_from = 'godown'
+      `,
+      [bookingId]
+    );
+
+    await connection.execute(
+      `
+      UPDATE sales
+      SET status = 'ASSIGNED',
+          assigned_at = NOW(),
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [bookingId]
+    );
+
+    await connection.execute(
+      `
+      UPDATE sales_items
+      SET status = 'ASSIGNED'
+      WHERE sale_id = ?
+      `,
+      [bookingId]
+    );
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: "Booking approved successfully",
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("approveCommercialDriverBooking error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to approve booking",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};

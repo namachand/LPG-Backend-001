@@ -3,7 +3,9 @@ import { getDriverDashboard } from "../controllers/driverController.js";
 import { createDriver, getDriverDeliveriesApp, markSaleAsDelivered, createDriverSale, getDriverCollectionSummary, 
     settleDriverCollectionsByMethod, getDriverInHandSummary, returnInHandToGodown, getDriverCollectionHistory,
 getDriverEmptyCylindersToday, getDriverEmptyCylindersHistory, approveTodayEmptyCylinderReturns, getDriverProfileHistory,
-searchProductsForDriverApp, findCustomerForDriverApp, getAllocatedCylinders, getDriverDeliveryDetails} from "../controllers/driverController.js";
+searchProductsForDriverApp, findCustomerForDriverApp, getAllocatedCylinders, getDriverDeliveryDetails, createInHandRequest,
+createEmptyCylinderReturnRequest, getAllocatedBatchDetail, getAvailableBatchesForDriver, findBookingCustomer,
+createBookingCustomer, createDriverBooking, getDriverBookings, cancelDriverBooking} from "../controllers/driverController.js";
 
 const router = express.Router();
 
@@ -26,5 +28,14 @@ router.get("/products/search", searchProductsForDriverApp);
 router.get("/customers/find", findCustomerForDriverApp);
 router.get('/:driverId/allocated-cylinders', getAllocatedCylinders);
 router.get("/deliveries/:saleId/details", getDriverDeliveryDetails);
+router.post("/in-hand/request", createInHandRequest);
+router.post("/empty-cylinders/return-request", createEmptyCylinderReturnRequest);
+router.get("/:driverId/allocated-batches/:allocationSalesItemId",getAllocatedBatchDetail);
+router.get("/:driverId/available-batches",getAvailableBatchesForDriver);
+router.get("/bookings/customer", findBookingCustomer);
+router.post("/bookings/customer", createBookingCustomer);
+router.post("/bookings", createDriverBooking);
+router.get("/:driverId/bookings", getDriverBookings);
+router.put("/bookings/:saleId/cancel", cancelDriverBooking);
 
 export default router;

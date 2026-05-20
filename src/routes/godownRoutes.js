@@ -16,6 +16,9 @@ import {
     createDriverAllocation,
     getReturnsToday,
     approveReturnByCondition,
+    cancelStockOutLoad,
+    getCommercialDriverBookings,
+    approveCommercialDriverBooking
 } from "../controllers/godownController.js";
 
 const router = express.Router();
@@ -38,5 +41,8 @@ router.get("/delivery-drivers", getDeliveryDrivers);
 router.post("/driver-allocation", createDriverAllocation);
 router.get("/returns-today", getReturnsToday);
 router.put("/returns-today/approve", approveReturnByCondition);
+router.put("/stock-out-loads/:loadId/cancel", cancelStockOutLoad);
+router.get("/commercial-bookings", getCommercialDriverBookings);
+router.put("/commercial-bookings/:bookingId/approve", approveCommercialDriverBooking);
 
 export default router;
