@@ -1,0 +1,46 @@
+ALTER TABLE `sales`
+  ADD COLUMN `sales_from` enum('DRIVER','CASHIER') NOT NULL DEFAULT 'DRIVER' AFTER `sale_type`;
+
+UPDATE `sales`
+  SET `sales_from` = 'DRIVER'
+  WHERE `sales_from` IS NULL;
+
+-- Add updated_at to users table (used by multiple controllers)
+ALTER TABLE `users`
+  ADD COLUMN `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER `created_at`;
+
+-- Add updated_at to addresses table (controllers insert/update this column)
+ALTER TABLE `addresses`
+  ADD COLUMN `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER `created_at`;
+
+-- Create table for office expenses (recorded by admins/cashiers)
+CREATE TABLE IF NOT EXISTS `office_expenses` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `admin_id` int DEFAULT NULL,
+  `category` enum('Salary','Utility','Repair','Stationery','Travel','Other') NOT NULL,
+  `amount` decimal(10,2) NOT NULL,
+  `description` text,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_office_expenses_admin` (`admin_id`),
+  CONSTRAINT `office_expenses_ibfk_1` FOREIGN KEY (`admin_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Create table for other payment records saved by cashiers
+CREATE TABLE IF NOT EXISTS `other_payments` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `cashier_id` int DEFAULT NULL,
+  `customer_name` varchar(255) NOT NULL,
+  `method` enum('UPI','BANK_TRANSFER','CARD') NOT NULL,
+  `transfer_id` varchar(255) DEFAULT NULL,
+  `amount` decimal(10,2) NOT NULL,
+  `note` text,
+  `status` enum('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_other_payments_cashier` (`cashier_id`),
+  KEY `idx_other_payments_method` (`method`),
+  CONSTRAINT `other_payments_ibfk_1` FOREIGN KEY (`cashier_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
