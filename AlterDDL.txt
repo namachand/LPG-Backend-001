@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS `office_expenses` (
   `category` enum('Salary','Utility','Repair','Stationery','Travel','Other') NOT NULL,
   `amount` decimal(10,2) NOT NULL,
   `description` text,
+  `status` enum('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -43,4 +44,259 @@ CREATE TABLE IF NOT EXISTS `other_payments` (
   KEY `idx_other_payments_cashier` (`cashier_id`),
   KEY `idx_other_payments_method` (`method`),
   CONSTRAINT `other_payments_ibfk_1` FOREIGN KEY (`cashier_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Add purchase manager as a user role
+ALTER TABLE `users`
+  MODIFY COLUMN `role` enum('OWNER','DRIVER','CASHIER','GODOWN_MANAGER','PURCHASE_MANAGER','SUPPORT','CUSTOMER') DEFAULT NULL;
+
+-- Job assignment fields (nullable for backward compatibility)
+ALTER TABLE `users`
+  ADD COLUMN `aadhaar_number` varchar(20) DEFAULT NULL AFTER `role`,
+  ADD COLUMN `bank_account_holder_name` varchar(150) DEFAULT NULL AFTER `aadhaar_number`,
+  ADD COLUMN `bank_name` varchar(150) DEFAULT NULL AFTER `bank_account_holder_name`,
+  ADD COLUMN `bank_account_number` varchar(50) DEFAULT NULL AFTER `bank_name`,
+  ADD COLUMN `bank_ifsc_code` varchar(20) DEFAULT NULL AFTER `bank_account_number`;
+
+CREATE TABLE IF NOT EXISTS `user_job_profiles` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `display_role` enum('GODOWN_MANAGER','PURCHASE_DRIVER','DELIVERY_AGENT','CASHIER','CUSTOMER_SERVICE','MANAGER') NOT NULL,
+  `age` int DEFAULT NULL,
+  `date_of_birth` date DEFAULT NULL,
+  `gender` enum('MALE','FEMALE','OTHER') DEFAULT NULL,
+  `address` text,
+  `vehicle_number` varchar(60) DEFAULT NULL,
+  `vehicle_type` varchar(60) DEFAULT NULL,
+  `driving_license_number` varchar(120) DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_user_job_profiles_user` (`user_id`),
+  CONSTRAINT `user_job_profiles_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+ALTER TABLE `expenses`
+  ADD COLUMN `bill_url` text AFTER `amount`;
+
+-- Store cashier payment details for approved driver expense requests
+ALTER TABLE `expenses`
+  ADD COLUMN `payment_mode` varchar(30) DEFAULT NULL AFTER `status`,
+  ADD COLUMN `payment_reference` varchar(120) DEFAULT NULL AFTER `payment_mode`;
+
+CREATE TABLE IF NOT EXISTS `purchase_trips` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `purchase_manager_id` int NOT NULL,
+  `stock_area_id` int DEFAULT NULL,
+  `odometer_reading` int NOT NULL,
+  `end_odometer_reading` int DEFAULT NULL,
+  `odometer_image_url` text,
+  `end_odometer_image_url` text,
+  `status` enum('IN_PROGRESS','WAITING_APPROVAL','APPROVED','COMPLETED','CANCELLED') NOT NULL DEFAULT 'IN_PROGRESS',
+  `started_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `ended_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_purchase_trips_manager` (`purchase_manager_id`),
+  KEY `idx_purchase_trips_stock_area` (`stock_area_id`),
+  CONSTRAINT `purchase_trips_ibfk_1` FOREIGN KEY (`purchase_manager_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `purchase_trips_ibfk_2` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS `purchase_loads` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `trip_id` int NOT NULL,
+  `created_by` int NOT NULL,
+  `stock_area_id` int DEFAULT NULL,
+  `product_type` enum('DOMESTIC','COMMERCIAL','MIXED') NOT NULL,
+  `invoice_url` text,
+  `invoice_source` enum('CAMERA','GALLERY') DEFAULT NULL,
+  `total_quantity` int NOT NULL DEFAULT '0',
+  `status` enum('DRAFT','PENDING','APPROVED','CANCELLED') NOT NULL DEFAULT 'DRAFT',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_purchase_loads_trip` (`trip_id`),
+  KEY `idx_purchase_loads_creator` (`created_by`),
+  KEY `idx_purchase_loads_stock_area` (`stock_area_id`),
+  CONSTRAINT `purchase_loads_ibfk_1` FOREIGN KEY (`trip_id`) REFERENCES `purchase_trips` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `purchase_loads_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`),
+  CONSTRAINT `purchase_loads_ibfk_3` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS `purchase_load_items` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `load_id` int NOT NULL,
+  `product_id` int NOT NULL,
+  `quantity` int NOT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_purchase_load_items_load` (`load_id`),
+  KEY `idx_purchase_load_items_product` (`product_id`),
+  CONSTRAINT `purchase_load_items_ibfk_1` FOREIGN KEY (`load_id`) REFERENCES `purchase_loads` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `purchase_load_items_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Normalize stock_transactions approval states for purchase flow:
+-- 0 = IN_PROGRESS, 2 = WAITING_APPROVAL, 1 = APPROVED
+UPDATE stock_transactions st
+JOIN purchase_loads pl ON pl.id = st.reference_id
+SET st.isApproved = 2
+WHERE st.type = 'PURCHASE'
+  AND st.isApproved = 0
+  AND pl.status = 'PENDING';
+
+-- Keep column numeric and explicitly allow tri-state values.
+ALTER TABLE `stock_transactions`
+  MODIFY COLUMN `isApproved` tinyint unsigned NOT NULL DEFAULT 0;
+
+ALTER TABLE `purchase_trips`
+  ADD COLUMN `end_odometer_reading` int DEFAULT NULL AFTER `odometer_reading`;
+
+ALTER TABLE `purchase_trips`
+  ADD COLUMN `end_odometer_image_url` text AFTER `odometer_image_url`;
+
+ALTER TABLE `purchase_loads`
+  MODIFY COLUMN `product_type` enum('DOMESTIC','COMMERCIAL','MIXED') NOT NULL;
+
+CREATE TABLE IF NOT EXISTS `auth_otp_logs` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int DEFAULT NULL,
+  `identifier` varchar(120) NOT NULL,
+  `otp` varchar(10) NOT NULL,
+  `stage` enum('REQUEST','VERIFY') NOT NULL DEFAULT 'VERIFY',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_auth_otp_logs_user` (`user_id`),
+  KEY `idx_auth_otp_logs_identifier` (`identifier`),
+  CONSTRAINT `fk_auth_otp_logs_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Customer complaints table for dedicated complaints dashboard
+CREATE TABLE IF NOT EXISTS `customer_complaints` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `customer_id` int NOT NULL,
+  `issue_type` enum('LEAKAGE','LATE_DELIVERY','BILLING','REGULATOR','OTHER') NOT NULL,
+  `description` text NOT NULL,
+  `priority` enum('LOW','MEDIUM','HIGH') NOT NULL DEFAULT 'MEDIUM',
+  `approval_status` enum('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING',
+  `status` enum('OPEN','IN_PROGRESS','RESOLVED') NOT NULL DEFAULT 'OPEN',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_customer_complaints_customer` (`customer_id`),
+  KEY `idx_customer_complaints_approval` (`approval_status`),
+  CONSTRAINT `fk_customer_complaints_customer` FOREIGN KEY (`customer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- New connection requests sent to cashier
+CREATE TABLE IF NOT EXISTS `customer_new_connections` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `product_details` varchar(255) DEFAULT NULL,
+  `id_proof_details` varchar(255) DEFAULT NULL,
+  `deposit_amount` decimal(10,2) NOT NULL,
+  `gst_amount` decimal(10,2) NOT NULL,
+  `total_amount` decimal(10,2) NOT NULL,
+  `payment_status` enum('PENDING_PAYMENT','PAID') NOT NULL DEFAULT 'PENDING_PAYMENT',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_customer_new_connections_user` (`user_id`),
+  KEY `idx_customer_new_connections_status` (`payment_status`),
+  CONSTRAINT `fk_customer_new_connections_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Customer transfer requests (pending approval flow; no ownership mutation on create)
+CREATE TABLE IF NOT EXISTS `customer_connection_transfers` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `existing_customer_id` int NOT NULL,
+  `new_customer_id` int NOT NULL,
+  `product_details_snapshot` text,
+  `deposit_liability` decimal(10,2) NOT NULL DEFAULT '0.00',
+  `reason` text NOT NULL,
+  `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL,
+  `payment_reference_id` varchar(120) DEFAULT NULL,
+  `cashier_remarks` text,
+  `status` enum('PENDING_MANAGER','APPROVED','REJECTED') NOT NULL DEFAULT 'PENDING_MANAGER',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_customer_transfer_existing` (`existing_customer_id`),
+  KEY `idx_customer_transfer_new` (`new_customer_id`),
+  KEY `idx_customer_transfer_status` (`status`),
+  CONSTRAINT `fk_customer_transfer_existing` FOREIGN KEY (`existing_customer_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `fk_customer_transfer_new` FOREIGN KEY (`new_customer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+ALTER TABLE `customer_connection_transfers`
+  ADD COLUMN IF NOT EXISTS `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER `reason`,
+  ADD COLUMN IF NOT EXISTS `payment_reference_id` varchar(120) DEFAULT NULL AFTER `payment_mode`,
+  ADD COLUMN IF NOT EXISTS `cashier_remarks` text AFTER `payment_reference_id`;
+
+-- Name change requests pending approval before updating users.name
+CREATE TABLE IF NOT EXISTS `customer_name_change_requests` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `customer_id` int NOT NULL,
+  `old_name_snapshot` varchar(100) NOT NULL,
+  `new_name_requested` varchar(100) NOT NULL,
+  `service_fee` decimal(10,2) NOT NULL DEFAULT '0.00',
+  `document_url` text,
+  `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL,
+  `payment_reference_id` varchar(120) DEFAULT NULL,
+  `cashier_remarks` text,
+  `status` enum('PENDING','APPROVED','REJECTED') NOT NULL DEFAULT 'PENDING',
+  `approved_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_name_change_customer` (`customer_id`),
+  KEY `idx_name_change_status` (`status`),
+  CONSTRAINT `fk_name_change_customer` FOREIGN KEY (`customer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+ALTER TABLE `customer_name_change_requests`
+  ADD COLUMN IF NOT EXISTS `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER `document_url`,
+  ADD COLUMN IF NOT EXISTS `payment_reference_id` varchar(120) DEFAULT NULL AFTER `payment_mode`,
+  ADD COLUMN IF NOT EXISTS `cashier_remarks` text AFTER `payment_reference_id`;
+
+-- PR penalty records for customer accounts
+CREATE TABLE IF NOT EXISTS `customer_pr_penalties` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `customer_id` int NOT NULL,
+  `consumer_number_snapshot` varchar(20) NOT NULL,
+  `customer_name_snapshot` varchar(120) NOT NULL,
+  `penalty_reason` varchar(255) NOT NULL,
+  `penalty_amount` decimal(10,2) NOT NULL,
+  `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL,
+  `payment_reference_id` varchar(120) DEFAULT NULL,
+  `cashier_remarks` text,
+  `payment_status` enum('UNPAID','PAID') NOT NULL DEFAULT 'UNPAID',
+  `paid_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_customer_pr_penalties_customer` (`customer_id`),
+  KEY `idx_customer_pr_penalties_status` (`payment_status`),
+  CONSTRAINT `fk_customer_pr_penalties_customer` FOREIGN KEY (`customer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+ALTER TABLE `customer_pr_penalties`
+  ADD COLUMN IF NOT EXISTS `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER `penalty_amount`,
+  ADD COLUMN IF NOT EXISTS `payment_reference_id` varchar(120) DEFAULT NULL AFTER `payment_mode`,
+  ADD COLUMN IF NOT EXISTS `cashier_remarks` text AFTER `payment_reference_id`;
+
+-- OTP entered by driver while creating sales
+CREATE TABLE IF NOT EXISTS `driver_sale_otps` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `sale_id` int NOT NULL,
+  `otp` varchar(10) NOT NULL,
+  `status` enum('PENDING','SENT') NOT NULL DEFAULT 'PENDING',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_driver_sale_otps_sale` (`sale_id`),
+  KEY `idx_driver_sale_otps_status` (`status`),
+  CONSTRAINT `fk_driver_sale_otps_sale` FOREIGN KEY (`sale_id`) REFERENCES `sales` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

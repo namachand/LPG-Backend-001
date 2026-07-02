@@ -1,0 +1,310 @@
+import db from "../config/db.js";
+
+const parseConsumerNumberToId = (consumerNumber = "") => {
+  const digits = String(consumerNumber).replace(/\D/g, "");
+  if (!digits) {
+    return null;
+  }
+  return Number.parseInt(digits, 10);
+};
+
+const lookupCustomer = async (connection, { consumerNumber, existingName }) => {
+  const consumerId = parseConsumerNumberToId(consumerNumber);
+
+  if (consumerId) {
+    const [rows] = await connection.query(
+      `
+      SELECT
+        u.id,
+        u.name,
+        u.phone,
+        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        COALESCE(a.address, '') AS address
+      FROM users u
+      LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
+      WHERE u.id = ? AND u.role = 'CUSTOMER'
+      LIMIT 1
+      `,
+      [consumerId]
+    );
+
+    return rows[0] || null;
+  }
+
+  if (!String(existingName || "").trim()) {
+    return null;
+  }
+
+  const [rows] = await connection.query(
+    `
+    SELECT
+      u.id,
+      u.name,
+      u.phone,
+      CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+      COALESCE(a.address, '') AS address
+    FROM users u
+    LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
+    WHERE u.role = 'CUSTOMER' AND u.name LIKE ?
+    ORDER BY u.created_at DESC, u.id DESC
+    LIMIT 1
+    `,
+    [`%${String(existingName).trim()}%`]
+  );
+
+  return rows[0] || null;
+};
+
+export const lookupNameChangeCustomer = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const consumerNumber = String(req.query.consumerNumber || "").trim();
+    const existingName = String(req.query.existingName || "").trim();
+
+    if (!consumerNumber && !existingName) {
+      return res.status(400).json({
+        success: false,
+        message: "consumerNumber or existingName is required",
+      });
+    }
+
+    const customer = await lookupCustomer(connection, { consumerNumber, existingName });
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Existing customer not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        id: Number(customer.id),
+        name: customer.name,
+        phone: customer.phone,
+        consumerNumber: customer.consumer_number,
+        address: customer.address,
+      },
+    });
+  } catch (error) {
+    console.error("lookupNameChangeCustomer error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to lookup customer",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const createNameChangeRequest = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const { customerId, newName, serviceFee, documentUrl } = req.body || {};
+
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        message: "customerId is required",
+      });
+    }
+
+    if (!String(newName || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "newName is required",
+      });
+    }
+
+    const amount = Number(serviceFee);
+    if (!Number.isFinite(amount) || amount < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "serviceFee must be a valid amount",
+      });
+    }
+
+    const [customerRows] = await connection.query(
+      "SELECT id, name FROM users WHERE id = ? AND role = 'CUSTOMER' LIMIT 1",
+      [Number(customerId)]
+    );
+
+    if (!customerRows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    const [existingPendingRows] = await connection.query(
+      "SELECT id FROM customer_name_change_requests WHERE customer_id = ? AND status = 'PENDING' LIMIT 1",
+      [Number(customerId)]
+    );
+
+    if (existingPendingRows.length) {
+      return res.status(409).json({
+        success: false,
+        message: "A pending name change request already exists for this customer",
+      });
+    }
+
+    const [result] = await connection.query(
+      `
+      INSERT INTO customer_name_change_requests (
+        customer_id,
+        old_name_snapshot,
+        new_name_requested,
+        service_fee,
+        document_url,
+        status
+      ) VALUES (?, ?, ?, ?, ?, 'PENDING')
+      `,
+      [
+        Number(customerId),
+        customerRows[0].name,
+        String(newName).trim(),
+        Number(amount.toFixed(2)),
+        String(documentUrl || "").trim() || null,
+      ]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Name change request created successfully",
+      data: {
+        id: Number(result.insertId),
+        status: "PENDING",
+      },
+    });
+  } catch (error) {
+    console.error("createNameChangeRequest error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create name change request",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getRecentNameChangeRequests = async (_req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const [rows] = await connection.query(
+      `
+      SELECT
+        r.id,
+        r.customer_id,
+        u.name AS existing_name,
+        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        r.old_name_snapshot,
+        r.new_name_requested,
+        r.service_fee,
+        r.document_url,
+        r.status,
+        DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+      FROM customer_name_change_requests r
+      INNER JOIN users u ON u.id = r.customer_id
+      ORDER BY r.created_at DESC, r.id DESC
+      LIMIT 8
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+    });
+  } catch (error) {
+    console.error("getRecentNameChangeRequests error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch name change requests",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const approveNameChangeRequest = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const requestId = Number(req.params.id);
+
+    if (!requestId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid request id is required",
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [requestRows] = await connection.query(
+      `
+      SELECT id, customer_id, new_name_requested, status
+      FROM customer_name_change_requests
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [requestId]
+    );
+
+    if (!requestRows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Name change request not found",
+      });
+    }
+
+    const requestRow = requestRows[0];
+
+    if (requestRow.status !== "PENDING") {
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: "Only pending requests can be approved",
+      });
+    }
+
+    await connection.query(
+      "UPDATE users SET name = ? WHERE id = ? AND role = 'CUSTOMER'",
+      [requestRow.new_name_requested, requestRow.customer_id]
+    );
+
+    await connection.query(
+      `
+      UPDATE customer_name_change_requests
+      SET status = 'APPROVED', approved_at = NOW()
+      WHERE id = ?
+      `,
+      [requestId]
+    );
+
+    await connection.commit();
+
+    return res.status(200).json({
+      success: true,
+      message: "Name change request approved",
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("approveNameChangeRequest error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to approve name change request",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};

@@ -12,6 +12,158 @@ const getLatestClosingBalance = async (connection) => {
   return rows.length ? Number(rows[0].total_cash || 0) : null;
 };
 
+const purchaseExpenseTripJoin = `
+  LEFT JOIN purchase_trips pt ON pt.id = (
+    SELECT pt2.id
+    FROM purchase_trips pt2
+    WHERE pt2.purchase_manager_id = e.created_by
+      AND e.created_at >= pt2.started_at
+      AND (pt2.ended_at IS NULL OR e.created_at <= pt2.ended_at)
+    ORDER BY pt2.started_at DESC, pt2.id DESC
+    LIMIT 1
+  )
+`;
+
+const DEFAULT_STOCK_AREA_ID = 1;
+const ALLOWED_CASHIER_REQUEST_PAYMENT_MODES = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+
+const consumeStockForCashierSale = async (connection, productId, requiredQty) => {
+  let remaining = Number(requiredQty || 0);
+  let sourceStockAreaId = null;
+
+  if (remaining <= 0) {
+    return;
+  }
+
+  const [availableRows] = await connection.query(
+    `
+    SELECT COALESCE(SUM(quantity), 0) AS available_qty
+    FROM stock
+    WHERE product_id = ?
+    FOR UPDATE
+    `,
+    [Number(productId)]
+  );
+
+  const availableQty = Number(availableRows[0]?.available_qty || 0);
+
+  if (availableQty < remaining) {
+    throw new Error(
+      `Insufficient stock for product ${productId}. Available ${availableQty}, required ${remaining}`
+    );
+  }
+
+  const [rows] = await connection.query(
+    `
+    SELECT id, stock_area_id, COALESCE(quantity, 0) AS quantity
+    FROM stock
+    WHERE product_id = ?
+    ORDER BY (stock_area_id = ?) DESC, id ASC
+    FOR UPDATE
+    `,
+    [Number(productId), DEFAULT_STOCK_AREA_ID]
+  );
+
+  for (const row of rows) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const currentQty = Number(row.quantity || 0);
+    if (currentQty <= 0) {
+      continue;
+    }
+
+    const deductQty = Math.min(currentQty, remaining);
+
+    if (sourceStockAreaId === null && row.stock_area_id !== null && row.stock_area_id !== undefined) {
+      sourceStockAreaId = Number(row.stock_area_id);
+    }
+
+    await connection.query(
+      `
+      UPDATE stock
+      SET quantity = GREATEST(COALESCE(quantity, 0) - ?, 0),
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [deductQty, row.id]
+    );
+
+    remaining -= deductQty;
+  }
+
+  return sourceStockAreaId;
+};
+
+const validateCashierRequestPayment = (paymentMode, paymentId) => {
+  if (!ALLOWED_CASHIER_REQUEST_PAYMENT_MODES.includes(paymentMode)) {
+    return "Invalid payment mode";
+  }
+
+  if (paymentMode !== "CASH" && !paymentId) {
+    return "Payment ID is required for non-cash modes";
+  }
+
+  return "";
+};
+
+const ensureNewConnectionCashierTables = async (connection) => {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS customer_new_connection_products (
+      id INT NOT NULL AUTO_INCREMENT,
+      connection_id INT NOT NULL,
+      product_id INT NOT NULL,
+      product_name_snapshot VARCHAR(255) DEFAULT NULL,
+      product_type_snapshot VARCHAR(80) DEFAULT NULL,
+      product_price_snapshot DECIMAL(10,2) DEFAULT 0,
+      status ENUM('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING',
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_new_connection_products_connection (connection_id),
+      KEY idx_new_connection_products_product (product_id),
+      KEY idx_new_connection_products_status (status),
+      CONSTRAINT fk_new_connection_products_connection
+        FOREIGN KEY (connection_id) REFERENCES customer_new_connections(id) ON DELETE CASCADE,
+      CONSTRAINT fk_new_connection_products_product
+        FOREIGN KEY (product_id) REFERENCES products(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+
+  const requiredColumns = {
+    product_id: "ALTER TABLE customer_new_connections ADD COLUMN product_id INT DEFAULT NULL AFTER product_details",
+    id_proof_url: "ALTER TABLE customer_new_connections ADD COLUMN id_proof_url VARCHAR(500) DEFAULT NULL AFTER id_proof_details",
+    payment_mode: "ALTER TABLE customer_new_connections ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER payment_status",
+    payment_reference_id: "ALTER TABLE customer_new_connections ADD COLUMN payment_reference_id varchar(120) DEFAULT NULL AFTER payment_mode",
+    cashier_remarks: "ALTER TABLE customer_new_connections ADD COLUMN cashier_remarks text AFTER payment_reference_id",
+    paid_at: "ALTER TABLE customer_new_connections ADD COLUMN paid_at timestamp NULL DEFAULT NULL AFTER cashier_remarks",
+  };
+
+  const [rows] = await connection.query(
+    `
+    SELECT COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'customer_new_connections'
+      AND COLUMN_NAME IN ('product_id', 'id_proof_url', 'payment_mode', 'payment_reference_id', 'cashier_remarks', 'paid_at')
+    `
+  );
+
+  const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
+  for (const [columnName, ddl] of Object.entries(requiredColumns)) {
+    if (existing.has(columnName)) continue;
+
+    try {
+      await connection.query(ddl);
+    } catch (error) {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
+        throw error;
+      }
+    }
+  }
+};
+
 export const getCashierDashboard = async (req, res) => {
   const connection = await db.getConnection();
 
@@ -281,6 +433,652 @@ export const getCashierDriverCollections = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch driver collections',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getCashierPenaltyRequests = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const status = String(req.query.status || "ALL").toUpperCase();
+    const whereClause =
+      status === "PENDING"
+        ? "WHERE p.payment_status = 'UNPAID'"
+        : status === "PAID"
+        ? "WHERE p.payment_status = 'PAID'"
+        : "";
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        p.id,
+        p.customer_id,
+        p.customer_name_snapshot AS customer_name,
+        p.consumer_number_snapshot AS consumer_number,
+        p.penalty_reason,
+        p.penalty_amount,
+        p.payment_mode,
+        p.payment_reference_id,
+        p.cashier_remarks,
+        p.payment_status,
+        DATE_FORMAT(p.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+        DATE_FORMAT(p.paid_at, '%Y-%m-%d %H:%i:%s') AS paid_at,
+        COALESCE(u.phone, '') AS customer_phone,
+        COALESCE(a.address, '') AS address
+      FROM customer_pr_penalties p
+      LEFT JOIN users u ON u.id = p.customer_id
+      LEFT JOIN addresses a ON a.user_id = p.customer_id AND a.is_default = 1
+      ${whereClause}
+      ORDER BY p.created_at DESC, p.id DESC
+      LIMIT 100
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id),
+        customerId: Number(row.customer_id),
+        customerName: row.customer_name,
+        consumerNumber: row.consumer_number,
+        phone: row.customer_phone,
+        address: row.address,
+        reason: row.penalty_reason,
+        amount: Number(row.penalty_amount || 0),
+        paymentMode: row.payment_mode || "",
+        paymentId: row.payment_reference_id || "",
+        remarks: row.cashier_remarks || "",
+        status: String(row.payment_status || "UNPAID").toUpperCase() === "PAID" ? "APPROVED" : "PENDING",
+        createdAt: row.created_at,
+        paidAt: row.paid_at,
+      })),
+    });
+  } catch (error) {
+    console.error("getCashierPenaltyRequests error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch cashier penalty requests",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const collectCashierPenaltyRequest = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const requestId = Number(req.params.requestId);
+    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    const paymentId = String(req.body?.paymentId || "").trim();
+    const remarks = String(req.body?.remarks || "").trim();
+
+    if (!requestId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid request id is required",
+      });
+    }
+
+    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    if (!allowedModes.includes(paymentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment mode",
+      });
+    }
+
+    if (paymentMode !== "CASH" && !paymentId) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment ID is required for non-cash modes",
+      });
+    }
+
+    const [result] = await connection.query(
+      `
+      UPDATE customer_pr_penalties
+      SET
+        payment_mode = ?,
+        payment_reference_id = ?,
+        cashier_remarks = ?,
+        payment_status = 'PAID',
+        paid_at = NOW()
+      WHERE id = ? AND payment_status = 'UNPAID'
+      `,
+      [paymentMode, paymentId || null, remarks || null, requestId]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        success: false,
+        message: "Pending request not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Request collected and marked as paid",
+    });
+  } catch (error) {
+    console.error("collectCashierPenaltyRequest error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update cashier request",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getCashierNameChangeRequests = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const status = String(req.query.status || "ALL").toUpperCase();
+    const whereClause =
+      status === "PENDING"
+        ? "WHERE r.status = 'PENDING'"
+        : status === "APPROVED"
+        ? "WHERE r.status = 'APPROVED'"
+        : "";
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        r.id,
+        r.customer_id,
+        CONCAT('LPG-', LPAD(r.customer_id, 5, '0')) AS consumer_number,
+        r.old_name_snapshot,
+        r.new_name_requested,
+        r.service_fee,
+        r.payment_mode,
+        r.payment_reference_id,
+        r.cashier_remarks,
+        r.status,
+        DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+        DATE_FORMAT(r.approved_at, '%Y-%m-%d %H:%i:%s') AS approved_at,
+        COALESCE(u.phone, '') AS customer_phone,
+        COALESCE(a.address, '') AS address
+      FROM customer_name_change_requests r
+      LEFT JOIN users u ON u.id = r.customer_id
+      LEFT JOIN addresses a ON a.user_id = r.customer_id AND a.is_default = 1
+      ${whereClause}
+      ORDER BY r.created_at DESC, r.id DESC
+      LIMIT 100
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id),
+        customerId: Number(row.customer_id),
+        customerName: row.new_name_requested,
+        consumerNumber: row.consumer_number,
+        phone: row.customer_phone,
+        address: row.address,
+        oldName: row.old_name_snapshot,
+        newName: row.new_name_requested,
+        amount: Number(row.service_fee || 0),
+        paymentMode: row.payment_mode || "",
+        paymentId: row.payment_reference_id || "",
+        remarks: row.cashier_remarks || "",
+        status: String(row.status || "PENDING").toUpperCase() === "APPROVED" ? "APPROVED" : "PENDING",
+        createdAt: row.created_at,
+        approvedAt: row.approved_at,
+      })),
+    });
+  } catch (error) {
+    console.error("getCashierNameChangeRequests error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch cashier name change requests",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const collectCashierNameChangeRequest = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const requestId = Number(req.params.requestId);
+    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    const paymentId = String(req.body?.paymentId || "").trim();
+    const remarks = String(req.body?.remarks || "").trim();
+
+    if (!requestId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid request id is required",
+      });
+    }
+
+    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    if (!allowedModes.includes(paymentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment mode",
+      });
+    }
+
+    if (paymentMode !== "CASH" && !paymentId) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment ID is required for non-cash modes",
+      });
+    }
+
+    const [result] = await connection.query(
+      `
+      UPDATE customer_name_change_requests
+      SET
+        payment_mode = ?,
+        payment_reference_id = ?,
+        cashier_remarks = ?,
+        status = 'APPROVED',
+        approved_at = NOW()
+      WHERE id = ? AND status = 'PENDING'
+      `,
+      [paymentMode, paymentId || null, remarks || null, requestId]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        success: false,
+        message: "Pending request not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Name change request approved",
+    });
+  } catch (error) {
+    console.error("collectCashierNameChangeRequest error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update name change request",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+const ensureTransferVoucherPaymentColumns = async (connection) => {
+  const requiredColumns = {
+    payment_mode: "ALTER TABLE customer_connection_transfers ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER reason",
+    payment_reference_id: "ALTER TABLE customer_connection_transfers ADD COLUMN payment_reference_id varchar(120) DEFAULT NULL AFTER payment_mode",
+    cashier_remarks: "ALTER TABLE customer_connection_transfers ADD COLUMN cashier_remarks text AFTER payment_reference_id",
+  };
+
+  const [rows] = await connection.query(
+    `
+    SELECT COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'customer_connection_transfers'
+      AND COLUMN_NAME IN ('payment_mode', 'payment_reference_id', 'cashier_remarks')
+    `
+  );
+
+  const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
+  for (const [columnName, ddl] of Object.entries(requiredColumns)) {
+    if (existing.has(columnName)) {
+      continue;
+    }
+
+    try {
+      await connection.query(ddl);
+    } catch (error) {
+      // Ignore duplicate column race conditions from parallel requests.
+      if (error?.code !== 'ER_DUP_FIELDNAME') {
+        throw error;
+      }
+    }
+  }
+};
+
+export const getCashierTransferVoucherRequests = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    await ensureTransferVoucherPaymentColumns(connection);
+
+    const status = String(req.query.status || "ALL").toUpperCase();
+    const whereClause =
+      status === "PENDING"
+        ? "WHERE t.status = 'PENDING_MANAGER'"
+        : status === "APPROVED"
+        ? "WHERE t.status = 'APPROVED'"
+        : "";
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        t.id,
+        t.existing_customer_id,
+        t.new_customer_id,
+        t.deposit_liability,
+        t.reason,
+        t.payment_mode,
+        t.payment_reference_id,
+        t.cashier_remarks,
+        t.status,
+        DATE_FORMAT(t.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+        DATE_FORMAT(t.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+        old_u.name AS old_customer_name,
+        CONCAT('LPG-', LPAD(t.existing_customer_id, 5, '0')) AS consumer_number,
+        new_u.name AS new_customer_name,
+        COALESCE(new_u.phone, '') AS new_customer_phone,
+        COALESCE(a.address, '') AS new_customer_address
+      FROM customer_connection_transfers t
+      INNER JOIN users old_u ON old_u.id = t.existing_customer_id
+      INNER JOIN users new_u ON new_u.id = t.new_customer_id
+      LEFT JOIN addresses a ON a.user_id = t.new_customer_id AND a.is_default = 1
+      ${whereClause}
+      ORDER BY t.created_at DESC, t.id DESC
+      LIMIT 100
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id),
+        customerId: Number(row.new_customer_id),
+        customerName: row.new_customer_name,
+        consumerNumber: row.consumer_number,
+        phone: row.new_customer_phone,
+        address: row.new_customer_address,
+        oldName: row.old_customer_name,
+        newName: row.new_customer_name,
+        newMobile: row.new_customer_phone,
+        newAddress: row.new_customer_address,
+        amount: Number(row.deposit_liability || 0),
+        reason: row.reason || "",
+        paymentMode: row.payment_mode || "",
+        paymentId: row.payment_reference_id || "",
+        remarks: row.cashier_remarks || "",
+        status: String(row.status || "PENDING_MANAGER").toUpperCase() === "APPROVED" ? "APPROVED" : "PENDING",
+        createdAt: row.created_at,
+        approvedAt: row.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error("getCashierTransferVoucherRequests error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch cashier transfer voucher requests",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const collectCashierTransferVoucherRequest = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    await ensureTransferVoucherPaymentColumns(connection);
+
+    const requestId = Number(req.params.requestId);
+    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    const paymentId = String(req.body?.paymentId || "").trim();
+    const remarks = String(req.body?.remarks || "").trim();
+
+    if (!requestId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid request id is required",
+      });
+    }
+
+    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    if (!allowedModes.includes(paymentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment mode",
+      });
+    }
+
+    if (paymentMode !== "CASH" && !paymentId) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment ID is required for non-cash modes",
+      });
+    }
+
+    const [result] = await connection.query(
+      `
+      UPDATE customer_connection_transfers
+      SET
+        payment_mode = ?,
+        payment_reference_id = ?,
+        cashier_remarks = ?,
+        status = 'APPROVED',
+        updated_at = NOW()
+      WHERE id = ? AND status = 'PENDING_MANAGER'
+      `,
+      [paymentMode, paymentId || null, remarks || null, requestId]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        success: false,
+        message: "Pending request not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Transfer voucher request approved",
+    });
+  } catch (error) {
+    console.error("collectCashierTransferVoucherRequest error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update transfer voucher request",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getCashierNewConnectionRequests = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    await ensureNewConnectionCashierTables(connection);
+
+    const status = String(req.query.status || "ALL").toUpperCase();
+    const whereClause =
+      status === "PENDING"
+        ? "WHERE cnc.payment_status = 'PENDING_PAYMENT'"
+        : status === "APPROVED" || status === "PAID"
+        ? "WHERE cnc.payment_status = 'PAID'"
+        : "";
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        cnc.id,
+        cnc.user_id,
+        CONCAT('LPG-', LPAD(cnc.user_id, 5, '0')) AS consumer_number,
+        cnc.product_details,
+        cnc.deposit_amount,
+        cnc.gst_amount,
+        cnc.total_amount,
+        cnc.payment_mode,
+        cnc.payment_reference_id,
+        cnc.cashier_remarks,
+        cnc.payment_status,
+        DATE_FORMAT(cnc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+        DATE_FORMAT(cnc.paid_at, '%Y-%m-%d %H:%i:%s') AS paid_at,
+        u.name AS customer_name,
+        COALESCE(u.phone, '') AS customer_phone,
+        COALESCE(a.address, '') AS address,
+        GROUP_CONCAT(
+          DISTINCT COALESCE(ncp.product_name_snapshot, p.name)
+          ORDER BY COALESCE(ncp.product_name_snapshot, p.name)
+          SEPARATOR ', '
+        ) AS selected_products,
+        GROUP_CONCAT(
+          DISTINCT ncp.product_id
+          ORDER BY ncp.product_id
+          SEPARATOR ','
+        ) AS product_ids
+      FROM customer_new_connections cnc
+      INNER JOIN users u ON u.id = cnc.user_id
+      LEFT JOIN addresses a ON a.user_id = cnc.user_id AND a.is_default = 1
+      LEFT JOIN customer_new_connection_products ncp ON ncp.connection_id = cnc.id
+      LEFT JOIN products p ON p.id = ncp.product_id
+      ${whereClause}
+      GROUP BY
+        cnc.id,
+        cnc.user_id,
+        cnc.product_details,
+        cnc.deposit_amount,
+        cnc.gst_amount,
+        cnc.total_amount,
+        cnc.payment_mode,
+        cnc.payment_reference_id,
+        cnc.cashier_remarks,
+        cnc.payment_status,
+        cnc.created_at,
+        cnc.paid_at,
+        u.name,
+        u.phone,
+        a.address
+      ORDER BY cnc.created_at DESC, cnc.id DESC
+      LIMIT 100
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id),
+        customerId: Number(row.user_id),
+        customerName: row.customer_name,
+        consumerNumber: row.consumer_number,
+        phone: row.customer_phone,
+        address: row.address,
+        connectionId: `NC-${String(row.id).padStart(4, "0")}`,
+        productDetails: row.selected_products || row.product_details || "",
+        productIds: row.product_ids
+          ? String(row.product_ids)
+              .split(",")
+              .filter(Boolean)
+              .map((id) => Number(id))
+          : [],
+        depositAmount: Number(row.deposit_amount || 0),
+        gstAmount: Number(row.gst_amount || 0),
+        amount: Number(row.total_amount || 0),
+        paymentMode: row.payment_mode || "",
+        paymentId: row.payment_reference_id || "",
+        remarks: row.cashier_remarks || "",
+        status: String(row.payment_status || "PENDING_PAYMENT").toUpperCase() === "PAID" ? "APPROVED" : "PENDING",
+        createdAt: row.created_at,
+        approvedAt: row.paid_at,
+      })),
+    });
+  } catch (error) {
+    console.error("getCashierNewConnectionRequests error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch cashier new connection requests",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const collectCashierNewConnectionRequest = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    await ensureNewConnectionCashierTables(connection);
+
+    const requestId = Number(req.params.requestId);
+    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    const paymentId = String(req.body?.paymentId || "").trim();
+    const remarks = String(req.body?.remarks || "").trim();
+
+    if (!requestId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid request id is required",
+      });
+    }
+
+    const paymentError = validateCashierRequestPayment(paymentMode, paymentId);
+    if (paymentError) {
+      return res.status(400).json({
+        success: false,
+        message: paymentError,
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [result] = await connection.query(
+      `
+      UPDATE customer_new_connections
+      SET
+        payment_mode = ?,
+        payment_reference_id = ?,
+        cashier_remarks = ?,
+        payment_status = 'PAID',
+        paid_at = NOW(),
+        updated_at = NOW()
+      WHERE id = ? AND payment_status = 'PENDING_PAYMENT'
+      `,
+      [paymentMode, paymentId || null, remarks || null, requestId]
+    );
+
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Pending request not found",
+      });
+    }
+
+    await connection.query(
+      `
+      UPDATE customer_new_connection_products
+      SET status = 'APPROVED', updated_at = NOW()
+      WHERE connection_id = ?
+      `,
+      [requestId]
+    );
+
+    await connection.commit();
+
+    return res.status(200).json({
+      success: true,
+      message: "New connection request approved",
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("collectCashierNewConnectionRequest error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update new connection request",
       error: error.message,
     });
   } finally {
@@ -712,6 +1510,45 @@ export const recordOfficeSale = async (req, res) => {
 
     await connection.beginTransaction();
 
+    const uniqueProductIds = [...new Set(parsedItems.map((item) => Number(item.product_id)))];
+    const productPlaceholders = uniqueProductIds.map(() => '?').join(',');
+    const [productRows] = await connection.query(
+      `
+      SELECT id, name, type, price
+      FROM products
+      WHERE id IN (${productPlaceholders})
+      `,
+      uniqueProductIds
+    );
+
+    if (productRows.length !== uniqueProductIds.length) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'One or more selected products are invalid',
+      });
+    }
+
+    const productMap = new Map(productRows.map((row) => [Number(row.id), row]));
+
+    const deductedStockAreaIds = [];
+
+    for (const item of parsedItems) {
+      const product = productMap.get(Number(item.product_id));
+      if (!product) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'One or more selected products are invalid',
+        });
+      }
+
+      const sourceStockAreaId = await consumeStockForCashierSale(connection, item.product_id, item.quantity);
+      deductedStockAreaIds.push(sourceStockAreaId);
+    }
+
+    const cashierUserId = req.user?.id || null;
+
     let customerId = null;
     const [existingCustomers] = await connection.execute(
       `
@@ -784,7 +1621,9 @@ export const recordOfficeSale = async (req, res) => {
 
     const saleId = saleResult.insertId;
 
-    for (const item of parsedItems) {
+    for (const [index, item] of parsedItems.entries()) {
+      const sourceStockAreaId = deductedStockAreaIds[index] ?? null;
+
       await connection.execute(
         `
         INSERT INTO sales_items
@@ -792,6 +1631,58 @@ export const recordOfficeSale = async (req, res) => {
         VALUES (?, ?, ?, ?, 'DELIVERED', ?, ?, 'DELIVERED', 0)
         `,
         [saleId, item.product_id, item.quantity, item.price, item.quantity, item.quantity]
+      );
+
+      await connection.execute(
+        `
+        INSERT INTO stock_transactions
+        (
+          product_id,
+          stock_area_id,
+          type,
+          quantity,
+          isApproved,
+          reference_id,
+          created_by,
+          driver_id,
+          stock_from,
+          is_defective
+        )
+        VALUES (?, ?, 'ADJUSTMENT_SUBTRACT', ?, 1, ?, ?, NULL, 'godown', 0)
+        `,
+        [
+          item.product_id,
+          sourceStockAreaId,
+          item.quantity,
+          saleId,
+          cashierUserId,
+        ]
+      );
+
+      // Auto-raise empty cylinder return request to godown manager with sold quantity.
+      await connection.execute(
+        `
+        INSERT INTO stock_transactions
+        (
+          product_id,
+          stock_area_id,
+          type,
+          quantity,
+          isApproved,
+          reference_id,
+          created_by,
+          driver_id,
+          stock_from,
+          is_defective
+        )
+        VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, ?, NULL, 'godown', 0)
+        `,
+        [
+          item.product_id,
+          item.quantity,
+          saleId,
+          cashierUserId,
+        ]
       );
     }
 
@@ -892,13 +1783,29 @@ export const recordOfficeExpense = async (req, res) => {
       return res.status(400).json({ success: false, message: 'amount must be a non-negative number' });
     }
 
-    const [result] = await connection.execute(
-      `
-      INSERT INTO office_expenses (admin_id, category, amount, description, created_at, updated_at)
-      VALUES (?, ?, ?, ?, NOW(), NOW())
-      `,
-      [adminId, category, numericAmount, description || null]
-    );
+    let result;
+
+    try {
+      [result] = await connection.execute(
+        `
+        INSERT INTO office_expenses (admin_id, category, amount, description, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'PENDING', NOW(), NOW())
+        `,
+        [adminId, category, numericAmount, description || null]
+      );
+    } catch (queryError) {
+      if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
+        throw queryError;
+      }
+
+      [result] = await connection.execute(
+        `
+        INSERT INTO office_expenses (admin_id, category, amount, description, created_at, updated_at)
+        VALUES (?, ?, ?, ?, NOW(), NOW())
+        `,
+        [adminId, category, numericAmount, description || null]
+      );
+    }
 
     return res.status(201).json({ success: true, message: 'Office expense recorded', expenseId: result.insertId });
   } catch (error) {
@@ -913,29 +1820,273 @@ export const getTodayOfficeExpenses = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    let rows;
+
+    try {
+      [rows] = await connection.query(
+        `
+        SELECT
+          o.id,
+          o.category,
+          o.description,
+          o.amount,
+          DATE_FORMAT(o.created_at, '%Y-%m-%d') AS date,
+          COALESCE(u.name, 'Unknown') AS createdBy,
+          COALESCE(o.status, 'PENDING') AS status
+        FROM office_expenses o
+        LEFT JOIN users u ON u.id = o.admin_id
+        WHERE DATE(o.created_at) = CURDATE()
+        ORDER BY o.created_at DESC
+        `
+      );
+    } catch (queryError) {
+      if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
+        throw queryError;
+      }
+
+      [rows] = await connection.query(
+        `
+        SELECT
+          o.id,
+          o.category,
+          o.description,
+          o.amount,
+          DATE_FORMAT(o.created_at, '%Y-%m-%d') AS date,
+          COALESCE(u.name, 'Unknown') AS createdBy
+        FROM office_expenses o
+        LEFT JOIN users u ON u.id = o.admin_id
+        WHERE DATE(o.created_at) = CURDATE()
+        ORDER BY o.created_at DESC
+        `
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((r) => ({ id: `OE-${String(r.id).padStart(3, '0')}`, category: r.category, description: r.description, amount: Number(r.amount || 0), date: r.date, by: r.createdBy, status: r.status || 'PENDING' })),
+    });
+  } catch (error) {
+    console.error('getTodayOfficeExpenses error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch today office expenses', error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getCashOutExpenseRequests = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const [summaryRows] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN e.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingApprovals,
+        COALESCE(SUM(CASE WHEN e.status = 'APPROVED' AND DATE(e.created_at) = CURDATE() THEN e.amount ELSE 0 END), 0) AS approvedToday
+      FROM expenses e
+      INNER JOIN users u ON u.id = e.created_by
+      WHERE u.role = 'PURCHASE_MANAGER'
+      `
+    );
+
     const [rows] = await connection.query(
       `
       SELECT
-        o.id,
-        o.category,
-        o.description,
-        o.amount,
-        DATE_FORMAT(o.created_at, '%Y-%m-%d') AS date,
-        COALESCE(u.name, 'Unknown') AS createdBy
-      FROM office_expenses o
-      LEFT JOIN users u ON u.id = o.admin_id
-      WHERE DATE(o.created_at) = CURDATE()
-      ORDER BY o.created_at DESC
+        e.id,
+        e.category,
+        e.description,
+        e.amount,
+        e.bill_url,
+        e.status,
+        e.created_at,
+        u.name AS created_by_name,
+        pt.id AS trip_id,
+        pt.odometer_reading,
+        pt.end_odometer_reading,
+        pt.odometer_image_url,
+        pt.end_odometer_image_url,
+        pt.started_at,
+        pt.ended_at
+      FROM expenses e
+      INNER JOIN users u ON u.id = e.created_by
+      ${purchaseExpenseTripJoin}
+      WHERE u.role = 'PURCHASE_MANAGER'
+        AND e.status = 'PENDING'
+      ORDER BY e.created_at DESC, e.id DESC
       `
     );
 
     return res.status(200).json({
       success: true,
-      data: rows.map((r) => ({ id: `OE-${String(r.id).padStart(3, '0')}`, category: r.category, description: r.description, amount: Number(r.amount || 0), date: r.date, by: r.createdBy })),
+      summary: {
+        pendingApprovals: Number(summaryRows[0]?.pendingApprovals || 0),
+        approvedToday: Number(summaryRows[0]?.approvedToday || 0),
+      },
+      data: rows.map((row) => ({
+        id: row.id,
+        category: row.category,
+        description: row.description,
+        amount: Number(row.amount || 0),
+        billUrl: row.bill_url,
+        status: row.status,
+        createdAt: row.created_at,
+        createdByName: row.created_by_name,
+        tripId: row.trip_id,
+        startOdometerReading: Number(row.odometer_reading || 0),
+        endOdometerReading: row.end_odometer_reading
+          ? Number(row.end_odometer_reading)
+          : null,
+        startOdometerImageUrl: row.odometer_image_url,
+        endOdometerImageUrl: row.end_odometer_image_url,
+        tripStartedAt: row.started_at,
+        tripEndedAt: row.ended_at,
+      })),
     });
   } catch (error) {
-    console.error('getTodayOfficeExpenses error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to fetch today office expenses', error: error.message });
+    console.error('getCashOutExpenseRequests error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch expense requests',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const reviewCashOutExpenseRequest = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const expenseId = Number(req.params.expenseId);
+    const status = String(req.body?.status || '').toUpperCase();
+    const rawPaymentMode = String(req.body?.paymentMode || req.body?.payment_method || '').trim().toUpperCase();
+    const rawTransactionId = String(req.body?.transactionId || req.body?.transaction_id || '').trim();
+
+    if (!expenseId || !['APPROVED', 'REJECTED'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'expenseId and a valid status are required',
+      });
+    }
+
+    const validPaymentModes = ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER'];
+    const paymentMode = status === 'APPROVED'
+      ? (rawPaymentMode || 'CASH')
+      : null;
+    const transactionId = status === 'APPROVED'
+      ? rawTransactionId
+      : null;
+
+    if (status === 'APPROVED' && !validPaymentModes.includes(paymentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid payment mode',
+      });
+    }
+
+    if (status === 'APPROVED' && paymentMode !== 'CASH' && !transactionId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Transaction ID is required for non-cash payments',
+      });
+    }
+
+    const [rows] = await connection.query(
+      `
+      SELECT e.id, e.status, e.description
+      FROM expenses e
+      INNER JOIN users u ON u.id = e.created_by
+      WHERE e.id = ?
+        AND u.role = 'PURCHASE_MANAGER'
+      LIMIT 1
+      `,
+      [expenseId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Expense request not found',
+      });
+    }
+
+    if (rows[0].status !== 'PENDING') {
+      return res.status(400).json({
+        success: false,
+        message: 'Only pending expense requests can be reviewed',
+      });
+    }
+
+    let savedViaColumns = false;
+
+    try {
+      if (status === 'APPROVED') {
+        await connection.query(
+          `
+          UPDATE expenses
+          SET status = ?,
+              payment_mode = ?,
+              payment_reference = ?
+          WHERE id = ?
+          `,
+          [status, paymentMode, transactionId || null, expenseId]
+        );
+      } else {
+        await connection.query(
+          `
+          UPDATE expenses
+          SET status = ?
+          WHERE id = ?
+          `,
+          [status, expenseId]
+        );
+      }
+
+      savedViaColumns = true;
+    } catch (queryError) {
+      // Keep compatibility with environments where migration is not yet applied.
+      if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
+        throw queryError;
+      }
+
+      if (status === 'APPROVED') {
+        const existingDescription = rows[0]?.description ? String(rows[0].description).trim() : '';
+        const paymentTag = `[Payment: ${paymentMode}${transactionId ? ` | ${transactionId}` : ''}]`;
+        const nextDescription = [existingDescription, paymentTag].filter(Boolean).join(' ');
+
+        await connection.query(
+          `
+          UPDATE expenses
+          SET status = ?,
+              description = ?
+          WHERE id = ?
+          `,
+          [status, nextDescription, expenseId]
+        );
+      } else {
+        await connection.query(
+          `
+          UPDATE expenses
+          SET status = ?
+          WHERE id = ?
+          `,
+          [status, expenseId]
+        );
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: status === 'APPROVED' ? 'Expense approved successfully' : 'Expense rejected successfully',
+      paymentSavedInColumns: savedViaColumns,
+    });
+  } catch (error) {
+    console.error('reviewCashOutExpenseRequest error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to review expense request',
+      error: error.message,
+    });
   } finally {
     connection.release();
   }
@@ -1005,34 +2156,183 @@ export const getTodaysCashFlow = async (req, res) => {
     const lastClosing = await getLatestClosingBalance(connection);
     const openingBalance = lastClosing ?? 0;
 
-    const [inflow] = await connection.query(
+    // Ensure the payment-mode columns exist on the cashier-request tables we read
+    // below (idempotent — safe to call on every request).
+    await ensureNewConnectionCashierTables(connection);
+    await ensureTransferVoucherPaymentColumns(connection);
+
+    // The expenses table's payment_mode column is only present on migrated DBs
+    // (older rows tag the mode inside the description instead). Detect it so
+    // non-cash expenses can be excluded from the CASH balance without breaking
+    // databases that never got the column.
+    const [expenseModeColumn] = await connection.query(
       `
-      SELECT COALESCE(SUM(sh.amount), 0) AS total, COUNT(DISTINCT sh.id) AS count
-      FROM settlement_history sh
-      WHERE sh.status = 'SETTLED'
-        AND DATE(sh.created_at) = CURDATE()
+      SELECT COLUMN_NAME
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'expenses'
+        AND COLUMN_NAME = 'payment_mode'
+      `
+    );
+    const expensesCashOnlySum = expenseModeColumn.length
+      ? "SUM(CASE WHEN e.payment_mode = 'CASH' OR e.payment_mode IS NULL THEN e.amount ELSE 0 END)"
+      : "SUM(e.amount)";
+
+    // ---------------- INFLOW (cash-in) ----------------
+    // Driver settlements store no payment-mode split, so the settled amount is
+    // counted as cash (preserves the previous behavior for this source).
+    const [settledInflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(s.amount), 0) AS total,
+        COALESCE(SUM(s.amount), 0) AS cash_total,
+        COUNT(DISTINCT s.id) AS count
+      FROM settlements s
+      WHERE s.status = 'SETTLED'
+        AND s.settlement_date = CURDATE()
       `
     );
 
-    const [outflow] = await connection.query(
+    const [cashierSalesInflow] = await connection.query(
       `
-      SELECT COALESCE(SUM(oe.amount), 0) AS total, COUNT(DISTINCT oe.id) AS count
+      SELECT
+        COALESCE(SUM(p.amount), 0) AS total,
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash_total,
+        COUNT(DISTINCT p.id) AS count
+      FROM payments p
+      INNER JOIN sales s ON s.id = p.sale_id
+      WHERE p.status = 'SUCCESS'
+        AND s.sales_from = 'CASHIER'
+        AND DATE(p.created_at) = CURDATE()
+      `
+    );
+
+    // Other payments are always non-cash (UPI / bank transfer / card): they add
+    // to inflow but never to the cash balance.
+    const [otherPaymentsInflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(op.amount), 0) AS total,
+        COALESCE(SUM(CASE WHEN UPPER(op.method) = 'CASH' THEN op.amount ELSE 0 END), 0) AS cash_total,
+        COUNT(DISTINCT op.id) AS count
+      FROM other_payments op
+      WHERE DATE(op.created_at) = CURDATE()
+        AND UPPER(COALESCE(op.status, 'PENDING')) <> 'REJECTED'
+      `
+    );
+
+    // PR penalty collections — cash-in cashier requests.
+    const [prPenaltyInflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(p.penalty_amount), 0) AS total,
+        COALESCE(SUM(CASE WHEN p.payment_mode = 'CASH' THEN p.penalty_amount ELSE 0 END), 0) AS cash_total,
+        COUNT(DISTINCT p.id) AS count
+      FROM customer_pr_penalties p
+      WHERE p.payment_status = 'PAID'
+        AND DATE(p.paid_at) = CURDATE()
+      `
+    );
+
+    // Name change collections — cash-in cashier requests.
+    const [nameChangeInflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(r.service_fee), 0) AS total,
+        COALESCE(SUM(CASE WHEN r.payment_mode = 'CASH' THEN r.service_fee ELSE 0 END), 0) AS cash_total,
+        COUNT(DISTINCT r.id) AS count
+      FROM customer_name_change_requests r
+      WHERE r.status = 'APPROVED'
+        AND DATE(r.approved_at) = CURDATE()
+      `
+    );
+
+    // New connection collections — cash-in cashier requests.
+    const [newConnectionInflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(cnc.total_amount), 0) AS total,
+        COALESCE(SUM(CASE WHEN cnc.payment_mode = 'CASH' THEN cnc.total_amount ELSE 0 END), 0) AS cash_total,
+        COUNT(DISTINCT cnc.id) AS count
+      FROM customer_new_connections cnc
+      WHERE cnc.payment_status = 'PAID'
+        AND DATE(cnc.paid_at) = CURDATE()
+      `
+    );
+
+    // ---------------- OUTFLOW (cash-out) ----------------
+    // Office expenses have no payment-mode column, so they are treated as cash.
+    const [officeExpensesOutflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(oe.amount), 0) AS total,
+        COALESCE(SUM(oe.amount), 0) AS cash_total,
+        COUNT(DISTINCT oe.id) AS count
       FROM office_expenses oe
       WHERE DATE(oe.created_at) = CURDATE()
       `
     );
 
-    const inflowTotal = Number(inflow[0]?.total || 0);
-    const inflowCount = Number(inflow[0]?.count || 0);
-    const outflowTotal = Number(outflow[0]?.total || 0);
-    const outflowCount = Number(outflow[0]?.count || 0);
-    const currentBalance = openingBalance + inflowTotal - outflowTotal;
+    // Approved expenses: only cash (or legacy/untagged) expenses reduce the cash
+    // balance. UPI / card / bank-transfer expenses add to outflow but not to cash.
+    const [approvedExpensesOutflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(e.amount), 0) AS total,
+        COALESCE(${expensesCashOnlySum}, 0) AS cash_total,
+        COUNT(DISTINCT e.id) AS count
+      FROM expenses e
+      WHERE e.status = 'APPROVED'
+        AND DATE(e.created_at) = CURDATE()
+      `
+    );
+
+    // Transfer voucher collections — cash-out cashier requests.
+    const [transferVoucherOutflow] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(t.deposit_liability), 0) AS total,
+        COALESCE(SUM(CASE WHEN t.payment_mode = 'CASH' THEN t.deposit_liability ELSE 0 END), 0) AS cash_total,
+        COUNT(DISTINCT t.id) AS count
+      FROM customer_connection_transfers t
+      WHERE t.status = 'APPROVED'
+        AND DATE(t.updated_at) = CURDATE()
+      `
+    );
+
+    const inflowSources = [
+      settledInflow,
+      cashierSalesInflow,
+      otherPaymentsInflow,
+      prPenaltyInflow,
+      nameChangeInflow,
+      newConnectionInflow,
+    ];
+    const outflowSources = [officeExpensesOutflow, approvedExpensesOutflow, transferVoucherOutflow];
+
+    const sumField = (sources, field) =>
+      sources.reduce((acc, rows) => acc + Number(rows[0]?.[field] || 0), 0);
+
+    const inflowTotal = sumField(inflowSources, "total");
+    const inflowCount = sumField(inflowSources, "count");
+    const inflowCashTotal = sumField(inflowSources, "cash_total");
+
+    const outflowTotal = sumField(outflowSources, "total");
+    const outflowCount = sumField(outflowSources, "count");
+    const outflowCashTotal = sumField(outflowSources, "cash_total");
+
+    // Current cash balance is CASH ONLY: opening cash + cash received − cash paid.
+    // Non-cash inflow/outflow (UPI, card, bank transfer) still shows in the
+    // inflow/outflow totals but does not move the cash balance.
+    const currentBalance = openingBalance + inflowCashTotal - outflowCashTotal;
 
     return res.status(200).json({
       success: true,
       openingBalance,
-      inflow: { total: inflowTotal, count: inflowCount },
-      outflow: { total: outflowTotal, count: outflowCount },
+      inflow: { total: inflowTotal, count: inflowCount, cashTotal: inflowCashTotal },
+      outflow: { total: outflowTotal, count: outflowCount, cashTotal: outflowCashTotal },
+      cashInflow: inflowCashTotal,
+      cashOutflow: outflowCashTotal,
       currentBalance,
     });
   } catch (error) {

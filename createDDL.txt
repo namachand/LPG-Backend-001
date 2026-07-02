@@ -1,23 +1,39 @@
-CREATE TABLE `addresses` (
+CREATE TABLE `users` (
   `id` int NOT NULL AUTO_INCREMENT,
-  `user_id` int DEFAULT NULL,
-  `address` text,
-  `is_default` tinyint(1) DEFAULT '0',
+  `name` varchar(100) NOT NULL,
+  `company_name` varchar(150) DEFAULT NULL,
+  `email` varchar(100) DEFAULT NULL,
+  `phone` varchar(15) DEFAULT NULL,
+  `password` varchar(255) DEFAULT NULL,
+  `role` enum('OWNER','DRIVER','CASHIER','GODOWN_MANAGER','PURCHASE_MANAGER','SUPPORT','CUSTOMER') DEFAULT NULL,
+  `aadhaar_number` varchar(20) DEFAULT NULL,
+  `bank_account_holder_name` varchar(150) DEFAULT NULL,
+  `bank_name` varchar(150) DEFAULT NULL,
+  `bank_account_number` varchar(50) DEFAULT NULL,
+  `bank_ifsc_code` varchar(20) DEFAULT NULL,
+  `status` enum('ACTIVE','INACTIVE') DEFAULT 'ACTIVE',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `user_id` (`user_id`),
-  CONSTRAINT `addresses_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=34 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+  UNIQUE KEY `email` (`email`),
+  UNIQUE KEY `phone` (`phone`)
+) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `cash_collections` (
+CREATE TABLE `user_job_profiles` (
   `id` int NOT NULL AUTO_INCREMENT,
-  `driver_id` int DEFAULT NULL,
-  `total_collected` decimal(10,2) DEFAULT NULL,
-  `collection_date` date DEFAULT NULL,
+  `user_id` int NOT NULL,
+  `display_role` enum('GODOWN_MANAGER','PURCHASE_DRIVER','DELIVERY_AGENT','CASHIER','CUSTOMER_SERVICE','MANAGER') NOT NULL,
+  `age` int DEFAULT NULL,
+  `date_of_birth` date DEFAULT NULL,
+  `gender` enum('MALE','FEMALE','OTHER') DEFAULT NULL,
+  `address` text,
+  `vehicle_number` varchar(60) DEFAULT NULL,
+  `vehicle_type` varchar(60) DEFAULT NULL,
+  `driving_license_number` varchar(120) DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `driver_id` (`driver_id`),
-  CONSTRAINT `cash_collections_ibfk_1` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`)
+  UNIQUE KEY `uq_user_job_profiles_user` (`user_id`),
+  CONSTRAINT `user_job_profiles_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `categories` (
@@ -28,6 +44,19 @@ CREATE TABLE `categories` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `stock_areas` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  `address` varchar(255) NOT NULL,
+  `manager_id` int DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_stock_areas_name` (`name`),
+  KEY `idx_stock_areas_manager` (`manager_id`),
+  CONSTRAINT `fk_stock_areas_manager` FOREIGN KEY (`manager_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `drivers` (
   `id` int NOT NULL AUTO_INCREMENT,
@@ -42,17 +71,94 @@ CREATE TABLE `drivers` (
   CONSTRAINT `drivers_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `addresses` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int DEFAULT NULL,
+  `address` text,
+  `is_default` tinyint(1) DEFAULT '0',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `user_id` (`user_id`),
+  CONSTRAINT `addresses_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=34 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `expenses` (
   `id` int NOT NULL AUTO_INCREMENT,
   `category` varchar(100) DEFAULT NULL,
   `description` text,
   `amount` decimal(10,2) DEFAULT NULL,
+  `bill_url` text,
   `created_by` int DEFAULT NULL,
   `status` enum('PENDING','APPROVED','REJECTED') DEFAULT 'PENDING',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `created_by` (`created_by`),
   CONSTRAINT `expenses_ibfk_1` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `purchase_trips` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `purchase_manager_id` int NOT NULL,
+  `stock_area_id` int DEFAULT NULL,
+  `odometer_reading` int NOT NULL,
+  `end_odometer_reading` int DEFAULT NULL,
+  `odometer_image_url` text,
+  `end_odometer_image_url` text,
+  `status` enum('IN_PROGRESS','WAITING_APPROVAL','APPROVED','COMPLETED','CANCELLED') NOT NULL DEFAULT 'IN_PROGRESS',
+  `started_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `ended_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_purchase_trips_manager` (`purchase_manager_id`),
+  KEY `idx_purchase_trips_stock_area` (`stock_area_id`),
+  CONSTRAINT `purchase_trips_ibfk_1` FOREIGN KEY (`purchase_manager_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `purchase_trips_ibfk_2` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `purchase_loads` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `trip_id` int NOT NULL,
+  `created_by` int NOT NULL,
+  `stock_area_id` int DEFAULT NULL,
+  `product_type` enum('DOMESTIC','COMMERCIAL','MIXED') NOT NULL,
+  `invoice_url` text,
+  `invoice_source` enum('CAMERA','GALLERY') DEFAULT NULL,
+  `total_quantity` int NOT NULL DEFAULT '0',
+  `status` enum('DRAFT','PENDING','APPROVED','CANCELLED') NOT NULL DEFAULT 'DRAFT',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_purchase_loads_trip` (`trip_id`),
+  KEY `idx_purchase_loads_creator` (`created_by`),
+  KEY `idx_purchase_loads_stock_area` (`stock_area_id`),
+  CONSTRAINT `purchase_loads_ibfk_1` FOREIGN KEY (`trip_id`) REFERENCES `purchase_trips` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `purchase_loads_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`),
+  CONSTRAINT `purchase_loads_ibfk_3` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `purchase_load_items` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `load_id` int NOT NULL,
+  `product_id` int NOT NULL,
+  `quantity` int NOT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_purchase_load_items_load` (`load_id`),
+  KEY `idx_purchase_load_items_product` (`product_id`),
+  CONSTRAINT `purchase_load_items_ibfk_1` FOREIGN KEY (`load_id`) REFERENCES `purchase_loads` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `purchase_load_items_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `reports` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `report_type` varchar(100) DEFAULT NULL,
+  `generated_by` int DEFAULT NULL,
+  `file_url` text,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `generated_by` (`generated_by`),
+  CONSTRAINT `reports_ibfk_1` FOREIGN KEY (`generated_by`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `issues` (
@@ -71,19 +177,6 @@ CREATE TABLE `issues` (
   CONSTRAINT `issues_ibfk_2` FOREIGN KEY (`assigned_to`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `payments` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `sale_id` int DEFAULT NULL,
-  `amount` decimal(10,2) DEFAULT NULL,
-  `method` enum('CASH','UPI','CARD') DEFAULT NULL,
-  `status` enum('SUCCESS','PENDING') DEFAULT 'SUCCESS',
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `type` enum('DRIVER','COMPANY') DEFAULT 'DRIVER',
-  PRIMARY KEY (`id`),
-  KEY `idx_payments_sale` (`sale_id`),
-  CONSTRAINT `payments_ibfk_1` FOREIGN KEY (`sale_id`) REFERENCES `sales` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=36 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 CREATE TABLE `products` (
   `id` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) DEFAULT NULL,
@@ -96,16 +189,71 @@ CREATE TABLE `products` (
   CONSTRAINT `fk_products_category` FOREIGN KEY (`category_id`) REFERENCES `categories` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `reports` (
+CREATE TABLE `cash_collections` (
   `id` int NOT NULL AUTO_INCREMENT,
-  `report_type` varchar(100) DEFAULT NULL,
-  `generated_by` int DEFAULT NULL,
-  `file_url` text,
+  `driver_id` int DEFAULT NULL,
+  `total_collected` decimal(10,2) DEFAULT NULL,
+  `collection_date` date DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `generated_by` (`generated_by`),
-  CONSTRAINT `reports_ibfk_1` FOREIGN KEY (`generated_by`) REFERENCES `users` (`id`)
+  KEY `driver_id` (`driver_id`),
+  CONSTRAINT `cash_collections_ibfk_1` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `settlements` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `driver_id` int DEFAULT NULL,
+  `amount` decimal(10,2) DEFAULT NULL,
+  `status` enum('SETTLED','PARTIAL','PENDING') DEFAULT NULL,
+  `settlement_date` date DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_driver_settlement_date` (`driver_id`,`settlement_date`),
+  CONSTRAINT `settlements_ibfk_1` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `stock` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `product_id` int DEFAULT NULL,
+  `stock_area_id` int DEFAULT NULL,
+  `quantity` int DEFAULT '0',
+  `quantity_return` int NOT NULL DEFAULT '0',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `empty_quantity` int DEFAULT NULL,
+  `defective_quantity` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_stock_product_area` (`product_id`,`stock_area_id`),
+  KEY `idx_stock_area_id` (`stock_area_id`),
+  CONSTRAINT `fk_stock_stock_area` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `stock_transactions` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `product_id` int DEFAULT NULL,
+  `stock_area_id` int DEFAULT NULL,
+  `type` enum('PURCHASE','PURCHASE_RETURN','EMPTY_RETURN','ADJUSTMENT_ADD','ADJUSTMENT_SUBTRACT','NEW_VALUE','BOOKING_ADD') NOT NULL,
+  `quantity` int DEFAULT NULL,
+  `isApproved` tinyint(1) NOT NULL DEFAULT '0',
+  `reference_id` bigint DEFAULT NULL,
+  `created_by` int DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `driver_id` int DEFAULT NULL,
+  `stock_from` enum('depot','godown','driver','default','stock_out') NOT NULL DEFAULT 'default',
+  `is_defective` tinyint(1) NOT NULL DEFAULT '0',
+  `batch_no` varchar(50) DEFAULT NULL,
+  `allocation_sale_id` int DEFAULT NULL,
+  `allocation_sales_item_id` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `product_id` (`product_id`),
+  KEY `created_by` (`created_by`),
+  KEY `idx_stock_transactions_stock_area_id` (`stock_area_id`),
+  KEY `fk_stock_transactions_driver` (`driver_id`),
+  CONSTRAINT `fk_stock_transactions_driver` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`),
+  CONSTRAINT `fk_stock_transactions_stock_area` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`),
+  CONSTRAINT `stock_transactions_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`),
+  CONSTRAINT `stock_transactions_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=40 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `sales` (
   `id` int NOT NULL AUTO_INCREMENT,
@@ -154,6 +302,20 @@ CREATE TABLE `sales_items` (
   CONSTRAINT `sales_items_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=44 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `payments` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `sale_id` int DEFAULT NULL,
+  `amount` decimal(10,2) DEFAULT NULL,
+  `method` enum('CASH','UPI','CARD') DEFAULT NULL,
+  `status` enum('SUCCESS','PENDING') DEFAULT 'SUCCESS',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `type` enum('DRIVER','COMPANY') DEFAULT 'DRIVER',
+  PRIMARY KEY (`id`),
+  KEY `idx_payments_sale` (`sale_id`),
+  CONSTRAINT `payments_ibfk_1` FOREIGN KEY (`sale_id`) REFERENCES `sales` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=36 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
 CREATE TABLE `settlement_history` (
   `id` int NOT NULL AUTO_INCREMENT,
   `driver_id` int NOT NULL,
@@ -182,85 +344,25 @@ CREATE TABLE `cashier_closings` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `settlements` (
+CREATE TABLE `auth_otp_logs` (
   `id` int NOT NULL AUTO_INCREMENT,
-  `driver_id` int DEFAULT NULL,
-  `amount` decimal(10,2) DEFAULT NULL,
-  `status` enum('SETTLED','PARTIAL','PENDING') DEFAULT NULL,
-  `settlement_date` date DEFAULT NULL,
+  `user_id` int DEFAULT NULL,
+  `identifier` varchar(120) NOT NULL,
+  `otp` varchar(10) NOT NULL,
+  `stage` enum('REQUEST','VERIFY') NOT NULL DEFAULT 'VERIFY',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_driver_settlement_date` (`driver_id`,`settlement_date`),
-  CONSTRAINT `settlements_ibfk_1` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+  KEY `idx_auth_otp_logs_user` (`user_id`),
+  KEY `idx_auth_otp_logs_identifier` (`identifier`),
+  CONSTRAINT `fk_auth_otp_logs_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `stock` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `product_id` int DEFAULT NULL,
-  `stock_area_id` int DEFAULT NULL,
-  `quantity` int DEFAULT '0',
-  `quantity_return` int NOT NULL DEFAULT '0',
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  `empty_quantity` int DEFAULT NULL,
-  `defective_quantity` int DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_stock_product_area` (`product_id`,`stock_area_id`),
-  KEY `idx_stock_area_id` (`stock_area_id`),
-  CONSTRAINT `fk_stock_stock_area` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+INSERT INTO `users` (`name`, `company_name`, `email`, `phone`, `password`, `role`, `status`)
+VALUES
+  ('Rahul Driver', 'LPG Digi', 'driver1@lpgdigi.com', '9000000001', '$2b$10$1fzRcUx.txHRSoNPPqH7ceJl/o5rGCsepjsir1YH9Vm54.dPVb4p2', 'DRIVER', 'ACTIVE'),
+  ('Meena Godown', 'LPG Digi', 'godown1@lpgdigi.com', '9000000002', '$2b$10$1fzRcUx.txHRSoNPPqH7ceJl/o5rGCsepjsir1YH9Vm54.dPVb4p2', 'GODOWN_MANAGER', 'ACTIVE'),
+  ('Arun Purchase', 'LPG Digi', 'purchase1@lpgdigi.com', '9000000003', '$2b$10$1fzRcUx.txHRSoNPPqH7ceJl/o5rGCsepjsir1YH9Vm54.dPVb4p2', 'PURCHASE_MANAGER', 'ACTIVE'),
+  ('Kiran Cashier', 'LPG Digi', 'cashier1@lpgdigi.com', '9000000004', '$2b$10$1fzRcUx.txHRSoNPPqH7ceJl/o5rGCsepjsir1YH9Vm54.dPVb4p2', 'CASHIER', 'ACTIVE');
 
-CREATE TABLE `stock_areas` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `name` varchar(100) NOT NULL,
-  `address` varchar(255) NOT NULL,
-  `manager_id` int DEFAULT NULL,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_stock_areas_name` (`name`),
-  KEY `idx_stock_areas_manager` (`manager_id`),
-  CONSTRAINT `fk_stock_areas_manager` FOREIGN KEY (`manager_id`) REFERENCES `users` (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `stock_transactions` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `product_id` int DEFAULT NULL,
-  `stock_area_id` int DEFAULT NULL,
-  `type` enum('PURCHASE','PURCHASE_RETURN','EMPTY_RETURN','ADJUSTMENT_ADD','ADJUSTMENT_SUBTRACT','NEW_VALUE','BOOKING_ADD') NOT NULL,
-  `quantity` int DEFAULT NULL,
-  `isApproved` tinyint(1) NOT NULL DEFAULT '0',
-  `reference_id` bigint DEFAULT NULL,
-  `created_by` int DEFAULT NULL,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `driver_id` int DEFAULT NULL,
-  `stock_from` enum('depot','godown','driver','default') NOT NULL DEFAULT 'default',
-  `is_defective` tinyint(1) NOT NULL DEFAULT '0',
-  `batch_no` varchar(50) DEFAULT NULL,
-  `allocation_sale_id` int DEFAULT NULL,
-  `allocation_sales_item_id` int DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  KEY `product_id` (`product_id`),
-  KEY `created_by` (`created_by`),
-  KEY `idx_stock_transactions_stock_area_id` (`stock_area_id`),
-  KEY `fk_stock_transactions_driver` (`driver_id`),
-  CONSTRAINT `fk_stock_transactions_driver` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`),
-  CONSTRAINT `fk_stock_transactions_stock_area` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`),
-  CONSTRAINT `stock_transactions_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`),
-  CONSTRAINT `stock_transactions_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=40 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `users` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `name` varchar(100) NOT NULL,
-  `company_name` varchar(150) DEFAULT NULL,
-  `email` varchar(100) DEFAULT NULL,
-  `phone` varchar(15) DEFAULT NULL,
-  `password` varchar(255) DEFAULT NULL,
-  `role` enum('OWNER','DRIVER','CASHIER','GODOWN_MANAGER','SUPPORT','CUSTOMER') DEFAULT NULL,
-  `status` enum('ACTIVE','INACTIVE') DEFAULT 'ACTIVE',
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `email` (`email`),
-  UNIQUE KEY `phone` (`phone`)
-) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

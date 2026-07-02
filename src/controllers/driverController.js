@@ -2,9 +2,239 @@ import db from "../config/db.js";
 
 const getBatchNo = (saleId) => `B-${saleId}`;
 const toNumber = (value) => Number(value || 0);
+const DEFAULT_STOCK_AREA_ID = 1;
 const getProductSizeFromName = (name = "") => {
   const match = String(name).match(/\d+\.?\d*\s?kg/i);
   return match ? match[0].replace(/\s/g, " ") : "";
+};
+
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+const getTodayIsoDate = () => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
+const resolveDateRange = (query = {}) => {
+  const rawStartDate = String(query?.startDate || "");
+  const rawEndDate = String(query?.endDate || "");
+
+  const startDate = DATE_ONLY_REGEX.test(rawStartDate) ? rawStartDate : null;
+  const endDate = DATE_ONLY_REGEX.test(rawEndDate) ? rawEndDate : null;
+
+  if (!startDate && !endDate) {
+    const today = getTodayIsoDate();
+    return { startDate: today, endDate: today };
+  }
+
+  const computedStartDate = startDate || endDate;
+  const computedEndDate = endDate || startDate;
+
+  if (computedStartDate <= computedEndDate) {
+    return { startDate: computedStartDate, endDate: computedEndDate };
+  }
+
+  return { startDate: computedEndDate, endDate: computedStartDate };
+};
+
+const resolveDriverId = async (value) => {
+  const numericValue = Number(value);
+
+  if (!numericValue || Number.isNaN(numericValue)) {
+    return null;
+  }
+
+  const [driverRows] = await db.execute(
+    `
+    SELECT id
+    FROM drivers
+    WHERE id = ?
+    LIMIT 1
+    `,
+    [numericValue]
+  );
+
+  if (driverRows.length) {
+    return Number(driverRows[0].id);
+  }
+
+  const [userMappedRows] = await db.execute(
+    `
+    SELECT id
+    FROM drivers
+    WHERE user_id = ?
+    LIMIT 1
+    `,
+    [numericValue]
+  );
+
+  if (userMappedRows.length) {
+    return Number(userMappedRows[0].id);
+  }
+
+  return null;
+};
+
+const reserveStockForBooking = async (connection, productId, requiredQty) => {
+  let remaining = Number(requiredQty || 0);
+
+  if (remaining <= 0) {
+    return;
+  }
+
+  const [availableRows] = await connection.execute(
+    `
+    SELECT COALESCE(SUM(quantity), 0) AS available_qty
+    FROM stock
+    WHERE product_id = ?
+    FOR UPDATE
+    `,
+    [Number(productId)]
+  );
+
+  const availableQty = Number(availableRows[0]?.available_qty || 0);
+
+  if (availableQty < remaining) {
+    throw new Error(
+      `Insufficient stock for product ${productId}. Available ${availableQty}, required ${remaining}`
+    );
+  }
+
+  const [rows] = await connection.execute(
+    `
+    SELECT id, COALESCE(quantity, 0) AS quantity
+    FROM stock
+    WHERE product_id = ?
+    ORDER BY (stock_area_id = ?) DESC, id ASC
+    FOR UPDATE
+    `,
+    [Number(productId), DEFAULT_STOCK_AREA_ID]
+  );
+
+  for (const row of rows) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const currentQty = Number(row.quantity || 0);
+
+    if (currentQty <= 0) {
+      continue;
+    }
+
+    const deductQty = Math.min(currentQty, remaining);
+
+    await connection.execute(
+      `
+      UPDATE stock
+      SET quantity = GREATEST(COALESCE(quantity, 0) - ?, 0),
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [deductQty, row.id]
+    );
+
+    remaining -= deductQty;
+  }
+};
+
+const restoreStockForBooking = async (connection, productId, quantity) => {
+  const qty = Number(quantity || 0);
+
+  if (qty <= 0) {
+    return;
+  }
+
+  const [rows] = await connection.execute(
+    `
+    SELECT id
+    FROM stock
+    WHERE product_id = ?
+    ORDER BY (stock_area_id = ?) DESC, id ASC
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [Number(productId), DEFAULT_STOCK_AREA_ID]
+  );
+
+  if (rows.length) {
+    await connection.execute(
+      `
+      UPDATE stock
+      SET quantity = COALESCE(quantity, 0) + ?,
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [qty, rows[0].id]
+    );
+    return;
+  }
+
+  await connection.execute(
+    `
+    INSERT INTO stock
+    (
+      product_id,
+      stock_area_id,
+      quantity,
+      empty_quantity,
+      defective_quantity
+    )
+    VALUES (?, ?, ?, 0, 0)
+    `,
+    [Number(productId), DEFAULT_STOCK_AREA_ID, qty]
+  );
+};
+
+const addEmptyStockToGodown = async (connection, productId, qty) => {
+  const quantity = Number(qty || 0);
+
+  if (!quantity || quantity <= 0) {
+    return;
+  }
+
+  const [rows] = await connection.execute(
+    `
+    SELECT id
+    FROM stock
+    WHERE product_id = ?
+    ORDER BY id ASC
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [Number(productId)]
+  );
+
+  if (rows.length) {
+    await connection.execute(
+      `
+      UPDATE stock
+      SET empty_quantity = COALESCE(empty_quantity, 0) + ?,
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [quantity, rows[0].id]
+    );
+    return;
+  }
+
+  await connection.execute(
+    `
+    INSERT INTO stock
+    (
+      product_id,
+      stock_area_id,
+      quantity,
+      empty_quantity,
+      defective_quantity
+    )
+    VALUES (?, NULL, 0, ?, 0)
+    `,
+    [Number(productId), quantity]
+  );
 };
 
 export const getDriverDashboard = async (req, res) => {
@@ -50,19 +280,19 @@ export const getDriverDashboard = async (req, res) => {
         COUNT(DISTINCT d.id) AS totalDrivers,
 
         COUNT(DISTINCT CASE 
-          WHEN u.status = 'ACTIVE' THEN d.id 
+          WHEN u.status = 'ACTIVE' AND d.is_available = 1 THEN d.id 
         END) AS activeToday,
 
-        SUM(CASE 
+        COALESCE(SUM(CASE 
           WHEN s.status = 'DELIVERED' 
           ${startDate && endDate ? "AND DATE(s.delivered_at) BETWEEN ? AND ?" : ""}
           THEN si.quantity ELSE 0 
-        END) AS deliveredToday,
+        END), 0) AS deliveredToday,
 
-        SUM(CASE 
+        COALESCE(SUM(CASE 
           WHEN s.status = 'ASSIGNED' 
           THEN si.quantity ELSE 0 
-        END) AS cylindersInHand
+        END), 0) AS cylindersInHand
 
       FROM drivers d
       JOIN users u ON d.user_id = u.id
@@ -83,17 +313,19 @@ export const getDriverDashboard = async (req, res) => {
         u.phone,
         d.rating,
         u.status,
+        d.is_available,
+        d.vehicle_number,
 
-        SUM(CASE 
+        COALESCE(SUM(CASE 
           WHEN s.status = 'DELIVERED'
           ${dateFilter}
           THEN si.quantity ELSE 0 
-        END) AS deliveriesToday,
+        END), 0) AS deliveriesToday,
 
-        SUM(CASE 
+        COALESCE(SUM(CASE 
           WHEN s.status = 'ASSIGNED' 
           THEN si.quantity ELSE 0 
-        END) AS inHand
+        END), 0) AS inHand
 
       FROM drivers d
       JOIN users u ON d.user_id = u.id
@@ -103,7 +335,7 @@ export const getDriverDashboard = async (req, res) => {
       WHERE 1=1
       ${searchFilter}
 
-      GROUP BY d.id
+      GROUP BY d.id, u.name, u.phone, d.rating, u.status, d.is_available, d.vehicle_number
       ORDER BY deliveriesToday DESC
 
       LIMIT ? OFFSET ?
@@ -268,6 +500,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
   try {
     const { driverId } = req.params;
     const { flag } = req.query;
+    const { startDate, endDate } = resolveDateRange(req.query);
 
     if (!driverId) {
       return res.status(400).json({
@@ -276,61 +509,111 @@ export const getDriverDeliveriesApp = async (req, res) => {
       });
     }
 
-    const numericDriverId = Number(driverId);
+    const numericDriverId = await resolveDriverId(driverId);
 
-    if (Number.isNaN(numericDriverId)) {
+    if (!numericDriverId) {
       return res.status(400).json({
         success: false,
-        message: "driverId must be a valid number",
+        message: "Valid driverId is required",
       });
     }
 
     const [statsRows] = await db.execute(
       `
       SELECT
-        COALESCE(SUM(
-          CASE
-            WHEN s.status = 'ASSIGNED'
-              AND si.status = 'ASSIGNED'
-            THEN COALESCE(si.quantity, 0)
-            ELSE 0
-          END
-        ), 0) AS allocated,
-
-        COALESCE(SUM(
-          CASE
-            WHEN s.status = 'DELIVERED'
-              AND si.status = 'DELIVERED'
-            THEN COALESCE(si.delivered_qty, si.quantity, 0)
-            ELSE 0
-          END
-        ), 0) AS delivered,
-
-        COALESCE(SUM(
-          CASE
-            WHEN si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
-            THEN COALESCE(si.empty_cylinder_qty, 0)
-            ELSE 0
-          END
-        ), 0) AS empties
-
-      FROM sales s
-      LEFT JOIN sales_items si ON si.sale_id = s.id
-      WHERE s.driver_id = ?
+        COALESCE(SUM(batch_stats.allocated_qty), 0) AS allocated,
+        COALESCE(SUM(batch_stats.return_qty), 0) AS returned,
+        COALESCE(SUM(batch_stats.defective_qty), 0) AS defective
+      FROM (
+        SELECT
+          asi.id,
+          COALESCE(asi.quantity, 0) AS allocated_qty,
+          COALESCE(return_data.return_qty, 0) AS return_qty,
+          COALESCE(return_data.defective_qty, 0) AS defective_qty
+        FROM sales_items asi
+        INNER JOIN sales a ON a.id = asi.sale_id
+        LEFT JOIN (
+          SELECT
+            st.allocation_sales_item_id,
+            SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS return_qty,
+            SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS defective_qty
+          FROM stock_transactions st
+          WHERE st.stock_from = 'driver'
+            AND st.type = 'PURCHASE_RETURN'
+            AND st.isApproved IN (0, 1)
+            AND st.allocation_sales_item_id IS NOT NULL
+          GROUP BY st.allocation_sales_item_id
+        ) return_data ON return_data.allocation_sales_item_id = asi.id
+        WHERE a.driver_id = ?
+          AND a.status = 'ASSIGNED'
+          AND asi.allocation_sales_item_id IS NULL
+          AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
+      ) batch_stats
       `,
-      [numericDriverId]
+      [numericDriverId, startDate, endDate]
     );
 
-    const [collectionRows] = await db.execute(
+    // Delivered: actual DELIVERED sales in the date range — same source as the delivered list page
+    const [deliveredRows] = await db.execute(
       `
-      SELECT COALESCE(SUM(p.amount), 0) AS collection
-      FROM payments p
-      INNER JOIN sales s ON s.id = p.sale_id
+      SELECT COALESCE(SUM(si.delivered_qty), 0) AS delivered
+      FROM sales s
+      INNER JOIN sales_items si ON si.sale_id = s.id
       WHERE s.driver_id = ?
         AND s.status = 'DELIVERED'
-        AND p.status = 'SUCCESS'
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [numericDriverId]
+      [numericDriverId, startDate, endDate]
+    );
+
+    // In Hand: allocation-date range tracking (same scope as selected date range)
+    const [inHandRows] = await db.execute(
+      `
+      SELECT
+        COALESCE(SUM(asi.quantity), 0) AS allocated,
+        COALESCE(SUM(COALESCE(dd.delivered_qty, 0)), 0) AS delivered,
+        COALESCE(SUM(COALESCE(rd.return_qty, 0)), 0) AS returned,
+        COALESCE(SUM(COALESCE(rd.defective_qty, 0)), 0) AS defective
+      FROM sales_items asi
+      INNER JOIN sales a ON a.id = asi.sale_id
+      LEFT JOIN (
+        SELECT child.allocation_sales_item_id,
+               SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
+        FROM sales_items child
+        INNER JOIN sales cs ON cs.id = child.sale_id
+        WHERE child.allocation_sales_item_id IS NOT NULL AND cs.status = 'DELIVERED'
+        GROUP BY child.allocation_sales_item_id
+      ) dd ON dd.allocation_sales_item_id = asi.id
+      LEFT JOIN (
+        SELECT st.allocation_sales_item_id,
+               SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity,0) ELSE 0 END) AS return_qty,
+               SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity,0) ELSE 0 END) AS defective_qty
+        FROM stock_transactions st
+        WHERE st.stock_from = 'driver'
+          AND st.type = 'PURCHASE_RETURN'
+          AND st.isApproved IN (0, 1)
+          AND st.allocation_sales_item_id IS NOT NULL
+        GROUP BY st.allocation_sales_item_id
+      ) rd ON rd.allocation_sales_item_id = asi.id
+      WHERE a.driver_id = ?
+        AND a.status = 'ASSIGNED'
+        AND asi.allocation_sales_item_id IS NULL
+        AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    // Dashboard collection should match driver collection flow:
+    // include ASSIGNED (not yet sent) + PENDING (sent, awaiting cashier approval).
+    const [pendingCollectionRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(sh.amount), 0) AS pending_collection
+      FROM settlement_history sh
+      WHERE sh.driver_id = ?
+        AND sh.status IN ('ASSIGNED', 'PENDING')
+        AND DATE(sh.created_at) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
     );
 
     let statusFilterQuery = "";
@@ -382,7 +665,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
       LEFT JOIN payments p ON p.sale_id = s.id
       WHERE s.driver_id = ?
         ${statusFilterQuery}
-        AND DATE(COALESCE(s.delivered_at, s.created_at)) = CURDATE()
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       GROUP BY
         s.id,
         u.name,
@@ -394,19 +677,71 @@ export const getDriverDeliveriesApp = async (req, res) => {
         s.payment_method
       ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
       `,
-      [numericDriverId]
+      [numericDriverId, startDate, endDate]
     );
 
     const allocated = Number(statsRows[0]?.allocated || 0);
-    const delivered = Number(statsRows[0]?.delivered || 0);
+    const returned = Number(statsRows[0]?.returned || 0);
+    const defective = Number(statsRows[0]?.defective || 0);
+
+    // delivered: from actual delivered sales in date range
+    const delivered = Number(deliveredRows[0]?.delivered || 0);
+
+    // inHand: from allocation/delivery/return tracking in selected date range
+    const ihAllocated = Number(inHandRows[0]?.allocated || 0);
+    const ihDelivered = Number(inHandRows[0]?.delivered || 0);
+    const ihReturned = Number(inHandRows[0]?.returned || 0);
+    const ihDefective = Number(inHandRows[0]?.defective || 0);
+    const inHand = Math.max(ihAllocated - ihDelivered - ihReturned - ihDefective, 0);
+    const inHandOriginal = Math.max(ihAllocated, 0);
+
+    // empties: collected from customers in date range
+    const [emptiesCollectedRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(si.empty_cylinder_qty), 0) AS collected
+      FROM sales s
+      INNER JOIN sales_items si ON si.sale_id = s.id
+      WHERE s.driver_id = ?
+        AND s.status = 'DELIVERED'
+        AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    // Returned empties include pending + approved explicit empty return requests.
+    const [emptiesReturnedRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(st.quantity), 0) AS returned
+      FROM stock_transactions st
+      LEFT JOIN sales linked_sale
+        ON linked_sale.id = st.reference_id
+       AND linked_sale.driver_id = st.driver_id
+      WHERE st.driver_id = ?
+        AND st.stock_from = 'driver'
+        AND st.type = 'EMPTY_RETURN'
+        AND COALESCE(st.isApproved, 0) IN (0, 1)
+        AND linked_sale.id IS NULL
+        AND DATE(st.created_at) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    const emptiesOriginal = Number(emptiesCollectedRows[0]?.collected || 0);
+    const emptiesReturned = Number(emptiesReturnedRows[0]?.returned || 0);
+    const empties = Math.max(emptiesOriginal - emptiesReturned, 0);
+
+    const pendingCollection = Number(pendingCollectionRows[0]?.pending_collection || 0);
 
     const stats = {
       allocated,
       delivered,
-      collection: Number(collectionRows[0]?.collection || 0),
-      empties: Number(statsRows[0]?.empties || 0),
-      inHand: Math.max(allocated - delivered, 0),
-      newDelivery: allocated,
+      pendingCollection,
+      empties,
+      emptiesOriginal,
+      inHand,
+      inHandOriginal,
+      newDelivery: 0,
     };
 
     const deliveries = deliveryRows.map((item) => ({
@@ -450,7 +785,7 @@ export const markSaleAsDelivered = async (req, res) => {
 
   try {
     const { saleId } = req.params;
-    const { saleIds, payment_method, empty_cylinder_qty = 0, empty_product_id, stock_area_id, created_by } = req.body || {};
+    const { saleIds, payment_method, empty_cylinder_qty = 0, empty_product_id, created_by } = req.body || {};
 
     // =====================================================
     // BULK MODE
@@ -558,7 +893,7 @@ export const markSaleAsDelivered = async (req, res) => {
 
     const [saleRows] = await connection.execute(
       `
-      SELECT id, status, total_amount
+      SELECT id, status, total_amount, driver_id
       FROM sales
       WHERE id = ?
       FOR UPDATE
@@ -595,54 +930,22 @@ export const markSaleAsDelivered = async (req, res) => {
       [numericSaleId]
     );
 
-    // create empty cylinder stock transaction if qty > 0
-    if (numericEmptyQty > 0) {
-      if (!empty_product_id) {
-        await connection.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "empty_product_id is required when empty_cylinder_qty > 0",
-        });
-      }
-
-      if (!stock_area_id) {
-        await connection.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "stock_area_id is required when empty_cylinder_qty > 0",
-        });
-      }
-
-      if (!created_by) {
-        await connection.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "created_by is required when empty_cylinder_qty > 0",
-        });
-      }
-
-      await connection.execute(
-        `
-        INSERT INTO stock_transactions (
-          product_id,
-          stock_area_id,
-          type,
-          quantity,
-          isApproved,
-          reference_id,
-          created_by
-        )
-        VALUES (?, ?, 'ADJUSTMENT_ADD', ?, 0, ?, ?)
-        `,
-        [
-          Number(empty_product_id),
-          Number(stock_area_id),
-          numericEmptyQty,
-          numericSaleId,
-          Number(created_by),
-        ]
-      );
-    }
+    // Empty cylinders collected during delivery are tracked on sales_items.
+    // A godown return request is created only from the explicit return flow.
+    await connection.execute(
+      `
+      UPDATE sales_items
+      SET empty_cylinder_qty = ?,
+          empty_cylinder_status = CASE
+            WHEN ? <= 0 THEN 'PENDING'
+            WHEN ? >= quantity THEN 'DELIVERED'
+            ELSE 'PARTIAL_DELIVERED'
+          END,
+          delivered_qty = quantity
+      WHERE sale_id = ?
+      `,
+      [numericEmptyQty, numericEmptyQty, numericEmptyQty, numericSaleId]
+    );
 
     await connection.commit();
 
@@ -676,7 +979,7 @@ const getEmptyCylinderStatus = (orderedQty, emptyQty) => {
 
   if (empty === ordered) return "DELIVERED";
 
-  if (empty > 0 && empty < ordered) return "PARTIAL_PENDING";
+  if (empty > 0 && empty < ordered) return "PARTIAL_DELIVERED";
 
   return "PENDING";
 };
@@ -707,12 +1010,13 @@ export const createDriverSale = async (req, res) => {
       allocation_sale_id = null,
       allocation_sales_item_id = null,
       batch_no = null,
+      otp = null,
     } = req.body;
 
-    const numericDriverId = Number(driver_id);
+    const numericDriverId = await resolveDriverId(driver_id);
     const numericProductId = Number(product_id);
     const numericQuantity = Number(quantity || 1);
-    const numericAmount = Number(amount || 0);
+    const requestedAmount = Number(amount || 0);
     const numericDeliveredQty = Number(delivered_qty || numericQuantity);
     const numericEmptyCylinderQty = Number(empty_cylinder_qty || 0);
     const numericDefectiveQty = Number(defective_qty || 0);
@@ -720,7 +1024,21 @@ export const createDriverSale = async (req, res) => {
     if (!numericDriverId) {
       return res.status(400).json({
         success: false,
-        message: "driver_id is required",
+        message: "valid driver_id is required",
+      });
+    }
+
+    // Fetch the driver's user_id so it can be used as created_by in stock_transactions
+    const [driverUserRows] = await db.execute(
+      `SELECT user_id FROM drivers WHERE id = ? LIMIT 1`,
+      [numericDriverId]
+    );
+    const driverUserId = driverUserRows[0]?.user_id || null;
+
+    if (!allocation_sales_item_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select a cylinder batch",
       });
     }
 
@@ -930,6 +1248,9 @@ export const createDriverSale = async (req, res) => {
       addressId = addressResult.insertId;
     }
 
+    const unitPrice = Number(selectedProduct.price || 0);
+    const finalAmount = unitPrice > 0 ? unitPrice * numericQuantity : requestedAmount;
+
     const [saleResult] = await connection.execute(
       `
       INSERT INTO sales
@@ -950,12 +1271,29 @@ export const createDriverSale = async (req, res) => {
         customerId,
         numericDriverId,
         addressId,
-        numericAmount,
+        finalAmount,
         payment_method,
       ]
     );
 
     const saleId = saleResult.insertId;
+
+    const normalizedOtp = String(otp || "").trim();
+
+    if (normalizedOtp) {
+      await connection.execute(
+        `
+        INSERT INTO driver_sale_otps
+        (
+          sale_id,
+          otp,
+          status
+        )
+        VALUES (?, ?, 'PENDING')
+        `,
+        [saleId, normalizedOtp]
+      );
+    }
 
     const finalEmptyCylinderStatus =
       empty_cylinder_status ||
@@ -963,7 +1301,7 @@ export const createDriverSale = async (req, res) => {
         ? "PENDING"
         : numericEmptyCylinderQty >= numericQuantity
           ? "DELIVERED"
-          : "PARTIAL_PENDING");
+          : "PARTIAL_DELIVERED");
 
     const finalBatchNo =
       batch_no ||
@@ -992,7 +1330,7 @@ export const createDriverSale = async (req, res) => {
         saleId,
         numericProductId,
         numericQuantity,
-        numericAmount,
+        unitPrice,
         numericDeliveredQty,
         numericEmptyCylinderQty,
         finalEmptyCylinderStatus,
@@ -1002,6 +1340,9 @@ export const createDriverSale = async (req, res) => {
         allocation_sales_item_id ? Number(allocation_sales_item_id) : null,
       ]
     );
+
+    // Empty return requests are created only from the explicit
+    // "Return Empties to Godown" action.
 
     let paymentMethodForPayments = null;
     let paymentStatus = "PENDING";
@@ -1029,7 +1370,7 @@ export const createDriverSale = async (req, res) => {
       )
       VALUES (?, ?, ?, ?, 'DRIVER')
       `,
-      [saleId, numericAmount, paymentMethodForPayments, paymentStatus]
+      [saleId, finalAmount, paymentMethodForPayments, paymentStatus]
     );
 
     const paymentId = paymentInsertResult.insertId;
@@ -1054,7 +1395,7 @@ export const createDriverSale = async (req, res) => {
           saleId,
           paymentId,
           payment_method,
-          numericAmount,
+          finalAmount,
         ]
       );
     }
@@ -1086,7 +1427,7 @@ export const createDriverSale = async (req, res) => {
 
         quantity: numericQuantity,
         deliveredQty: numericDeliveredQty,
-        amount: numericAmount,
+        amount: finalAmount,
         paymentMethod: payment_method,
         emptyCylinderCollected: numericEmptyCylinderQty > 0,
         emptyCylinderQty: numericEmptyCylinderQty,
@@ -1111,7 +1452,8 @@ export const createDriverSale = async (req, res) => {
 
 export const getDriverCollectionSummary = async (req, res) => {
   try {
-    const driverId = Number(req.params.driverId);
+    const driverId = await resolveDriverId(req.params.driverId);
+    const { startDate, endDate } = resolveDateRange(req.query);
 
     if (!driverId) {
       return res.status(400).json({
@@ -1136,9 +1478,10 @@ export const getDriverCollectionSummary = async (req, res) => {
       LEFT JOIN users u ON u.id = s.customer_id
       WHERE sh.driver_id = ?
         AND sh.status IN ('ASSIGNED', 'PENDING')
+        AND DATE(sh.created_at) BETWEEN ? AND ?
       ORDER BY sh.created_at ASC
       `,
-      [driverId]
+      [driverId, startDate, endDate]
     );
 
     const buildGroup = (method, status) => {
@@ -1208,7 +1551,7 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const driverId = Number(req.params.driverId);
+    const driverId = await resolveDriverId(req.params.driverId);
     const { method, denominations } = req.body || {};
 
     if (!driverId) {
@@ -1312,7 +1655,8 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
 
 export const getDriverInHandSummary = async (req, res) => {
   try {
-    const driverId = Number(req.params.driverId);
+    const driverId = await resolveDriverId(req.params.driverId);
+    const { startDate, endDate } = resolveDateRange(req.query);
 
     if (!driverId) {
       return res.status(400).json({
@@ -1381,9 +1725,10 @@ export const getDriverInHandSummary = async (req, res) => {
         WHERE a.driver_id = ?
           AND a.status = 'ASSIGNED'
           AND asi.allocation_sales_item_id IS NULL
+          AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
       ) x
       `,
-      [driverId]
+      [driverId, startDate, endDate]
     );
 
     const allocated = toNumber(summaryRows[0]?.allocated);
@@ -1615,6 +1960,7 @@ export const returnInHandToGodown = async (req, res) => {
 export const getDriverCollectionHistory = async (req, res) => {
   try {
     const { driverId } = req.params;
+    const { startDate, endDate } = resolveDateRange(req.query);
 
     const parsedPage = parseInt(req.query.page, 10);
     const parsedLimit = parseInt(req.query.limit, 10);
@@ -1627,7 +1973,7 @@ export const getDriverCollectionHistory = async (req, res) => {
 
     const offset = (safePage - 1) * safeLimit;
 
-    const numericDriverId = Number(driverId);
+    const numericDriverId = await resolveDriverId(driverId);
 
     if (!numericDriverId) {
       return res.status(400).json({
@@ -1642,11 +1988,12 @@ export const getDriverCollectionHistory = async (req, res) => {
       FROM settlement_history sh
       WHERE sh.driver_id = ?
         AND sh.status = 'SETTLED'
+        AND DATE(sh.created_at) BETWEEN ? AND ?
       GROUP BY DATE(sh.created_at)
       ORDER BY collection_date DESC
       LIMIT ${safeLimit} OFFSET ${offset}
       `,
-      [numericDriverId]
+      [numericDriverId, startDate, endDate]
     );
 
     const [countRows] = await db.execute(
@@ -1657,10 +2004,11 @@ export const getDriverCollectionHistory = async (req, res) => {
         FROM settlement_history sh
         WHERE sh.driver_id = ?
           AND sh.status = 'SETTLED'
+          AND DATE(sh.created_at) BETWEEN ? AND ?
         GROUP BY DATE(sh.created_at)
       ) t
       `,
-      [numericDriverId]
+      [numericDriverId, startDate, endDate]
     );
 
     const totalDates = Number(countRows[0]?.totalDates || 0);
@@ -1779,10 +2127,11 @@ export const getDriverCollectionHistory = async (req, res) => {
 export const getDriverEmptyCylindersToday = async (req, res) => {
   try {
     const { driverId } = req.params;
+    const { startDate, endDate } = resolveDateRange(req.query);
 
-    const numericDriverId = Number(driverId);
+    const numericDriverId = await resolveDriverId(driverId);
 
-    if (!driverId || Number.isNaN(numericDriverId)) {
+    if (!numericDriverId) {
       return res.status(400).json({
         success: false,
         message: "Valid driverId is required",
@@ -1806,10 +2155,10 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
         AND s.status = 'DELIVERED'
         AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
         AND COALESCE(si.empty_cylinder_qty, 0) > 0
-        AND DATE(COALESCE(s.delivered_at, s.created_at)) = CURDATE()
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       ORDER BY COALESCE(s.delivered_at, s.created_at) ASC, si.id ASC
       `,
-      [numericDriverId]
+      [numericDriverId, startDate, endDate]
     );
 
     const [returnRows] = await db.execute(
@@ -1823,13 +2172,18 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
         p.name AS product_name
       FROM stock_transactions st
       LEFT JOIN products p ON p.id = st.product_id
+      LEFT JOIN sales linked_sale
+        ON linked_sale.id = st.reference_id
+       AND linked_sale.driver_id = st.driver_id
       WHERE st.driver_id = ?
         AND st.stock_from = 'driver'
         AND st.type IN ('EMPTY_RETURN')
-        AND DATE(st.created_at) = CURDATE()
+        AND COALESCE(st.isApproved, 0) IN (0, 1)
+        AND linked_sale.id IS NULL
+        AND DATE(st.created_at) BETWEEN ? AND ?
       ORDER BY st.created_at DESC, st.id DESC
       `,
-      [numericDriverId]
+      [numericDriverId, startDate, endDate]
     );
 
     const collected = collectedRows.reduce(
@@ -1837,9 +2191,10 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
       0
     );
 
-    const returned = returnRows
-      .filter((row) => Number(row.isApproved) === 1)
-      .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+    const returned = returnRows.reduce(
+      (sum, row) => sum + Number(row.quantity || 0),
+      0
+    );
 
     return res.status(200).json({
       success: true,
@@ -1882,10 +2237,11 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
 export const getDriverEmptyCylindersHistory = async (req, res) => {
   try {
     const { driverId } = req.params;
+    const { startDate, endDate } = resolveDateRange(req.query);
 
-    const numericDriverId = Number(driverId);
+    const numericDriverId = await resolveDriverId(driverId);
 
-    if (!driverId || Number.isNaN(numericDriverId)) {
+    if (!numericDriverId) {
       return res.status(400).json({
         success: false,
         message: "Valid driverId is required",
@@ -1903,20 +2259,34 @@ export const getDriverEmptyCylindersHistory = async (req, res) => {
           AND s.status = 'DELIVERED'
           AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
           AND COALESCE(si.empty_cylinder_qty, 0) > 0
+          AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
 
         UNION
 
         SELECT DATE(st.created_at) AS history_date
         FROM stock_transactions st
+        LEFT JOIN sales linked_sale
+          ON linked_sale.id = st.reference_id
+         AND linked_sale.driver_id = st.driver_id
         WHERE st.driver_id = ?
           AND st.stock_from = 'driver'
           AND st.is_defective = 0
-          AND st.type IN ('EMPTY_RETURN', 'PURCHASE_RETURN')
+          AND COALESCE(st.isApproved, 0) IN (0, 1)
+          AND st.type IN ('EMPTY_RETURN')
+          AND linked_sale.id IS NULL
+          AND DATE(st.created_at) BETWEEN ? AND ?
       ) x
       GROUP BY history_date
       ORDER BY history_date DESC
       `,
-      [numericDriverId, numericDriverId]
+      [
+        numericDriverId,
+        startDate,
+        endDate,
+        numericDriverId,
+        startDate,
+        endDate,
+      ]
     );
 
     const items = [];
@@ -1958,10 +2328,15 @@ export const getDriverEmptyCylindersHistory = async (req, res) => {
           p.name AS product_name
         FROM stock_transactions st
         LEFT JOIN products p ON p.id = st.product_id
+        LEFT JOIN sales linked_sale
+          ON linked_sale.id = st.reference_id
+         AND linked_sale.driver_id = st.driver_id
         WHERE st.driver_id = ?
           AND st.stock_from = 'driver'
           AND st.is_defective = 0
-          AND st.type IN ('EMPTY_RETURN', 'PURCHASE_RETURN')
+          AND COALESCE(st.isApproved, 0) IN (0, 1)
+          AND st.type IN ('EMPTY_RETURN')
+          AND linked_sale.id IS NULL
           AND DATE(st.created_at) = ?
         ORDER BY st.created_at DESC, st.id DESC
         `,
@@ -1973,9 +2348,10 @@ export const getDriverEmptyCylindersHistory = async (req, res) => {
         0
       );
 
-      const returned = returns
-        .filter((row) => Number(row.isApproved) === 1)
-        .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+      const returned = returns.reduce(
+        (sum, row) => sum + Number(row.quantity || 0),
+        0
+      );
 
       items.push({
         date: historyDate,
@@ -2025,14 +2401,14 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
   try {
     const { driver_id, product_id, quantity } = req.body;
 
-    const numericDriverId = Number(driver_id);
+    const numericDriverId = await resolveDriverId(driver_id);
     const numericProductId = Number(product_id);
     const numericQuantity = Number(quantity);
 
-    if (!numericDriverId || Number.isNaN(numericDriverId)) {
+    if (!numericDriverId) {
       return res.status(400).json({
         success: false,
-        message: "driver_id is required",
+        message: "valid driver_id is required",
       });
     }
 
@@ -2052,6 +2428,60 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
 
     await connection.beginTransaction();
 
+    const [collectedRows] = await connection.execute(
+      `
+      SELECT
+        COALESCE(SUM(si.empty_cylinder_qty), 0) AS collected_qty
+      FROM sales s
+      INNER JOIN sales_items si
+        ON si.sale_id = s.id
+      WHERE s.driver_id = ?
+        AND s.status = 'DELIVERED'
+        AND si.product_id = ?
+        AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
+        AND COALESCE(si.empty_cylinder_qty, 0) > 0
+      `,
+      [numericDriverId, numericProductId]
+    );
+
+    const [returnedRows] = await connection.execute(
+      `
+      SELECT
+        COALESCE(SUM(st.quantity), 0) AS returned_qty
+      FROM stock_transactions st
+      LEFT JOIN sales linked_sale
+        ON linked_sale.id = st.reference_id
+       AND linked_sale.driver_id = st.driver_id
+      WHERE st.driver_id = ?
+        AND st.product_id = ?
+        AND st.stock_from = 'driver'
+        AND COALESCE(st.isApproved, 0) IN (0, 1)
+        AND st.type = 'EMPTY_RETURN'
+        AND linked_sale.id IS NULL
+      `,
+      [numericDriverId, numericProductId]
+    );
+
+    const collectedQty = Number(collectedRows[0]?.collected_qty || 0);
+    const returnedQty = Number(returnedRows[0]?.returned_qty || 0);
+    const availableQty = Math.max(collectedQty - returnedQty, 0);
+
+    if (availableQty <= 0) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "No collected empty cylinders available for this product",
+      });
+    }
+
+    if (numericQuantity > availableQty) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Only ${availableQty} empty cylinder(s) can be returned for this product`,
+      });
+    }
+
     await connection.execute(
       `
       INSERT INTO stock_transactions
@@ -2067,13 +2497,13 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
         stock_from,
         is_defective
       )
-      VALUES (?, 1, 'EMPTY_RETURN', ?, 0, ?, ?, ?, 'driver', 0)
+      VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, ?, ?, 'driver', 0)
       `,
       [
         numericProductId,
         numericQuantity,
         Date.now(),
-        numericDriverId,
+        req.user?.id || null,
         numericDriverId,
       ]
     );
@@ -2096,6 +2526,111 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
     });
   } finally {
     connection.release();
+  }
+};
+
+export const getDriverReturnableEmptyProducts = async (req, res) => {
+  try {
+    const { driverId } = req.params;
+    const search = String(req.query.search || "").trim();
+
+    const numericDriverId = await resolveDriverId(driverId);
+
+    if (!numericDriverId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid driverId is required",
+      });
+    }
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.type,
+        c.name AS category_name,
+
+        COALESCE(collected_data.collected_qty, 0) AS collected_qty,
+        COALESCE(returned_data.returned_qty, 0) AS returned_qty
+      FROM products p
+      LEFT JOIN categories c
+        ON c.id = p.category_id
+
+      LEFT JOIN (
+        SELECT
+          si.product_id,
+          COALESCE(SUM(si.empty_cylinder_qty), 0) AS collected_qty
+        FROM sales s
+        INNER JOIN sales_items si
+          ON si.sale_id = s.id
+        WHERE s.driver_id = ?
+          AND s.status = 'DELIVERED'
+          AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
+          AND COALESCE(si.empty_cylinder_qty, 0) > 0
+        GROUP BY si.product_id
+      ) collected_data
+        ON collected_data.product_id = p.id
+
+      LEFT JOIN (
+        SELECT
+          st.product_id,
+          COALESCE(SUM(st.quantity), 0) AS returned_qty
+        FROM stock_transactions st
+        LEFT JOIN sales linked_sale
+          ON linked_sale.id = st.reference_id
+         AND linked_sale.driver_id = st.driver_id
+        WHERE st.driver_id = ?
+          AND st.stock_from = 'driver'
+          AND COALESCE(st.isApproved, 0) IN (0, 1)
+          AND st.type = 'EMPTY_RETURN'
+          AND linked_sale.id IS NULL
+        GROUP BY st.product_id
+      ) returned_data
+        ON returned_data.product_id = p.id
+
+      WHERE (
+        COALESCE(collected_data.collected_qty, 0) - COALESCE(returned_data.returned_qty, 0)
+      ) > 0
+        AND (
+          ? = ''
+          OR p.name LIKE ?
+        )
+
+      ORDER BY p.name ASC
+      `,
+      [numericDriverId, numericDriverId, search, `%${search}%`]
+    );
+
+    const data = rows.map((row) => {
+      const collectedQty = Number(row.collected_qty || 0);
+      const returnedQty = Number(row.returned_qty || 0);
+      const availableQty = Math.max(collectedQty - returnedQty, 0);
+
+      return {
+        id: Number(row.id),
+        name: row.name,
+        type: row.type,
+        categoryName: row.category_name || "",
+        collectedQty,
+        returnedQty,
+        availableQty,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Returnable empty cylinder products fetched successfully",
+      data,
+    });
+  } catch (error) {
+    console.error("getDriverReturnableEmptyProducts error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch returnable empty cylinder products",
+      error: error.message,
+    });
   }
 };
 
@@ -2126,18 +2661,19 @@ export const approveTodayEmptyCylinderReturns = async (req, res) => {
     const [pendingRows] = await connection.execute(
       `
       SELECT
-        s.id AS sale_id,
-        s.empty_cylinder_qty,
-        s.empty_cylinder_status,
-        COALESCE(SUM(si.quantity), 0) AS sale_quantity
-      FROM sales s
-      LEFT JOIN sales_items si
-        ON si.sale_id = s.id
-      WHERE s.driver_id = ?
-        AND s.empty_cylinder_qty > 0
-        AND s.empty_cylinder_status IN ('PENDING', 'PARTIAL_PENDING')
-        AND DATE(s.created_at) = CURDATE()
-      GROUP BY s.id, s.empty_cylinder_qty, s.empty_cylinder_status
+        st.id,
+        st.product_id,
+        st.quantity
+      FROM stock_transactions st
+      LEFT JOIN sales linked_sale
+        ON linked_sale.id = st.reference_id
+       AND linked_sale.driver_id = st.driver_id
+      WHERE st.driver_id = ?
+        AND st.stock_from = 'driver'
+        AND st.type = 'EMPTY_RETURN'
+        AND COALESCE(st.isApproved, 0) = 0
+        AND linked_sale.id IS NULL
+        AND DATE(st.created_at) = CURDATE()
       FOR UPDATE
       `,
       [numericDriverId]
@@ -2152,22 +2688,23 @@ export const approveTodayEmptyCylinderReturns = async (req, res) => {
     }
 
     for (const row of pendingRows) {
-      const saleId = Number(row.sale_id);
-      const emptyCylinderQty = Number(row.empty_cylinder_qty || 0);
-      const saleQuantity = Number(row.sale_quantity || 0);
-
-      const nextStatus =
-        emptyCylinderQty === saleQuantity ? "DELIVERED" : "PARTIAL_DELIVERED";
+      const transactionId = Number(row.id);
+      const productId = Number(row.product_id);
+      const qty = Number(row.quantity || 0);
 
       await connection.execute(
         `
-        UPDATE sales
-        SET empty_cylinder_status = ?
+        UPDATE stock_transactions
+        SET isApproved = 1
         WHERE id = ?
           AND driver_id = ?
         `,
-        [nextStatus, saleId, numericDriverId]
+        [transactionId, numericDriverId]
       );
+
+      if (productId && qty > 0) {
+        await addEmptyStockToGodown(connection, productId, qty);
+      }
     }
 
     await connection.commit();
@@ -2227,22 +2764,59 @@ export const getDriverProfileHistory = async (req, res) => {
       `
       SELECT
         d.id,
+        d.user_id,
         d.vehicle_number,
         u.name,
         u.phone
-      FROM drivers d
-      INNER JOIN users u
-        ON u.id = d.user_id
-      WHERE d.id = ?
+      FROM users u
+      LEFT JOIN drivers d
+        ON d.user_id = u.id
+      WHERE u.role = 'DRIVER'
+        AND (
+          d.id = ?
+          OR d.user_id = ?
+          OR u.id = ?
+        )
       LIMIT 1
       `,
-      [numericDriverId]
+      [numericDriverId, numericDriverId, numericDriverId]
     );
 
     if (!driverRows.length) {
       return res.status(404).json({
         success: false,
         message: "Driver not found",
+      });
+    }
+
+    const resolvedDriverId = driverRows[0].id ? Number(driverRows[0].id) : null;
+
+    if (!resolvedDriverId) {
+      return res.status(200).json({
+        success: true,
+        message: "Driver profile fetched successfully",
+        data: {
+          driver: {
+            id: Number(numericDriverId),
+            name: driverRows[0].name || "Driver",
+            phone: driverRows[0].phone || "",
+            vehicleNumber: "N/A",
+          },
+          performance: {
+            today: 0,
+            thisWeek: 0,
+            total: 0,
+          },
+          items: [],
+          pagination: {
+            page: safePage,
+            limit: safeLimit,
+            totalItems: 0,
+            totalPages: 1,
+            hasNextPage: false,
+            hasPrevPage: false,
+          },
+        },
       });
     }
 
@@ -2275,7 +2849,7 @@ export const getDriverProfileHistory = async (req, res) => {
         AND s.status = 'DELIVERED'
         AND si.status = 'DELIVERED'
       `,
-      [numericDriverId]
+      [resolvedDriverId]
     );
 
     const [dateRows] = await db.execute(
@@ -2289,7 +2863,7 @@ export const getDriverProfileHistory = async (req, res) => {
       ORDER BY delivery_date DESC
       LIMIT ${safeLimit} OFFSET ${offset}
       `,
-      [numericDriverId]
+      [resolvedDriverId]
     );
 
     const [countRows] = await db.execute(
@@ -2303,7 +2877,7 @@ export const getDriverProfileHistory = async (req, res) => {
         GROUP BY DATE(s.created_at)
       ) t
       `,
-      [numericDriverId]
+      [resolvedDriverId]
     );
 
     const totalDates = Number(countRows[0]?.totalDates || 0);
@@ -2361,7 +2935,7 @@ export const getDriverProfileHistory = async (req, res) => {
           s.created_at
         ORDER BY s.created_at ASC, s.id ASC
         `,
-        [numericDriverId, deliveryDate]
+        [resolvedDriverId, deliveryDate]
       );
 
       const totalAmount = dailyRows.reduce(
@@ -2393,7 +2967,7 @@ export const getDriverProfileHistory = async (req, res) => {
       message: "Driver profile history fetched successfully",
       data: {
         driver: {
-          id: Number(driverRows[0].id),
+          id: Number(resolvedDriverId),
           name: driverRows[0].name || "Driver",
           phone: driverRows[0].phone || "",
           vehicleNumber: driverRows[0].vehicle_number || "N/A",
@@ -2481,7 +3055,7 @@ export const searchProductsForDriverApp = async (req, res) => {
 
 export const getAllocatedCylinders = async (req, res) => {
   try {
-    const driverId = Number(req.params.driverId);
+    const driverId = await resolveDriverId(req.params.driverId);
 
     if (!driverId) {
       return res.status(400).json({
@@ -2750,12 +3324,12 @@ export const createInHandRequest = async (req, res) => {
       items = [],
     } = req.body;
 
-    const numericDriverId = Number(driver_id);
+    const numericDriverId = await resolveDriverId(driver_id);
 
     if (!numericDriverId) {
       return res.status(400).json({
         success: false,
-        message: "driver_id is required",
+        message: "valid driver_id is required",
       });
     }
 
@@ -2891,7 +3465,7 @@ export const createInHandRequest = async (req, res) => {
           allocation_sale_id,
           allocation_sales_item_id
         )
-        VALUES (?, 1, 'PURCHASE_RETURN', ?, 0, ?, ?, ?, 'driver', ?, ?, ?, ?)
+        VALUES (?, NULL, 'PURCHASE_RETURN', ?, 0, ?, ?, ?, 'driver', ?, ?, ?, ?)
         `,
         [
           numericProductId,
@@ -2933,7 +3507,7 @@ export const createInHandRequest = async (req, res) => {
 
 export const getAllocatedBatchDetail = async (req, res) => {
   try {
-    const driverId = Number(req.params.driverId);
+    const driverId = await resolveDriverId(req.params.driverId);
     const allocationSalesItemId = Number(req.params.allocationSalesItemId);
 
     if (!driverId || !allocationSalesItemId) {
@@ -3060,7 +3634,7 @@ export const getAllocatedBatchDetail = async (req, res) => {
 
 export const getAvailableBatchesForDriver = async (req, res) => {
   try {
-    const driverId = Number(req.params.driverId);
+    const driverId = await resolveDriverId(req.params.driverId);
     const { product_id } = req.query;
 
     if (!driverId) {
@@ -3382,14 +3956,14 @@ export const createDriverBooking = async (req, res) => {
   try {
     const { driver_id, customer_id, address_id, items = [] } = req.body;
 
-    const numericDriverId = Number(driver_id);
+    const numericDriverId = await resolveDriverId(driver_id);
     const numericCustomerId = Number(customer_id);
     const numericAddressId = Number(address_id);
 
     if (!numericDriverId || !numericCustomerId || !numericAddressId) {
       return res.status(400).json({
         success: false,
-        message: "driver_id, customer_id and address_id are required",
+        message: "valid driver_id, customer_id and address_id are required",
       });
     }
 
@@ -3482,9 +4056,9 @@ export const createDriverBooking = async (req, res) => {
           empty_cylinder_status,
           defective_qty
         )
-        VALUES (?, ?, ?, ?, 'PENDING', 0, 0, 'PENDING', 0)
+        VALUES (?, ?, ?, ?, 'PENDING', 0, ?, 'PENDING', 0)
         `,
-        [saleId, productId, quantity, price]
+          [saleId, productId, quantity, price, quantity]
       );
 
       await connection.execute(
@@ -3504,7 +4078,7 @@ export const createDriverBooking = async (req, res) => {
           allocation_sale_id,
           allocation_sales_item_id
         )
-        VALUES (?, 1, 'BOOKING_ADD', ?, 0, ?, ?, ?, 'godown', 0, ?, ?)
+        VALUES (?, NULL, 'BOOKING_ADD', ?, 0, ?, ?, ?, 'godown', 0, ?, ?)
         `,
         [
           productId,
@@ -3544,12 +4118,12 @@ export const createDriverBooking = async (req, res) => {
 
 export const getDriverBookings = async (req, res) => {
   try {
-    const driverId = Number(req.params.driverId);
+    const driverId = await resolveDriverId(req.params.driverId);
 
     if (!driverId) {
       return res.status(400).json({
         success: false,
-        message: "driverId is required",
+        message: "Valid driverId is required",
       });
     }
 
@@ -3630,7 +4204,7 @@ export const cancelDriverBooking = async (req, res) => {
 
   try {
     const saleId = Number(req.params.saleId);
-    const driverId = Number(req.body.driver_id);
+    const driverId = await resolveDriverId(req.body.driver_id);
 
     if (!saleId) {
       return res.status(400).json({
@@ -3642,7 +4216,7 @@ export const cancelDriverBooking = async (req, res) => {
     if (!driverId) {
       return res.status(400).json({
         success: false,
-        message: "driver_id is required",
+        message: "valid driver_id is required",
       });
     }
 

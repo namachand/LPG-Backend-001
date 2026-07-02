@@ -1,0 +1,42 @@
+import express from "express";
+import {
+	getOwnerDashboard,
+	getOwnerExpensesDashboard,
+	getOwnerJobAssignmentUsers,
+	getOwnerSalesDashboard,
+	getOwnerDriversDashboard,
+	getOwnerStocksDashboard,
+	getOwnerStockAreas,
+	getOwnerStockCategories,
+	getOwnerStockItems,
+	getOwnerStockItemDetails,
+	postOwnerStockCategoryWithItem,
+	postOwnerStockItem,
+	postOwnerStockEntry,
+	getOwnerStockPriceList,
+	postOwnerStockPriceUpdates,
+	approveOwnerOfficeExpense,
+	createOwnerJobAssignmentUser,
+} from "../controllers/ownerController.js";
+
+const router = express.Router();
+
+router.get("/dashboard", getOwnerDashboard);
+router.get("/expenses/dashboard", getOwnerExpensesDashboard);
+router.put("/expenses/:expenseId/approve", approveOwnerOfficeExpense);
+router.get("/job-assignment/users", getOwnerJobAssignmentUsers);
+router.post("/job-assignment/users", createOwnerJobAssignmentUser);
+router.get("/sales/dashboard", getOwnerSalesDashboard);
+router.get("/drivers/dashboard", getOwnerDriversDashboard);
+router.get("/stocks/dashboard", getOwnerStocksDashboard);
+router.get("/stocks/areas", getOwnerStockAreas);
+router.get("/stocks/categories", getOwnerStockCategories);
+router.get("/stocks/items", getOwnerStockItems);
+router.get("/stocks/item-details", getOwnerStockItemDetails);
+router.post("/stocks/categories-with-item", postOwnerStockCategoryWithItem);
+router.post("/stocks/items", postOwnerStockItem);
+router.post("/stocks/entries", postOwnerStockEntry);
+router.get("/stocks/prices", getOwnerStockPriceList);
+router.post("/stocks/prices/update", postOwnerStockPriceUpdates);
+
+export default router;

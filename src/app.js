@@ -1,6 +1,9 @@
 import express from "express";
 import cors from "cors";
+import { fileURLToPath } from "url";
+import path from "path";
 import routes from "./routes/authRoutes.js";
+import uploadRoutes from "./routes/uploadRoutes.js";
 import salesRoutes from "./routes/salesRoutes.js";
 import driverRoutes from "./routes/driverRoutes.js";
 import stockRoutes from "./routes/stockRoutes.js"
@@ -10,13 +13,30 @@ import getUserSettingRoutes from "./routes/userRoutes.js"
 import getExpenseRoutes from "./routes/expenseRoutes.js"
 import godownRoutes from "./routes/godownRoutes.js";
 import cashierRoutes from "./routes/cashierRoutes.js";
+import purchaseRoutes from "./routes/purchaseRoutes.js";
+import ownerRoutes from "./routes/ownerRoutes.js";
+import customerComplaintRoutes from "./routes/customerComplaintRoutes.js";
+import prPenaltyRoutes from "./routes/prPenaltyRoutes.js";
+import dashboardOverviewRoutes from "./routes/dashboardOverviewRoutes.js";
+import customerDashboardRoutes from "./routes/customerDashboardRoutes.js";
+import customerConnectionRoutes from "./routes/customerConnectionRoutes.js";
+import customerTransferRoutes from "./routes/customerTransferRoutes.js";
+import nameChangeRoutes from "./routes/nameChangeRoutes.js";
+import iocOtpRoutes from "./routes/iocOtpRoutes.js";
 
 const app = express();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 app.use(cors({
   origin: true,
   credentials: true
 }));
 app.use(express.json());
+
+// Serve uploaded files as static assets
+app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 app.use("/api/auth", routes);
 app.use("/api/sales", salesRoutes);
@@ -28,9 +48,17 @@ app.use("/api/users", getUserSettingRoutes);
 app.use("/api/expenses", getExpenseRoutes);
 app.use("/api/godown", godownRoutes);
 app.use("/api/cashier", cashierRoutes);
-
-
-
+app.use("/api/purchase", purchaseRoutes);
+app.use("/api/owner", ownerRoutes);
+app.use("/api/upload", uploadRoutes);
+app.use("/api/customer-complaints", customerComplaintRoutes);
+app.use("/api/pr-penalties", prPenaltyRoutes);
+app.use("/api/dashboard", dashboardOverviewRoutes);
+app.use("/api/customer-dashboard", customerDashboardRoutes);
+app.use("/api/customer-connections", customerConnectionRoutes);
+app.use("/api/customer-transfers", customerTransferRoutes);
+app.use("/api/name-changes", nameChangeRoutes);
+app.use("/api/ioc-otps", iocOtpRoutes);
 
 
 export default app;

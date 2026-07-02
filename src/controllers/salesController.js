@@ -14,18 +14,19 @@ export const getSalesDashboard = async (req, res) => {
 
     // Date Filter
     let dateFilter = "";
-    const values = [];
+    const dateFilterValues = [];
 
     if (startDate && endDate) {
-      dateFilter = `AND DATE(s.created_at) BETWEEN ? AND ?`;
-      values.push(startDate, endDate);
+      dateFilter = `AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?`;
+      dateFilterValues.push(startDate, endDate);
     }
 
     // Search Filter
     let searchFilter = "";
+    const searchFilterValues = [];
     if (search) {
       searchFilter = `AND u.name LIKE ?`;
-      values.push(`%${search}%`);
+      searchFilterValues.push(`%${search}%`);
     }
 
     // =========================
@@ -33,15 +34,15 @@ export const getSalesDashboard = async (req, res) => {
     // =========================
     const [summary] = await db.query(
       `SELECT 
-        SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END) AS cash,
-        SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END) AS gpay,
-        SUM(CASE WHEN p.type = 'COMPANY' THEN p.amount ELSE 0 END) AS online
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END), 0) AS gpay,
+        COALESCE(SUM(CASE WHEN p.type = 'COMPANY' THEN p.amount ELSE 0 END), 0) AS online
         FROM payments p
         JOIN sales s ON p.sale_id = s.id
         WHERE s.status = 'DELIVERED'
       ${dateFilter}
       `,
-      values
+      dateFilterValues
     );
 
     // =========================
@@ -67,7 +68,7 @@ export const getSalesDashboard = async (req, res) => {
       ORDER BY total DESC
       LIMIT ? OFFSET ?
       `,
-      [...values, Number(limit), Number(offset)]
+      [...dateFilterValues, ...searchFilterValues, Number(limit), Number(offset)]
     );
 
     // =========================
@@ -75,19 +76,95 @@ export const getSalesDashboard = async (req, res) => {
     // =========================
     const [countResult] = await db.query(
       `
-      SELECT COUNT(*) AS total
+      SELECT COUNT(DISTINCT d.id) AS total
       FROM drivers d
       JOIN users u ON d.user_id = u.id
+      LEFT JOIN sales s ON s.driver_id = d.id AND s.status = 'DELIVERED'
       WHERE 1=1
+      ${dateFilter}
       ${searchFilter}
       `,
-      search ? [`%${search}%`] : []
+      [...dateFilterValues, ...searchFilterValues]
     );
+
+    // =========================
+    // RECENT SALES DATA
+    // =========================
+    const [recentSalesRows] = await db.query(
+      `
+      SELECT
+        s.id AS sale_id,
+        c.name AS customer_name,
+        COALESCE(
+          CASE
+            WHEN COUNT(DISTINCT pr.type) > 1 THEN 'MIXED'
+            ELSE MAX(pr.type)
+          END,
+          'DOMESTIC'
+        ) AS sale_type,
+        COALESCE(SUM(COALESCE(si.quantity, 0)), 0) AS total_qty,
+        COALESCE(s.total_amount, 0) AS amount,
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash_amount,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS upi_amount,
+        COALESCE(SUM(CASE WHEN (p.type = 'COMPANY' OR p.method = 'CARD') AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS online_amount,
+        du.name AS driver_name,
+        s.status
+      FROM sales s
+      INNER JOIN users c ON c.id = s.customer_id
+      LEFT JOIN drivers d ON d.id = s.driver_id
+      LEFT JOIN users du ON du.id = d.user_id
+      LEFT JOIN sales_items si ON si.sale_id = s.id
+      LEFT JOIN products pr ON pr.id = si.product_id
+      LEFT JOIN payments p ON p.sale_id = s.id
+      WHERE 1=1
+      ${dateFilter}
+      GROUP BY s.id, c.name, du.name, s.status, s.total_amount
+      ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
+      LIMIT 8
+      `,
+      dateFilterValues
+    );
+
+    const recentSales = recentSalesRows.map((row) => {
+      const cashAmount = Number(row.cash_amount || 0);
+      const upiAmount = Number(row.upi_amount || 0);
+      const onlineAmount = Number(row.online_amount || 0);
+
+      let payment = "-";
+      const paymentModes = [
+        cashAmount > 0 ? "Cash" : null,
+        upiAmount > 0 ? "GPay" : null,
+        onlineAmount > 0 ? "Online" : null,
+      ].filter(Boolean);
+
+      if (paymentModes.length === 1) {
+        payment = paymentModes[0];
+      } else if (paymentModes.length > 1) {
+        payment = "Mixed";
+      }
+
+      return {
+        orderId: `S-${String(row.sale_id).padStart(3, "0")}`,
+        customer: row.customer_name,
+        type:
+          row.sale_type === "COMMERCIAL"
+            ? "Commercial"
+            : row.sale_type === "MIXED"
+              ? "Mixed"
+              : "Domestic",
+        quantity: Number(row.total_qty || 0),
+        amount: Number(row.amount || 0),
+        payment,
+        driver: row.driver_name || "-",
+        status: String(row.status || "PENDING"),
+      };
+    });
 
     return res.json({
       success: true,
       summary: summary[0],
       data: drivers,
+      recentSales,
       pagination: {
         total: countResult[0].total,
         page: Number(page),

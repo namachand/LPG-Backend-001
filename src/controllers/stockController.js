@@ -8,63 +8,71 @@ export const getStockDashboard = async (req, res) => {
     const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
     const offset = (page - 1) * limit;
 
-    const search = (req.query.search || "").trim();
-    const startDate = req.query.startDate || null;
-    const endDate = req.query.endDate || null;
+    const search = String(req.query.search || "").trim();
+    const rawStartDate = String(req.query.startDate || "");
+    const rawEndDate = String(req.query.endDate || "");
     const stockAreaId = req.query.stockAreaId ? Number(req.query.stockAreaId) : null;
 
-    const categoryFilters = [];
-    const categoryFilterParams = [];
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    const safeStartDate = dateRegex.test(rawStartDate) ? rawStartDate : null;
+    const safeEndDate = dateRegex.test(rawEndDate) ? rawEndDate : null;
 
-    if (search) {
-      categoryFilters.push(`CONCAT(c.name, ' ', CASE WHEN p.type = 'DOMESTIC' THEN 'Domestic' ELSE 'Commercial' END) LIKE ?`);
-      categoryFilterParams.push(`%${search}%`);
+    let startDate = safeStartDate;
+    let endDate = safeEndDate;
+
+    if (startDate && !endDate) {
+      endDate = startDate;
     }
 
-    const categoryWhereClause = categoryFilters.length
-      ? `WHERE ${categoryFilters.join(" AND ")}`
+    if (!startDate && endDate) {
+      startDate = endDate;
+    }
+
+    if (startDate && endDate && startDate > endDate) {
+      const swap = startDate;
+      startDate = endDate;
+      endDate = swap;
+    }
+
+    const productSearchFilter = search
+      ? `AND CONCAT_WS(' ', p.name, c.name, p.type) LIKE ?`
       : "";
+    const productSearchParams = search ? [`%${search}%`] : [];
 
-    const txFilters = [];
-    const txParams = [];
-
-    if (startDate) {
-      txFilters.push(`st.created_at >= ?`);
-      txParams.push(`${startDate} 00:00:00`);
-    }
-
-    if (endDate) {
-      txFilters.push(`st.created_at <= ?`);
-      txParams.push(`${endDate} 23:59:59`);
-    }
-
-    if (stockAreaId) {
-      txFilters.push(`st.stock_area_id = ?`);
-      txParams.push(stockAreaId);
-    }
-
-    const txWhereClause = txFilters.length
-      ? `WHERE ${txFilters.join(" AND ")}`
+    const stockAreaProductFilter = stockAreaId
+      ? `
+        AND EXISTS (
+          SELECT 1
+          FROM stock stk_area
+          WHERE stk_area.product_id = p.id
+            AND stk_area.stock_area_id = ?
+        )
+      `
       : "";
+    const stockAreaProductParams = stockAreaId ? [stockAreaId] : [];
 
-    const salesFilters = [];
-    const salesParams = [];
+    const stockSubAreaFilter = stockAreaId ? `WHERE s.stock_area_id = ?` : "";
+    const stockSubAreaParams = stockAreaId ? [stockAreaId] : [];
 
-    if (startDate) {
-      salesFilters.push(`s.created_at >= ?`);
-      salesParams.push(`${startDate} 00:00:00`);
-    }
+    const salesDateFilter =
+      startDate && endDate
+        ? `AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?`
+        : "";
+    const salesDateParams = startDate && endDate ? [startDate, endDate] : [];
 
-    if (endDate) {
-      salesFilters.push(`s.created_at <= ?`);
-      salesParams.push(`${endDate} 23:59:59`);
-    }
+    const txDateFilter =
+      startDate && endDate
+        ? `AND st.created_at BETWEEN ? AND ?`
+        : "";
+    const txDateParams =
+      startDate && endDate
+        ? [`${startDate} 00:00:00`, `${endDate} 23:59:59`]
+        : [];
 
-    const salesWhereClause = salesFilters.length
-      ? `WHERE ${salesFilters.join(" AND ")}`
-      : "";
+    const txAreaFilter = stockAreaId ? `AND st.stock_area_id = ?` : "";
+    const txAreaParams = stockAreaId ? [stockAreaId] : [];
 
-    const areaSalesFilter = stockAreaId
+    const salesAreaFilter = stockAreaId
       ? `
         AND EXISTS (
           SELECT 1
@@ -74,57 +82,41 @@ export const getStockDashboard = async (req, res) => {
         )
       `
       : "";
-
-    const areaSalesParams = stockAreaId ? [stockAreaId] : [];
+    const salesAreaParams = stockAreaId ? [stockAreaId] : [];
 
     const [summaryRows] = await connection.query(
       `
       SELECT
-        COALESCE(SUM(CASE WHEN agg.product_type = 'DOMESTIC' THEN agg.net_stock ELSE 0 END), 0) AS domestic,
-        COALESCE(SUM(CASE WHEN agg.product_type = 'COMMERCIAL' THEN agg.net_stock ELSE 0 END), 0) AS commercial,
-        COALESCE(SUM(CASE WHEN agg.category_name = '5kg' THEN agg.net_stock ELSE 0 END), 0) AS fiveKg
-      FROM (
+        COALESCE(SUM(CASE WHEN p.type = 'DOMESTIC' THEN COALESCE(stk.opening, 0) ELSE 0 END), 0) AS domestic,
+        COALESCE(SUM(CASE WHEN p.type = 'COMMERCIAL' THEN COALESCE(stk.opening, 0) ELSE 0 END), 0) AS commercial,
+        COALESCE(SUM(CASE WHEN LOWER(CONCAT_WS(' ', p.name, c.name)) LIKE '%5kg%' THEN COALESCE(stk.opening, 0) ELSE 0 END), 0) AS fiveKg
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN (
         SELECT
-          p.id AS product_id,
-          p.type AS product_type,
-          c.name AS category_name,
-          SUM(
-            CASE
-              WHEN st.type = 'PURCHASE' THEN st.quantity
-              WHEN st.type = 'PURCHASE_RETURN' THEN -st.quantity
-              WHEN st.type = 'ADJUSTMENT_ADD' THEN st.quantity
-              WHEN st.type = 'ADJUSTMENT_SUBTRACT' THEN -st.quantity
-              ELSE 0
-            END
-          ) AS net_stock
-        FROM stock_transactions st
-        INNER JOIN products p ON p.id = st.product_id
-        INNER JOIN categories c ON c.id = p.category_id
-        ${txWhereClause}
-        GROUP BY p.id, p.type, c.name
-      ) agg
+          s.product_id,
+          COALESCE(SUM(COALESCE(s.quantity, 0)), 0) AS opening
+        FROM stock s
+        ${stockSubAreaFilter}
+        GROUP BY s.product_id
+      ) stk ON stk.product_id = p.id
+      WHERE 1=1
+      ${productSearchFilter}
+      ${stockAreaProductFilter}
       `,
-      [...txParams]
+      [...stockSubAreaParams, ...productSearchParams, ...stockAreaProductParams]
     );
 
     const [countRows] = await connection.query(
       `
       SELECT COUNT(*) AS total
-      FROM (
-        SELECT
-          c.id,
-          p.type
-        FROM categories c
-        INNER JOIN products p ON p.category_id = c.id
-        ${stockAreaId ? "INNER JOIN stock stk ON stk.product_id = p.id AND stk.stock_area_id = ?" : ""}
-        ${categoryWhereClause}
-        GROUP BY c.id, p.type
-      ) x
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE 1=1
+      ${productSearchFilter}
+      ${stockAreaProductFilter}
       `,
-      [
-        ...(stockAreaId ? [stockAreaId] : []),
-        ...categoryFilterParams,
-      ]
+      [...productSearchParams, ...stockAreaProductParams]
     );
 
     const total = Number(countRows[0]?.total || 0);
@@ -133,67 +125,204 @@ export const getStockDashboard = async (req, res) => {
     const [detailsRows] = await connection.query(
       `
       SELECT
-        c.id AS category_id,
-        CONCAT(c.name, ' ', CASE WHEN p.type = 'DOMESTIC' THEN 'Domestic' ELSE 'Commercial' END) AS category,
+        p.id AS product_id,
+        CONCAT(p.name, ' - ', CASE WHEN p.type = 'DOMESTIC' THEN 'Domestic' ELSE 'Commercial' END) AS category,
 
-        COALESCE(st.purchase, 0) - COALESCE(st.purchaseReturn, 0) AS opening,
+        COALESCE(stk.opening, 0) AS opening,
         COALESCE(sa.sales, 0) AS sales,
         COALESCE(sa.salesReturn, 0) AS salesReturn,
-        COALESCE(st.purchase, 0) AS purchase,
-        COALESCE(st.purchaseReturn, 0) AS purchaseReturn,
-        COALESCE(sa.pendingAssigned, 0) + COALESCE(sa.salesReturn, 0) AS systemStock
+        COALESCE(pur.purchase, 0) AS purchase,
+        COALESCE(pr.purchaseReturn, 0) AS purchaseReturn,
+        COALESCE(def.defective, 0) AS defective,
+        COALESCE(stk.emptyQty, 0) AS emptyCylinders,
+        GREATEST(
+          COALESCE(stk.opening, 0)
+          + COALESCE(pur.purchase, 0)
+          + COALESCE(sa.salesReturn, 0)
+          - COALESCE(sa.sales, 0)
+          - COALESCE(pr.purchaseReturn, 0),
+          0
+        ) AS systemStock
 
-      FROM categories c
-      INNER JOIN products p ON p.category_id = c.id
-      ${stockAreaId ? "INNER JOIN stock stk_filter ON stk_filter.product_id = p.id AND stk_filter.stock_area_id = ?" : ""}
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
 
       LEFT JOIN (
         SELECT
-          p.category_id,
-          p.type,
-          SUM(CASE WHEN st.type = 'PURCHASE' THEN st.quantity ELSE 0 END) AS purchase,
-          SUM(CASE WHEN st.type = 'PURCHASE_RETURN' THEN st.quantity ELSE 0 END) AS purchaseReturn
+          s.product_id,
+          COALESCE(SUM(COALESCE(s.quantity, 0)), 0) AS opening,
+          COALESCE(SUM(COALESCE(s.empty_quantity, 0)), 0) AS emptyQty
+        FROM stock s
+        ${stockSubAreaFilter}
+        GROUP BY s.product_id
+      ) stk ON stk.product_id = p.id
+
+      LEFT JOIN (
+        SELECT
+          st.product_id,
+          COALESCE(SUM(st.quantity), 0) AS purchase
         FROM stock_transactions st
-        INNER JOIN products p ON p.id = st.product_id
-        ${txWhereClause}
-        GROUP BY p.category_id, p.type
-      ) st
-        ON st.category_id = c.id
-       AND st.type = p.type
+        WHERE st.type = 'PURCHASE'
+          AND COALESCE(st.isApproved, 0) = 1
+          ${txDateFilter}
+          ${txAreaFilter}
+        GROUP BY st.product_id
+      ) pur ON pur.product_id = p.id
 
       LEFT JOIN (
         SELECT
-          p.category_id,
-          p.type,
+          st.product_id,
+          COALESCE(SUM(st.quantity), 0) AS purchaseReturn
+        FROM stock_transactions st
+        WHERE COALESCE(st.isApproved, 0) = 1
+          AND (
+            (st.type = 'EMPTY_RETURN' AND st.stock_from = 'godown')
+            OR (st.type = 'PURCHASE_RETURN' AND st.stock_from = 'stock_out' AND COALESCE(st.is_defective, 0) = 1)
+          )
+          ${txDateFilter}
+          ${txAreaFilter}
+        GROUP BY st.product_id
+      ) pr ON pr.product_id = p.id
+
+      LEFT JOIN (
+        SELECT
+          st.product_id,
+          COALESCE(SUM(st.quantity), 0) AS defective
+        FROM stock_transactions st
+        WHERE COALESCE(st.isApproved, 0) = 1
+          AND COALESCE(st.is_defective, 0) = 1
+          ${txDateFilter}
+          ${txAreaFilter}
+        GROUP BY st.product_id
+      ) def ON def.product_id = p.id
+
+      LEFT JOIN (
+        SELECT
+          si.product_id,
           SUM(CASE WHEN s.status = 'DELIVERED' THEN si.quantity ELSE 0 END) AS sales,
-          SUM(CASE WHEN s.status = 'CANCELLED' THEN si.quantity ELSE 0 END) AS salesReturn,
-          SUM(CASE WHEN s.status IN ('PENDING', 'ASSIGNED') THEN si.quantity ELSE 0 END) AS pendingAssigned
+          SUM(CASE WHEN s.status = 'CANCELLED' THEN si.quantity ELSE 0 END) AS salesReturn
         FROM sales_items si
         INNER JOIN sales s ON s.id = si.sale_id
         INNER JOIN products p ON p.id = si.product_id
-        ${salesWhereClause}
-        ${areaSalesFilter}
-        GROUP BY p.category_id, p.type
-      ) sa
-        ON sa.category_id = c.id
-       AND sa.type = p.type
+        WHERE s.status IN ('DELIVERED', 'CANCELLED')
+        ${salesDateFilter}
+        ${salesAreaFilter}
+        GROUP BY si.product_id
+      ) sa ON sa.product_id = p.id
 
-      ${categoryWhereClause}
-      GROUP BY c.id, c.name, p.type, st.purchase, st.purchaseReturn, sa.sales, sa.salesReturn, sa.pendingAssigned
-      ORDER BY c.id, p.type
+      WHERE 1=1
+      ${productSearchFilter}
+      ${stockAreaProductFilter}
+      ORDER BY p.name ASC, p.type ASC
       LIMIT ?
       OFFSET ?
       `,
       [
-        ...(stockAreaId ? [stockAreaId] : []),
-        ...txParams,
-        ...salesParams,
-        ...areaSalesParams,
-        ...categoryFilterParams,
+        ...stockSubAreaParams,
+        ...txDateParams,
+        ...txAreaParams,
+        ...txDateParams,
+        ...txAreaParams,
+        ...txDateParams,
+        ...txAreaParams,
+        ...salesDateParams,
+        ...salesAreaParams,
+        ...productSearchParams,
+        ...stockAreaProductParams,
         limit,
         offset,
       ]
     );
+
+    const [purchaseMovementRows] = await connection.query(
+      `
+      SELECT
+        st.created_at AS movementDate,
+        'Purchase' AS movementType,
+        CONCAT(p.name, ' - ', CASE WHEN p.type = 'DOMESTIC' THEN 'Domestic' ELSE 'Commercial' END) AS item,
+        st.quantity AS qty,
+        COALESCE(u.name, 'System') AS movedBy
+      FROM stock_transactions st
+      INNER JOIN products p ON p.id = st.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN users u ON u.id = st.created_by
+      WHERE st.type = 'PURCHASE'
+        AND COALESCE(st.isApproved, 0) = 1
+        ${txDateFilter}
+        ${txAreaFilter}
+        ${productSearchFilter}
+      ORDER BY st.created_at DESC
+      LIMIT 30
+      `,
+      [...txDateParams, ...txAreaParams, ...productSearchParams]
+    );
+
+    const [purchaseReturnMovementRows] = await connection.query(
+      `
+      SELECT
+        st.created_at AS movementDate,
+        'Purchase Return' AS movementType,
+        CONCAT(p.name, ' - ', CASE WHEN p.type = 'DOMESTIC' THEN 'Domestic' ELSE 'Commercial' END) AS item,
+        st.quantity AS qty,
+        COALESCE(du.name, u.name, 'Godown') AS movedBy
+      FROM stock_transactions st
+      INNER JOIN products p ON p.id = st.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN drivers d ON d.id = st.driver_id
+      LEFT JOIN users du ON du.id = d.user_id
+      LEFT JOIN users u ON u.id = st.created_by
+      WHERE COALESCE(st.isApproved, 0) = 1
+        AND (
+          (st.type = 'EMPTY_RETURN' AND st.stock_from = 'godown')
+          OR (st.type = 'PURCHASE_RETURN' AND st.stock_from = 'stock_out' AND COALESCE(st.is_defective, 0) = 1)
+        )
+        ${txDateFilter}
+        ${txAreaFilter}
+        ${productSearchFilter}
+      ORDER BY st.created_at DESC
+      LIMIT 30
+      `,
+      [...txDateParams, ...txAreaParams, ...productSearchParams]
+    );
+
+    const [salesMovementRows] = await connection.query(
+      `
+      SELECT
+        COALESCE(s.delivered_at, s.created_at) AS movementDate,
+        CASE WHEN s.status = 'DELIVERED' THEN 'Sales' ELSE 'Sales Return' END AS movementType,
+        CONCAT(p.name, ' - ', CASE WHEN p.type = 'DOMESTIC' THEN 'Domestic' ELSE 'Commercial' END) AS item,
+        si.quantity AS qty,
+        COALESCE(du.name, CASE WHEN s.sales_from = 'CASHIER' THEN 'Cashier' ELSE 'System' END) AS movedBy
+      FROM sales_items si
+      INNER JOIN sales s ON s.id = si.sale_id
+      INNER JOIN products p ON p.id = si.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN drivers d ON d.id = s.driver_id
+      LEFT JOIN users du ON du.id = d.user_id
+      WHERE s.status IN ('DELIVERED', 'CANCELLED')
+      ${salesDateFilter}
+      ${salesAreaFilter}
+      ${productSearchFilter}
+      ORDER BY movementDate DESC
+      LIMIT 40
+      `,
+      [...salesDateParams, ...salesAreaParams, ...productSearchParams]
+    );
+
+    const movements = [
+      ...purchaseMovementRows,
+      ...purchaseReturnMovementRows,
+      ...salesMovementRows,
+    ]
+      .sort((a, b) => new Date(b.movementDate).getTime() - new Date(a.movementDate).getTime())
+      .slice(0, 50)
+      .map((row) => ({
+        date: row.movementDate,
+        type: row.movementType,
+        item: row.item,
+        qty: Number(row.qty || 0),
+        by: row.movedBy || "System",
+      }));
 
     return res.status(200).json({
       success: true,
@@ -202,16 +331,27 @@ export const getStockDashboard = async (req, res) => {
         commercial: Number(summaryRows[0]?.commercial || 0),
         fiveKg: Number(summaryRows[0]?.fiveKg || 0),
       },
-      data: detailsRows.map((row) => ({
-        category_id: row.category_id,
-        category: row.category,
-        opening: Number(row.opening || 0),
-        sales: Number(row.sales || 0),
-        salesReturn: Number(row.salesReturn || 0),
-        purchase: Number(row.purchase || 0),
-        purchaseReturn: Number(row.purchaseReturn || 0),
-        systemStock: Number(row.systemStock || 0),
-      })),
+      data: detailsRows.map((row) => {
+        const opening = Number(row.opening || 0);
+        const sales = Number(row.sales || 0);
+        const purchase = Number(row.purchase || 0);
+
+        return {
+          product_id: row.product_id,
+          category: row.category,
+          opening,
+          sales,
+          salesReturn: Number(row.salesReturn || 0),
+          purchase,
+          purchaseReturn: Number(row.purchaseReturn || 0),
+          defective: Number(row.defective || 0),
+          emptyCylinders: Number(row.emptyCylinders || 0),
+          systemStock: Number(row.systemStock || 0),
+          // Closing Stock = Opening Stock + Purchase Stock - Sales
+          closingStock: opening + purchase - sales,
+        };
+      }),
+      movements,
       pagination: {
         total,
         page,
@@ -254,6 +394,606 @@ export const getStockAreas = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to fetch stock areas",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+const inferProductType = (categoryName, itemName) => {
+  const text = `${String(categoryName || "")} ${String(itemName || "")}`.toLowerCase();
+  return text.includes("commercial") ? "COMMERCIAL" : "DOMESTIC";
+};
+
+export const searchOwnerStockCategories = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const search = String(req.query.search || "").trim();
+    const params = [];
+    let filter = "";
+
+    if (search) {
+      filter = "WHERE c.name LIKE ?";
+      params.push(`%${search}%`);
+    }
+
+    const [rows] = await connection.query(
+      `
+      SELECT c.id, c.name
+      FROM categories c
+      ${filter}
+      ORDER BY c.name ASC
+      LIMIT 30
+      `,
+      params
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+    });
+  } catch (error) {
+    console.error("searchOwnerStockCategories error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch stock categories",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const searchOwnerStockItems = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const categoryId = Number(req.query.categoryId || 0);
+    const search = String(req.query.search || "").trim();
+
+    if (!categoryId) {
+      return res.status(400).json({
+        success: false,
+        message: "categoryId is required",
+      });
+    }
+
+    const params = [categoryId];
+    let searchFilter = "";
+
+    if (search) {
+      searchFilter = "AND p.name LIKE ?";
+      params.push(`%${search}%`);
+    }
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.type,
+        p.price,
+        p.category_id AS categoryId
+      FROM products p
+      WHERE p.category_id = ?
+      ${searchFilter}
+      ORDER BY p.name ASC
+      LIMIT 40
+      `,
+      params
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+    });
+  } catch (error) {
+    console.error("searchOwnerStockItems error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch stock items",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getOwnerStockItemContext = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const itemId = Number(req.query.itemId || 0);
+    const stockAreaId = Number(req.query.stockAreaId || 0);
+
+    if (!itemId || !stockAreaId) {
+      return res.status(400).json({
+        success: false,
+        message: "itemId and stockAreaId are required",
+      });
+    }
+
+    const [[product]] = await connection.query(
+      `
+      SELECT p.id, p.name, p.price
+      FROM products p
+      WHERE p.id = ?
+      LIMIT 1
+      `,
+      [itemId]
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Item not found",
+      });
+    }
+
+    const [[stockRow]] = await connection.query(
+      `
+      SELECT quantity
+      FROM stock
+      WHERE product_id = ? AND stock_area_id = ?
+      LIMIT 1
+      `,
+      [itemId, stockAreaId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        quantity: stockRow ? Number(stockRow.quantity || 0) : null,
+        price: product.price != null ? Number(product.price) : null,
+        hasExistingData: Boolean(stockRow || product.price != null),
+      },
+    });
+  } catch (error) {
+    console.error("getOwnerStockItemContext error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch item context",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const createOwnerStockCategoryWithItem = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const categoryName = String(req.body.categoryName || "").trim();
+    const itemName = String(req.body.itemName || "").trim();
+
+    if (!categoryName || !itemName) {
+      return res.status(400).json({
+        success: false,
+        message: "categoryName and itemName are required",
+      });
+    }
+
+    await connection.beginTransaction();
+
+    let categoryId;
+    const [[existingCategory]] = await connection.query(
+      `SELECT id, name FROM categories WHERE LOWER(name) = LOWER(?) LIMIT 1`,
+      [categoryName]
+    );
+
+    if (existingCategory) {
+      categoryId = existingCategory.id;
+    } else {
+      const [catInsert] = await connection.query(
+        `INSERT INTO categories (name) VALUES (?)`,
+        [categoryName]
+      );
+      categoryId = catInsert.insertId;
+    }
+
+    const [[existingItem]] = await connection.query(
+      `
+      SELECT id, name, type, price, category_id AS categoryId
+      FROM products
+      WHERE category_id = ? AND LOWER(name) = LOWER(?)
+      LIMIT 1
+      `,
+      [categoryId, itemName]
+    );
+
+    let item;
+    if (existingItem) {
+      item = existingItem;
+    } else {
+      const type = inferProductType(categoryName, itemName);
+      const [itemInsert] = await connection.query(
+        `INSERT INTO products (name, type, category_id, price) VALUES (?, ?, ?, NULL)`,
+        [itemName, type, categoryId]
+      );
+      item = {
+        id: itemInsert.insertId,
+        name: itemName,
+        type,
+        price: null,
+        categoryId,
+      };
+    }
+
+    await connection.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: "Category and item saved",
+      data: {
+        category: {
+          id: categoryId,
+          name: existingCategory?.name || categoryName,
+        },
+        item,
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("createOwnerStockCategoryWithItem error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to save category and item",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const createOwnerStockItem = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const categoryId = Number(req.body.categoryId || 0);
+    const itemName = String(req.body.itemName || "").trim();
+
+    if (!categoryId || !itemName) {
+      return res.status(400).json({
+        success: false,
+        message: "categoryId and itemName are required",
+      });
+    }
+
+    const [[category]] = await connection.query(
+      `SELECT id, name FROM categories WHERE id = ? LIMIT 1`,
+      [categoryId]
+    );
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    const [[existingItem]] = await connection.query(
+      `
+      SELECT id, name, type, price, category_id AS categoryId
+      FROM products
+      WHERE category_id = ? AND LOWER(name) = LOWER(?)
+      LIMIT 1
+      `,
+      [categoryId, itemName]
+    );
+
+    if (existingItem) {
+      return res.status(200).json({
+        success: true,
+        message: "Item already exists",
+        data: existingItem,
+      });
+    }
+
+    const type = inferProductType(category.name, itemName);
+    const [insertResult] = await connection.query(
+      `INSERT INTO products (name, type, category_id, price) VALUES (?, ?, ?, NULL)`,
+      [itemName, type, categoryId]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Item created",
+      data: {
+        id: insertResult.insertId,
+        name: itemName,
+        type,
+        price: null,
+        categoryId,
+      },
+    });
+  } catch (error) {
+    console.error("createOwnerStockItem error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create item",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const upsertOwnerStockEntry = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const stockAreaId = Number(req.body.stockAreaId || 0);
+    const itemId = Number(req.body.itemId || 0);
+    const quantity = Number(req.body.quantity);
+    const price = Number(req.body.price);
+    const note = String(req.body.note || "").trim();
+
+    if (!stockAreaId || !itemId) {
+      return res.status(400).json({
+        success: false,
+        message: "stockAreaId and itemId are required",
+      });
+    }
+
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "quantity must be a non-negative number",
+      });
+    }
+
+    if (!Number.isFinite(price) || price < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "price must be a non-negative number",
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [[existingProduct]] = await connection.query(
+      `SELECT id FROM products WHERE id = ? LIMIT 1`,
+      [itemId]
+    );
+    if (!existingProduct) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Item not found",
+      });
+    }
+
+    const [[existingArea]] = await connection.query(
+      `SELECT id FROM stock_areas WHERE id = ? LIMIT 1`,
+      [stockAreaId]
+    );
+    if (!existingArea) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Stock area not found",
+      });
+    }
+
+    await connection.query(`UPDATE products SET price = ? WHERE id = ?`, [price, itemId]);
+
+    await connection.query(
+      `
+      INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity)
+      VALUES (?, ?, ?, 0, 0, 0)
+      ON DUPLICATE KEY UPDATE quantity = VALUES(quantity), updated_at = CURRENT_TIMESTAMP
+      `,
+      [itemId, stockAreaId, Math.floor(quantity)]
+    );
+
+    await connection.query(
+      `
+      INSERT INTO stock_transactions (
+        product_id,
+        stock_area_id,
+        type,
+        quantity,
+        isApproved,
+        reference_id,
+        created_by,
+        stock_from,
+        is_defective,
+        batch_no
+      ) VALUES (?, ?, 'NEW_VALUE', ?, 1, NULL, NULL, 'default', 0, ?)
+      `,
+      [itemId, stockAreaId, Math.floor(quantity), note || null]
+    );
+
+    await connection.commit();
+
+    return res.status(200).json({
+      success: true,
+      message: "Stock saved successfully",
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("upsertOwnerStockEntry error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to save stock",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getOwnerStockPriceCatalog = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const [rows] = await connection.query(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.price,
+        p.type,
+        c.id AS categoryId,
+        c.name AS categoryName
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      ORDER BY c.name ASC, p.name ASC
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        type: row.type,
+        currentPrice: row.price == null ? null : Number(row.price),
+        categoryId: row.categoryId,
+        categoryName: row.categoryName || "Uncategorized",
+      })),
+    });
+  } catch (error) {
+    console.error("getOwnerStockPriceCatalog error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch stock price catalog",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const updateOwnerStockPrices = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const updates = Array.isArray(req.body?.updates) ? req.body.updates : [];
+    const effectiveDate = String(req.body?.effectiveDate || "").trim();
+    const reason = String(req.body?.reason || "").trim();
+
+    if (!updates.length) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one updated price is required",
+      });
+    }
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (effectiveDate && !dateRegex.test(effectiveDate)) {
+      return res.status(400).json({
+        success: false,
+        message: "effectiveDate must be in YYYY-MM-DD format",
+      });
+    }
+
+    const normalizedUpdates = updates
+      .map((item) => ({
+        productId: Number(item?.productId || 0),
+        newPrice: Number(item?.newPrice),
+      }))
+      .filter((item) => item.productId > 0 && Number.isFinite(item.newPrice) && item.newPrice >= 0);
+
+    if (!normalizedUpdates.length) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid price updates provided",
+      });
+    }
+
+    const uniqueProductIds = [...new Set(normalizedUpdates.map((item) => item.productId))];
+    const placeholders = uniqueProductIds.map(() => "?").join(", ");
+
+    const [existingProducts] = await connection.query(
+      `SELECT id, price FROM products WHERE id IN (${placeholders})`,
+      uniqueProductIds
+    );
+
+    const currentById = new Map(
+      existingProducts.map((row) => [Number(row.id), row.price == null ? null : Number(row.price)])
+    );
+
+    const changedUpdates = normalizedUpdates.filter((item) => {
+      const current = currentById.get(item.productId);
+      if (current == null) return true;
+      return Number(current) !== Number(item.newPrice);
+    });
+
+    if (!changedUpdates.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No price changes detected",
+        changedCount: 0,
+      });
+    }
+
+    await connection.beginTransaction();
+
+    await connection.query(
+      `
+      CREATE TABLE IF NOT EXISTS stock_price_history (
+        id BIGINT NOT NULL AUTO_INCREMENT,
+        product_id INT NOT NULL,
+        old_price DECIMAL(10,2) NULL,
+        new_price DECIMAL(10,2) NOT NULL,
+        effective_date DATE NULL,
+        reason VARCHAR(255) NULL,
+        created_by INT NULL,
+        created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_stock_price_history_product_id (product_id),
+        CONSTRAINT fk_stock_price_history_product FOREIGN KEY (product_id) REFERENCES products(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+      `
+    );
+
+    for (const item of changedUpdates) {
+      const currentPrice = currentById.get(item.productId);
+
+      await connection.query(`UPDATE products SET price = ? WHERE id = ?`, [
+        item.newPrice,
+        item.productId,
+      ]);
+
+      await connection.query(
+        `
+        INSERT INTO stock_price_history (
+          product_id,
+          old_price,
+          new_price,
+          effective_date,
+          reason,
+          created_by
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        `,
+        [
+          item.productId,
+          currentPrice,
+          item.newPrice,
+          effectiveDate || null,
+          reason || null,
+          null,
+        ]
+      );
+    }
+
+    await connection.commit();
+
+    return res.status(200).json({
+      success: true,
+      message: "Prices updated successfully",
+      changedCount: changedUpdates.length,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("updateOwnerStockPrices error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update prices",
       error: error.message,
     });
   } finally {

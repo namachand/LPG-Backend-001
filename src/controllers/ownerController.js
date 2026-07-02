@@ -1,0 +1,963 @@
+import db from "../config/db.js";
+import bcrypt from "bcryptjs";
+import { getSalesDashboard } from "./salesController.js";
+import { getDriverDashboard } from "./driverController.js";
+import {
+  createOwnerStockCategoryWithItem,
+  createOwnerStockItem,
+  getOwnerStockItemContext,
+  getOwnerStockPriceCatalog,
+  getStockDashboard,
+  getStockAreas,
+  searchOwnerStockCategories,
+  searchOwnerStockItems,
+  updateOwnerStockPrices,
+  upsertOwnerStockEntry,
+} from "./stockController.js";
+
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const JOB_ROLE_TO_SYSTEM_ROLE = {
+  GODOWN_MANAGER: "GODOWN_MANAGER",
+  PURCHASE_DRIVER: "PURCHASE_MANAGER",
+  DELIVERY_AGENT: "DRIVER",
+  CASHIER: "CASHIER",
+  CUSTOMER_SERVICE: "SUPPORT",
+  MANAGER: "SUPPORT",
+};
+
+const JOB_ROLE_LABELS = {
+  GODOWN_MANAGER: "Godown Manager",
+  PURCHASE_DRIVER: "Purchase Driver",
+  DELIVERY_AGENT: "Delivery Agent",
+  CASHIER: "Cashier",
+  CUSTOMER_SERVICE: "Customer Service",
+  MANAGER: "Manager",
+};
+
+const DEFAULT_JOB_ASSIGNMENT_PASSWORD = "Password@123";
+
+const resolveExpenseDateRange = (query) => {
+  const rawStartDate = String(query?.startDate || "");
+  const rawEndDate = String(query?.endDate || "");
+
+  const startDate = DATE_ONLY_REGEX.test(rawStartDate) ? rawStartDate : null;
+  const endDate = DATE_ONLY_REGEX.test(rawEndDate) ? rawEndDate : null;
+
+  if (!startDate && !endDate) {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+      .toISOString()
+      .split("T")[0];
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0)
+      .toISOString()
+      .split("T")[0];
+
+    return { startDate: monthStart, endDate: monthEnd };
+  }
+
+  const computedStartDate = startDate || endDate;
+  const computedEndDate = endDate || startDate;
+
+  if (computedStartDate <= computedEndDate) {
+    return { startDate: computedStartDate, endDate: computedEndDate };
+  }
+
+  return { startDate: computedEndDate, endDate: computedStartDate };
+};
+
+const resolveDateRange = (query) => {
+  const rawStartDate = String(query?.startDate || "");
+  const rawEndDate = String(query?.endDate || "");
+
+  const startDate = DATE_ONLY_REGEX.test(rawStartDate) ? rawStartDate : null;
+  const endDate = DATE_ONLY_REGEX.test(rawEndDate) ? rawEndDate : null;
+
+  if (!startDate && !endDate) {
+    const today = new Date().toISOString().split("T")[0];
+    return { startDate: today, endDate: today };
+  }
+
+  const computedStartDate = startDate || endDate;
+  const computedEndDate = endDate || startDate;
+
+  if (computedStartDate <= computedEndDate) {
+    return { startDate: computedStartDate, endDate: computedEndDate };
+  }
+
+  return { startDate: computedEndDate, endDate: computedStartDate };
+};
+
+export const getOwnerDashboard = async (req, res) => {
+  try {
+    const { startDate, endDate } = resolveDateRange(req.query);
+
+    // Total Sales for date range
+    const [salesRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(total_amount), 0) AS total_sales
+      FROM sales
+      WHERE status = 'DELIVERED'
+        AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
+      `,
+      [startDate, endDate]
+    );
+
+    const totalSales = Number(salesRows[0]?.total_sales || 0);
+
+    // Cylinders Delivered for date range
+    const [deliveredRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(si.delivered_qty), 0) AS delivered_qty
+      FROM sales s
+      INNER JOIN sales_items si ON si.sale_id = s.id
+      WHERE s.status = 'DELIVERED'
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      `,
+      [startDate, endDate]
+    );
+
+    const cylindersDelivered = Number(deliveredRows[0]?.delivered_qty || 0);
+
+    // Cash Pending with Drivers (settlement_history with status ASSIGNED or PENDING)
+    const [pendingCollectionRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(amount), 0) AS pending_amount
+      FROM settlement_history
+      WHERE status IN ('ASSIGNED', 'PENDING')
+        AND DATE(created_at) BETWEEN ? AND ?
+      `,
+      [startDate, endDate]
+    );
+
+    const cashPendingWithDrivers = Number(pendingCollectionRows[0]?.pending_amount || 0);
+
+    // Total Stock Available (Domestic and Commercial only)
+    const [stockRows] = await db.execute(
+      `
+      SELECT
+        p.type AS product_type,
+        COALESCE(SUM(s.quantity), 0) AS total_quantity
+      FROM stock s
+      INNER JOIN products p ON p.id = s.product_id
+      WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
+      GROUP BY p.type
+      `
+    );
+
+    let domesticStock = 0;
+    let commercialStock = 0;
+
+    stockRows.forEach((row) => {
+      if (row.product_type === 'DOMESTIC') {
+        domesticStock = Number(row.total_quantity || 0);
+      } else if (row.product_type === 'COMMERCIAL') {
+        commercialStock = Number(row.total_quantity || 0);
+      }
+    });
+
+    const totalStock = domesticStock + commercialStock;
+
+    // Total Expenses (Driver Expense from expenses table + Office Expense from office_expenses table)
+    const [driverExpenseRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(e.amount), 0) AS driver_expense
+      FROM expenses e
+      INNER JOIN users u ON u.id = e.created_by
+      WHERE u.role = 'DRIVER'
+        AND e.status = 'APPROVED'
+        AND DATE(e.created_at) BETWEEN ? AND ?
+      `,
+      [startDate, endDate]
+    );
+
+    const [officeExpenseRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(amount), 0) AS office_expense
+      FROM office_expenses
+      WHERE DATE(created_at) BETWEEN ? AND ?
+      `,
+      [startDate, endDate]
+    );
+
+    const driverExpense = Number(driverExpenseRows[0]?.driver_expense || 0);
+    const officeExpense = Number(officeExpenseRows[0]?.office_expense || 0);
+    const totalExpenses = driverExpense + officeExpense;
+
+    // Payment breakdown for top sales cards
+    const [paymentSummaryRows] = await db.execute(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash_sales,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS gpay_sales,
+        COALESCE(SUM(CASE WHEN (p.type = 'COMPANY' OR p.method = 'CARD') AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS online_sales
+      FROM payments p
+      INNER JOIN sales s ON s.id = p.sale_id
+      WHERE s.status = 'DELIVERED'
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      `,
+      [startDate, endDate]
+    );
+
+    const paymentSummary = {
+      cashSales: Number(paymentSummaryRows[0]?.cash_sales || 0),
+      gpaySales: Number(paymentSummaryRows[0]?.gpay_sales || 0),
+      onlineSales: Number(paymentSummaryRows[0]?.online_sales || 0),
+    };
+
+    // Driver-wise collection breakdown (Cash & GPay)
+    const [driverBreakdownRows] = await db.execute(
+      `
+      SELECT
+        d.id AS driver_id,
+        u.name AS driver_name,
+        COUNT(DISTINCT s.id) AS deliveries,
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS gpay,
+        COALESCE(SUM(CASE WHEN p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS total_sales
+      FROM drivers d
+      INNER JOIN users u ON u.id = d.user_id
+      LEFT JOIN sales s
+        ON s.driver_id = d.id
+       AND s.status = 'DELIVERED'
+       AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      LEFT JOIN payments p ON p.sale_id = s.id
+      GROUP BY d.id, u.name
+      HAVING deliveries > 0 OR total_sales > 0
+      ORDER BY total_sales DESC
+      `,
+      [startDate, endDate]
+    );
+
+    const driverCollectionBreakdown = driverBreakdownRows.map((row) => ({
+      driverId: Number(row.driver_id),
+      driverName: row.driver_name,
+      totalSales: Number(row.total_sales || 0),
+      cash: Number(row.cash || 0),
+      gpay: Number(row.gpay || 0),
+      deliveries: Number(row.deliveries || 0),
+    }));
+
+    // Recent sales list for owner dashboard table
+    const [recentSalesRows] = await db.execute(
+      `
+      SELECT
+        s.id AS sale_id,
+        c.name AS customer_name,
+        COALESCE(
+          CASE
+            WHEN COUNT(DISTINCT pr.type) > 1 THEN 'MIXED'
+            ELSE MAX(pr.type)
+          END,
+          'DOMESTIC'
+        ) AS sale_type,
+        COALESCE(
+          SUM(
+            CASE
+              WHEN COALESCE(si.delivered_qty, 0) > 0 THEN si.delivered_qty
+              ELSE COALESCE(si.quantity, 0)
+            END
+          ),
+          0
+        ) AS total_qty,
+        COALESCE(s.total_amount, 0) AS amount,
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash_amount,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS upi_amount,
+        COALESCE(SUM(CASE WHEN (p.type = 'COMPANY' OR p.method = 'CARD') AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS online_amount,
+        du.name AS driver_name,
+        s.status
+      FROM sales s
+      INNER JOIN users c ON c.id = s.customer_id
+      LEFT JOIN drivers d ON d.id = s.driver_id
+      LEFT JOIN users du ON du.id = d.user_id
+      LEFT JOIN sales_items si ON si.sale_id = s.id
+      LEFT JOIN products pr ON pr.id = si.product_id
+      LEFT JOIN payments p ON p.sale_id = s.id
+      WHERE DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      GROUP BY s.id, c.name, du.name, s.status, s.total_amount
+      ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
+      LIMIT 8
+      `,
+      [startDate, endDate]
+    );
+
+    const recentSales = recentSalesRows.map((row) => {
+      const cashAmount = Number(row.cash_amount || 0);
+      const upiAmount = Number(row.upi_amount || 0);
+      const onlineAmount = Number(row.online_amount || 0);
+
+      let payment = "-";
+      const paymentModes = [
+        cashAmount > 0 ? "Cash" : null,
+        upiAmount > 0 ? "GPay" : null,
+        onlineAmount > 0 ? "Online" : null,
+      ].filter(Boolean);
+
+      if (paymentModes.length === 1) {
+        payment = paymentModes[0];
+      } else if (paymentModes.length > 1) {
+        payment = "Mixed";
+      }
+
+      return {
+        orderId: `S-${String(row.sale_id).padStart(3, "0")}`,
+        customer: row.customer_name,
+        type:
+          row.sale_type === "COMMERCIAL"
+            ? "Commercial"
+            : row.sale_type === "MIXED"
+              ? "Mixed"
+              : "Domestic",
+        quantity: Number(row.total_qty || 0),
+        amount: Number(row.amount || 0),
+        payment,
+        driver: row.driver_name || "-",
+        status: String(row.status || "PENDING"),
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Owner dashboard data fetched successfully",
+      data: {
+        dateRange: {
+          startDate,
+          endDate,
+        },
+        totalSales,
+        cylindersDelivered,
+        cashPendingWithDrivers,
+        stock: {
+          domestic: domesticStock,
+          commercial: commercialStock,
+          total: totalStock,
+        },
+        totalExpenses,
+        paymentSummary,
+        driverCollectionBreakdown,
+        recentSales,
+      },
+    });
+  } catch (error) {
+    console.error("getOwnerDashboard error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch owner dashboard data",
+      error: error.message,
+    });
+  }
+};
+
+export const getOwnerSalesDashboard = async (req, res) => {
+  return getSalesDashboard(req, res);
+};
+
+export const getOwnerDriversDashboard = async (req, res) => {
+  return getDriverDashboard(req, res);
+};
+
+export const getOwnerStocksDashboard = async (req, res) => {
+  return getStockDashboard(req, res);
+};
+
+export const getOwnerStockAreas = async (req, res) => {
+  return getStockAreas(req, res);
+};
+
+export const getOwnerStockCategories = async (req, res) => {
+  return searchOwnerStockCategories(req, res);
+};
+
+export const getOwnerStockItems = async (req, res) => {
+  return searchOwnerStockItems(req, res);
+};
+
+export const getOwnerStockItemDetails = async (req, res) => {
+  return getOwnerStockItemContext(req, res);
+};
+
+export const postOwnerStockCategoryWithItem = async (req, res) => {
+  return createOwnerStockCategoryWithItem(req, res);
+};
+
+export const postOwnerStockItem = async (req, res) => {
+  return createOwnerStockItem(req, res);
+};
+
+export const postOwnerStockEntry = async (req, res) => {
+  return upsertOwnerStockEntry(req, res);
+};
+
+export const getOwnerStockPriceList = async (req, res) => {
+  return getOwnerStockPriceCatalog(req, res);
+};
+
+export const postOwnerStockPriceUpdates = async (req, res) => {
+  return updateOwnerStockPrices(req, res);
+};
+
+export const getOwnerExpensesDashboard = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+    const offset = (page - 1) * limit;
+    const search = String(req.query.search || "").trim();
+    const { startDate, endDate } = resolveExpenseDateRange(req.query);
+
+    const [officeStatusColumns] = await connection.query(
+      `SHOW COLUMNS FROM office_expenses LIKE 'status'`
+    );
+    const officeExpenseHasStatus = officeStatusColumns.length > 0;
+
+    const expenseSourceQuery = `
+      SELECT
+        e.id AS expense_id,
+        CONCAT('PM-', LPAD(e.id, 4, '0')) AS expense_code,
+        e.category,
+        e.description,
+        e.amount,
+        DATE_FORMAT(e.created_at, '%Y-%m-%d') AS date,
+        e.created_at,
+        COALESCE(u.name, 'Unknown') AS created_by,
+        COALESCE(u.role, 'PURCHASE_MANAGER') AS created_by_role,
+        e.status,
+        'PURCHASE_MANAGER' AS source
+      FROM expenses e
+      LEFT JOIN users u ON u.id = e.created_by
+      WHERE u.role = 'PURCHASE_MANAGER'
+
+      UNION ALL
+
+      SELECT
+        o.id AS expense_id,
+        CONCAT('OE-', LPAD(o.id, 4, '0')) AS expense_code,
+        o.category,
+        o.description,
+        o.amount,
+        DATE_FORMAT(o.created_at, '%Y-%m-%d') AS date,
+        o.created_at,
+        COALESCE(u.name, 'Cashier Office') AS created_by,
+        COALESCE(u.role, 'CASHIER') AS created_by_role,
+        ${officeExpenseHasStatus ? "COALESCE(o.status, 'PENDING')" : "'PENDING'"} AS status,
+        'CASHIER_OFFICE' AS source
+      FROM office_expenses o
+      LEFT JOIN users u ON u.id = o.admin_id
+    `;
+
+    const filters = [];
+    const params = [];
+
+    if (search) {
+      filters.push(`(
+        expense_code LIKE ?
+        OR category LIKE ?
+        OR description LIKE ?
+        OR created_by LIKE ?
+        OR created_by_role LIKE ?
+        OR source LIKE ?
+        OR status LIKE ?
+      )`);
+      const searchTerm = `%${search}%`;
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+
+    filters.push(`created_at >= ?`);
+    params.push(`${startDate} 00:00:00`);
+    filters.push(`created_at <= ?`);
+    params.push(`${endDate} 23:59:59`);
+
+    const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+
+    const [summaryRows] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(amount), 0) AS totalExpense,
+        COALESCE(SUM(CASE WHEN source = 'CASHIER_OFFICE' AND status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingApproval
+      FROM (
+        ${expenseSourceQuery}
+      ) expense_items
+      ${whereClause}
+      `,
+      [...params]
+    );
+
+    const [salesRows] = await connection.query(
+      `
+      SELECT COALESCE(SUM(total_amount), 0) AS monthlyTotalSales
+      FROM sales
+      WHERE status = 'DELIVERED'
+        AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
+      `,
+      [startDate, endDate]
+    );
+
+    const [countRows] = await connection.query(
+      `
+      SELECT COUNT(*) AS total
+      FROM (
+        ${expenseSourceQuery}
+      ) expense_items
+      ${whereClause}
+      `,
+      [...params]
+    );
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        expense_id,
+        expense_code,
+        category,
+        description,
+        amount,
+        date,
+        created_at,
+        created_by,
+        created_by_role,
+        status,
+        source
+      FROM (
+        ${expenseSourceQuery}
+      ) expense_items
+      ${whereClause}
+      ORDER BY created_at DESC, expense_id DESC
+      LIMIT ?
+      OFFSET ?
+      `,
+      [...params, limit, offset]
+    );
+
+    const total = Number(countRows[0]?.total || 0);
+    const totalPages = Math.ceil(total / limit);
+
+    return res.status(200).json({
+      success: true,
+      summary: {
+        totalExpense: Number(summaryRows[0]?.totalExpense || 0),
+        monthlyTotalSales: Number(salesRows[0]?.monthlyTotalSales || 0),
+        pendingApproval: Number(summaryRows[0]?.pendingApproval || 0),
+      },
+      dateRange: {
+        startDate,
+        endDate,
+      },
+      data: rows.map((row) => ({
+        id: row.expense_code,
+        rawId: Number(row.expense_id),
+        category: row.category,
+        description: row.description,
+        amount: Number(row.amount || 0),
+        date: row.date,
+        by: row.created_by,
+        byRole: row.created_by_role,
+        status: row.status,
+        source: row.source,
+        canApprove: row.source === 'CASHIER_OFFICE' && row.status === 'PENDING',
+      })),
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    console.error('getOwnerExpensesDashboard error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch owner expenses dashboard',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const approveOwnerOfficeExpense = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const expenseId = Number(req.params.expenseId);
+
+    if (!expenseId) {
+      return res.status(400).json({
+        success: false,
+        message: 'expenseId is required',
+      });
+    }
+
+    const [officeStatusColumns] = await connection.query(
+      `SHOW COLUMNS FROM office_expenses LIKE 'status'`
+    );
+
+    if (!officeStatusColumns.length) {
+      // Column missing — add it automatically and default all existing rows to PENDING
+      await connection.query(
+        `ALTER TABLE office_expenses ADD COLUMN status ENUM('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING' AFTER description`
+      );
+    }
+
+    const [rows] = await connection.query(
+      `
+      SELECT id, COALESCE(status, 'PENDING') AS status
+      FROM office_expenses
+      WHERE id = ?
+      LIMIT 1
+      `,
+      [expenseId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Office expense not found',
+      });
+    }
+
+    if (rows[0].status !== 'PENDING') {
+      return res.status(400).json({
+        success: false,
+        message: 'Only pending office expenses can be approved',
+      });
+    }
+
+    await connection.query(
+      `
+      UPDATE office_expenses
+      SET status = 'APPROVED',
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [expenseId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Office expense approved successfully',
+    });
+  } catch (error) {
+    console.error('approveOwnerOfficeExpense error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to approve office expense',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getOwnerJobAssignmentUsers = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const [profileTableRows] = await connection.query(
+      `SHOW TABLES LIKE 'user_job_profiles'`
+    );
+    const hasProfileTable = profileTableRows.length > 0;
+
+    const [aadhaarColumnRows] = await connection.query(
+      `SHOW COLUMNS FROM users LIKE 'aadhaar_number'`
+    );
+    const hasExtendedUserColumns = aadhaarColumnRows.length > 0;
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        u.id,
+        u.name,
+        u.phone,
+        u.email,
+        u.role,
+        u.status,
+        ${hasProfileTable ? "up.display_role" : "NULL"} AS display_role,
+        ${hasProfileTable ? "up.age" : "NULL"} AS age,
+        ${hasProfileTable ? "DATE_FORMAT(up.date_of_birth, '%Y-%m-%d')" : "NULL"} AS date_of_birth,
+        ${hasProfileTable ? "up.gender" : "NULL"} AS gender,
+        ${hasProfileTable ? "up.address" : "NULL"} AS address,
+        ${hasProfileTable ? "up.vehicle_number" : "NULL"} AS vehicle_number,
+        ${hasProfileTable ? "up.vehicle_type" : "NULL"} AS vehicle_type,
+        ${hasProfileTable ? "up.driving_license_number" : "NULL"} AS driving_license_number,
+        ${hasExtendedUserColumns ? "u.aadhaar_number" : "NULL"} AS aadhaar_number,
+        ${hasExtendedUserColumns ? "u.bank_account_holder_name" : "NULL"} AS bank_account_holder_name,
+        ${hasExtendedUserColumns ? "u.bank_name" : "NULL"} AS bank_name,
+        ${hasExtendedUserColumns ? "u.bank_account_number" : "NULL"} AS bank_account_number,
+        ${hasExtendedUserColumns ? "u.bank_ifsc_code" : "NULL"} AS bank_ifsc_code,
+        DATE_FORMAT(u.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+      FROM users u
+      ${hasProfileTable ? "LEFT JOIN user_job_profiles up ON up.user_id = u.id" : ""}
+      WHERE u.role IN ('GODOWN_MANAGER', 'PURCHASE_MANAGER', 'DRIVER', 'CASHIER', 'SUPPORT')
+      ORDER BY u.created_at DESC, u.id DESC
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id),
+        fullName: row.name,
+        phoneNumber: row.phone,
+        email: row.email,
+        role: row.display_role || row.role,
+        roleLabel: JOB_ROLE_LABELS[row.display_role] || row.role,
+        systemRole: row.role,
+        status: row.status,
+        age: row.age === null ? null : Number(row.age),
+        dateOfBirth: row.date_of_birth,
+        gender: row.gender,
+        address: row.address,
+        vehicleNumber: row.vehicle_number,
+        vehicleType: row.vehicle_type,
+        drivingLicenseNumber: row.driving_license_number,
+        aadhaarNumber: row.aadhaar_number,
+        bankAccountHolderName: row.bank_account_holder_name,
+        bankName: row.bank_name,
+        bankAccountNumber: row.bank_account_number,
+        bankIfscCode: row.bank_ifsc_code,
+        createdAt: row.created_at,
+      })),
+    });
+  } catch (error) {
+    console.error("getOwnerJobAssignmentUsers error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch job assignment users",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const createOwnerJobAssignmentUser = async (req, res) => {
+  const connection = await db.getConnection();
+  let transactionStarted = false;
+
+  try {
+    const {
+      role,
+      fullName,
+      phoneNumber,
+      email,
+      age,
+      dateOfBirth,
+      gender,
+      address,
+      aadhaarNumber,
+      bankAccountHolderName,
+      bankName,
+      bankAccountNumber,
+      bankIfscCode,
+      vehicleNumber,
+      vehicleType,
+      drivingLicenseNumber,
+    } = req.body || {};
+
+    const normalizedRole = String(role || "").trim().toUpperCase();
+    const systemRole = JOB_ROLE_TO_SYSTEM_ROLE[normalizedRole];
+
+    if (!systemRole) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid role is required",
+      });
+    }
+
+    if (!fullName || !phoneNumber || !email) {
+      return res.status(400).json({
+        success: false,
+        message: "fullName, phoneNumber and email are required",
+      });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedPhone = String(phoneNumber).trim();
+
+    if (!normalizedEmail) {
+      return res.status(400).json({
+        success: false,
+        message: "email is required",
+      });
+    }
+
+    const hashedDefaultPassword = await bcrypt.hash(
+      DEFAULT_JOB_ASSIGNMENT_PASSWORD,
+      10
+    );
+
+    const [existingPhone] = await connection.query(
+      `SELECT id FROM users WHERE phone = ? LIMIT 1`,
+      [normalizedPhone]
+    );
+
+    if (existingPhone.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone number already exists",
+      });
+    }
+
+    const [existingEmail] = await connection.query(
+      `SELECT id FROM users WHERE email = ? LIMIT 1`,
+      [normalizedEmail]
+    );
+
+    if (existingEmail.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Email already exists",
+      });
+    }
+
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const [profileTableRows] = await connection.query(
+      `SHOW TABLES LIKE 'user_job_profiles'`
+    );
+    const hasProfileTable = profileTableRows.length > 0;
+
+    let userInsert;
+
+    try {
+      [userInsert] = await connection.query(
+        `
+        INSERT INTO users (
+          name,
+          email,
+          phone,
+          password,
+          role,
+          status,
+          aadhaar_number,
+          bank_account_holder_name,
+          bank_name,
+          bank_account_number,
+          bank_ifsc_code
+        ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)
+        `,
+        [
+          String(fullName).trim(),
+          normalizedEmail,
+          normalizedPhone,
+          hashedDefaultPassword,
+          systemRole,
+          aadhaarNumber ? String(aadhaarNumber).trim() : null,
+          bankAccountHolderName ? String(bankAccountHolderName).trim() : null,
+          bankName ? String(bankName).trim() : null,
+          bankAccountNumber ? String(bankAccountNumber).trim() : null,
+          bankIfscCode ? String(bankIfscCode).trim().toUpperCase() : null,
+        ]
+      );
+    } catch (insertError) {
+      if (insertError?.code !== "ER_BAD_FIELD_ERROR") {
+        throw insertError;
+      }
+
+      [userInsert] = await connection.query(
+        `
+        INSERT INTO users (
+          name,
+          email,
+          phone,
+          password,
+          role,
+          status
+        ) VALUES (?, ?, ?, ?, ?, 'ACTIVE')
+        `,
+        [
+          String(fullName).trim(),
+          normalizedEmail,
+          normalizedPhone,
+          hashedDefaultPassword,
+          systemRole,
+        ]
+      );
+    }
+
+    const userId = Number(userInsert.insertId);
+
+    if (hasProfileTable) {
+      await connection.query(
+        `
+        INSERT INTO user_job_profiles (
+          user_id,
+          display_role,
+          age,
+          date_of_birth,
+          gender,
+          address,
+          vehicle_number,
+          vehicle_type,
+          driving_license_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        [
+          userId,
+          normalizedRole,
+          age === undefined || age === null || age === "" ? null : Number(age),
+          dateOfBirth || null,
+          gender || null,
+          address ? String(address).trim() : null,
+          vehicleNumber ? String(vehicleNumber).trim() : null,
+          vehicleType ? String(vehicleType).trim() : null,
+          drivingLicenseNumber ? String(drivingLicenseNumber).trim() : null,
+        ]
+      );
+    }
+
+    if (normalizedRole === "DELIVERY_AGENT") {
+      await connection.query(
+        `
+        INSERT INTO drivers (
+          user_id,
+          vehicle_number,
+          license_number,
+          is_available,
+          rating
+        ) VALUES (?, ?, ?, 1, 0.0)
+        `,
+        [
+          userId,
+          vehicleNumber ? String(vehicleNumber).trim() : null,
+          drivingLicenseNumber ? String(drivingLicenseNumber).trim() : null,
+        ]
+      );
+    }
+
+    if (address && String(address).trim()) {
+      await connection.query(
+        `
+        INSERT INTO addresses (user_id, address, is_default, created_at, updated_at)
+        VALUES (?, ?, 1, NOW(), NOW())
+        `,
+        [userId, String(address).trim()]
+      );
+    }
+
+    await connection.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: "User created successfully",
+      data: {
+        id: userId,
+        role: normalizedRole,
+        systemRole,
+      },
+    });
+  } catch (error) {
+    if (transactionStarted) {
+      await connection.rollback();
+    }
+    console.error("createOwnerJobAssignmentUser error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create job assignment user",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};

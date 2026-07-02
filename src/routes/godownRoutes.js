@@ -1,6 +1,7 @@
 import express from "express";
 import {
     getGodownDashboardData,
+    getStockDetailByType,
     getStockInLoads,
     getStockInLoadDetail,
     approveStockInLoad,
@@ -13,6 +14,7 @@ import {
     getDefectiveLoads,
     createDefectiveLoad,
     getDeliveryDrivers,
+    getDriverDayWiseSummary,
     createDriverAllocation,
     getReturnsToday,
     approveReturnByCondition,
@@ -24,6 +26,7 @@ import {
 const router = express.Router();
 
 router.get("/dashboard", getGodownDashboardData);
+router.get("/stock-detail/:type", getStockDetailByType);
 
 router.get("/stock-in-loads", getStockInLoads);
 router.get("/stock-in-loads/:loadId", getStockInLoadDetail);
@@ -38,6 +41,7 @@ router.put("/stock-out-loads/:loadId/approve", approveStockOutLoad);
 router.get("/defective-loads", getDefectiveLoads);
 router.post("/defective-loads", createDefectiveLoad);
 router.get("/delivery-drivers", getDeliveryDrivers);
+router.get("/drivers/:driverId/day-wise-summary", getDriverDayWiseSummary);
 router.post("/driver-allocation", createDriverAllocation);
 router.get("/returns-today", getReturnsToday);
 router.put("/returns-today/approve", approveReturnByCondition);

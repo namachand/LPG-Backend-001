@@ -11,12 +11,22 @@ import {
   recordOfficeExpense,
   getTodayOfficeSales,
   getTodayOfficeExpenses,
+  getCashOutExpenseRequests,
+  reviewCashOutExpenseRequest,
   recordCashierReceipt,
   getTodaysCashFlow,
   recordOtherPayment,
   getOtherPayments,
   getOtherPaymentsSummary,
-  findCustomerForCashierApp
+  findCustomerForCashierApp,
+  getCashierPenaltyRequests,
+  collectCashierPenaltyRequest,
+  getCashierNameChangeRequests,
+  collectCashierNameChangeRequest,
+  getCashierTransferVoucherRequests,
+  collectCashierTransferVoucherRequest,
+  getCashierNewConnectionRequests,
+  collectCashierNewConnectionRequest,
 } from "../controllers/cashierController.js";
 
 const router = express.Router();
@@ -30,6 +40,8 @@ router.post("/opening", startCashierDay);
 router.post("/closing", closeCashierDay);
 router.post("/office-sale", recordOfficeSale);
 router.post("/office-expense", recordOfficeExpense);
+router.get("/expense-requests", getCashOutExpenseRequests);
+router.put("/expense-requests/:expenseId", reviewCashOutExpenseRequest);
 router.post("/other-payments", recordOtherPayment);
 router.get("/other-payments", getOtherPayments);
 router.get("/other-payments/summary", getOtherPaymentsSummary);
@@ -38,6 +50,14 @@ router.get("/office-expenses/today", getTodayOfficeExpenses);
 router.post("/receipt", recordCashierReceipt);
 router.get("/cash-flow/today", getTodaysCashFlow);
 router.get("/customers/find", findCustomerForCashierApp);
+router.get("/cashier-requests/pr-penalties", getCashierPenaltyRequests);
+router.patch("/cashier-requests/pr-penalties/:requestId/collect", collectCashierPenaltyRequest);
+router.get("/cashier-requests/name-changes", getCashierNameChangeRequests);
+router.patch("/cashier-requests/name-changes/:requestId/collect", collectCashierNameChangeRequest);
+router.get("/cashier-requests/transfer-vouchers", getCashierTransferVoucherRequests);
+router.patch("/cashier-requests/transfer-vouchers/:requestId/collect", collectCashierTransferVoucherRequest);
+router.get("/cashier-requests/new-connections", getCashierNewConnectionRequests);
+router.patch("/cashier-requests/new-connections/:requestId/collect", collectCashierNewConnectionRequest);
 
 
 export default router;

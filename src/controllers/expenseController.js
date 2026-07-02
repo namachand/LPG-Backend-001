@@ -1,5 +1,65 @@
 import db from "../config/db.js";
 
+export const createExpense = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const {
+      category,
+      description = null,
+      amount,
+      createdBy,
+      billUrl = null,
+    } = req.body || {};
+
+    if (!category || amount === undefined || amount === null || !createdBy) {
+      return res.status(400).json({
+        success: false,
+        message: "category, amount and createdBy are required",
+      });
+    }
+
+    const parsedAmount = Number(amount);
+
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be greater than 0",
+      });
+    }
+
+    const [result] = await connection.query(
+      `
+      INSERT INTO expenses (category, description, amount, bill_url, created_by, status)
+      VALUES (?, ?, ?, ?, ?, 'PENDING')
+      `,
+      [category, description, parsedAmount, billUrl, createdBy]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Expense created successfully",
+      data: {
+        id: result.insertId,
+        category,
+        description,
+        amount: parsedAmount,
+        billUrl,
+        status: "PENDING",
+      },
+    });
+  } catch (error) {
+    console.error("createExpense error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create expense",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
 export const getExpensesDashboard = async (req, res) => {
   const connection = await db.getConnection();
 

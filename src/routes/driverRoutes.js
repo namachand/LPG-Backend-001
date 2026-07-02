@@ -5,7 +5,7 @@ import { createDriver, getDriverDeliveriesApp, markSaleAsDelivered, createDriver
 getDriverEmptyCylindersToday, getDriverEmptyCylindersHistory, approveTodayEmptyCylinderReturns, getDriverProfileHistory,
 searchProductsForDriverApp, findCustomerForDriverApp, getAllocatedCylinders, getDriverDeliveryDetails, createInHandRequest,
 createEmptyCylinderReturnRequest, getAllocatedBatchDetail, getAvailableBatchesForDriver, findBookingCustomer,
-createBookingCustomer, createDriverBooking, getDriverBookings, cancelDriverBooking} from "../controllers/driverController.js";
+createBookingCustomer, createDriverBooking, getDriverBookings, cancelDriverBooking, getDriverReturnableEmptyProducts} from "../controllers/driverController.js";
 
 const router = express.Router();
 
@@ -22,6 +22,7 @@ router.put("/:driverId/return-in-hand", returnInHandToGodown);
 router.get("/:driverId/collection-history", getDriverCollectionHistory);
 router.get("/:driverId/empty-cylinders/today", getDriverEmptyCylindersToday);
 router.get("/:driverId/empty-cylinders/history", getDriverEmptyCylindersHistory);
+router.get("/:driverId/empty-cylinders/returnable-products", getDriverReturnableEmptyProducts);
 router.put("/:driverId/empty-cylinders/approve-today", approveTodayEmptyCylinderReturns);
 router.get("/:driverId/profile-history", getDriverProfileHistory);
 router.get("/products/search", searchProductsForDriverApp);
