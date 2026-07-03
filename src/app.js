@@ -35,6 +35,21 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Backwards-compat: all APIs live under `/api`. If a client calls a route
+// without the `/api` prefix (e.g. `/auth/identify`), rewrite it to the canonical
+// `/api/...` path so it still resolves. Leaves `/api/*`, `/uploads/*` and `/`
+// untouched.
+app.use((req, res, next) => {
+  if (
+    req.url !== "/" &&
+    !req.url.startsWith("/api/") &&
+    !req.url.startsWith("/uploads/")
+  ) {
+    req.url = "/api" + (req.url.startsWith("/") ? req.url : `/${req.url}`);
+  }
+  next();
+});
+
 // Serve uploaded files as static assets
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
