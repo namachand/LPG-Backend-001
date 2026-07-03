@@ -1,4 +1,4 @@
-import admin from "../config/firebaseAdmin.js";
+import { getFirebaseAdmin } from "../config/firebaseAdmin.js";
 import bcrypt from "bcryptjs";
 import db from "../config/db.js";
 import { generateToken } from "../utils/generateToken.js";
@@ -98,7 +98,7 @@ const respondWithLogin = (res, user) => {
 };
 
 export const googleLogin = async (req, res) => {
-  const decoded = await admin.auth().verifyIdToken(req.body.token);
+  const decoded = await getFirebaseAdmin().auth().verifyIdToken(req.body.token);
 
   let [rows] = await db.execute(
     "SELECT * FROM users WHERE email=?",
@@ -119,7 +119,7 @@ export const googleLogin = async (req, res) => {
 };
 
 export const phoneLogin = async (req, res) => {
-  const decoded = await admin.auth().verifyIdToken(req.body.token);
+  const decoded = await getFirebaseAdmin().auth().verifyIdToken(req.body.token);
 
   let [rows] = await db.execute(
     "SELECT * FROM users WHERE phone=?",
