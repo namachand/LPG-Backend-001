@@ -230,10 +230,11 @@ CREATE TABLE IF NOT EXISTS `customer_connection_transfers` (
   CONSTRAINT `fk_customer_transfer_new` FOREIGN KEY (`new_customer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-ALTER TABLE `customer_connection_transfers`
-  ADD COLUMN IF NOT EXISTS `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER `reason`,
-  ADD COLUMN IF NOT EXISTS `payment_reference_id` varchar(120) DEFAULT NULL AFTER `payment_mode`,
-  ADD COLUMN IF NOT EXISTS `cashier_remarks` text AFTER `payment_reference_id`;
+-- NOTE: payment_mode / payment_reference_id / cashier_remarks are already part
+-- of the CREATE TABLE above. The ALTER is only needed to upgrade an OLD table
+-- that predates those columns. MySQL does not support ADD COLUMN IF NOT EXISTS,
+-- so use the guarded block below only if the table already exists without them.
+-- (Skip entirely on a fresh database.)
 
 -- Name change requests pending approval before updating users.name
 CREATE TABLE IF NOT EXISTS `customer_name_change_requests` (
@@ -256,10 +257,9 @@ CREATE TABLE IF NOT EXISTS `customer_name_change_requests` (
   CONSTRAINT `fk_name_change_customer` FOREIGN KEY (`customer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-ALTER TABLE `customer_name_change_requests`
-  ADD COLUMN IF NOT EXISTS `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER `document_url`,
-  ADD COLUMN IF NOT EXISTS `payment_reference_id` varchar(120) DEFAULT NULL AFTER `payment_mode`,
-  ADD COLUMN IF NOT EXISTS `cashier_remarks` text AFTER `payment_reference_id`;
+-- NOTE: payment_mode / payment_reference_id / cashier_remarks are already part
+-- of the CREATE TABLE above; the redundant ALTER (invalid in MySQL) is removed.
+-- Skip on a fresh database.
 
 -- PR penalty records for customer accounts
 CREATE TABLE IF NOT EXISTS `customer_pr_penalties` (
@@ -282,10 +282,9 @@ CREATE TABLE IF NOT EXISTS `customer_pr_penalties` (
   CONSTRAINT `fk_customer_pr_penalties_customer` FOREIGN KEY (`customer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-ALTER TABLE `customer_pr_penalties`
-  ADD COLUMN IF NOT EXISTS `payment_mode` enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER `penalty_amount`,
-  ADD COLUMN IF NOT EXISTS `payment_reference_id` varchar(120) DEFAULT NULL AFTER `payment_mode`,
-  ADD COLUMN IF NOT EXISTS `cashier_remarks` text AFTER `payment_reference_id`;
+-- NOTE: payment_mode / payment_reference_id / cashier_remarks are already part
+-- of the CREATE TABLE above; the redundant ALTER (invalid in MySQL) is removed.
+-- Skip on a fresh database.
 
 -- OTP entered by driver while creating sales
 CREATE TABLE IF NOT EXISTS `driver_sale_otps` (
