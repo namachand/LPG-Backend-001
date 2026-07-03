@@ -929,8 +929,8 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
     if (address && String(address).trim()) {
       await connection.query(
         `
-        INSERT INTO addresses (user_id, address, is_default, created_at, updated_at)
-        VALUES (?, ?, 1, NOW(), NOW())
+        INSERT INTO addresses (user_id, address, is_default)
+        VALUES (?, ?, 1)
         `,
         [userId, String(address).trim()]
       );

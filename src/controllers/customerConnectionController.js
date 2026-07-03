@@ -30,6 +30,37 @@ const ensureNewConnectionProductTable = async (connection) => {
         FOREIGN KEY (product_id) REFERENCES products(id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
+
+  // customer_new_connections gains these columns lazily (also added by the
+  // cashier flow). Ensure they exist before inserting so the new-connection
+  // path works on databases where the cashier migration hasn't run yet.
+  const requiredColumns = {
+    product_id: "ALTER TABLE customer_new_connections ADD COLUMN product_id INT DEFAULT NULL AFTER product_details",
+    id_proof_url: "ALTER TABLE customer_new_connections ADD COLUMN id_proof_url VARCHAR(500) DEFAULT NULL AFTER id_proof_details",
+  };
+
+  const [columnRows] = await connection.query(
+    `
+    SELECT COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'customer_new_connections'
+      AND COLUMN_NAME IN ('product_id', 'id_proof_url')
+    `
+  );
+
+  const existingColumns = new Set(columnRows.map((row) => String(row.COLUMN_NAME)));
+  for (const [columnName, ddl] of Object.entries(requiredColumns)) {
+    if (existingColumns.has(columnName)) continue;
+
+    try {
+      await connection.query(ddl);
+    } catch (error) {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
+        throw error;
+      }
+    }
+  }
 };
 
 const normalizeConnectionProducts = (body) => {

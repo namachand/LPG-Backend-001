@@ -35,18 +35,30 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Backwards-compat: all APIs live under `/api`. If a client calls a route
-// without the `/api` prefix (e.g. `/auth/identify`), rewrite it to the canonical
-// `/api/...` path so it still resolves. Leaves `/api/*`, `/uploads/*` and `/`
-// untouched.
+// Backwards-compat + resilience for client base-URL quirks.
+// 1. Collapse accidental duplicate slashes in the path (e.g. a client whose
+//    base URL ended in `/` producing `//auth/identify` or `/api//cashier/...`).
+//    Only the path is touched — the query string is left intact.
+// 2. All APIs live under `/api`. If a client calls a route without the `/api`
+//    prefix (e.g. `/auth/identify`), rewrite it to the canonical `/api/...`
+//    path. Leaves `/api/*`, `/uploads/*` and `/` untouched.
 app.use((req, res, next) => {
+  const queryIndex = req.url.indexOf("?");
+  const query = queryIndex === -1 ? "" : req.url.slice(queryIndex);
+  let path = (queryIndex === -1 ? req.url : req.url.slice(0, queryIndex)).replace(
+    /\/{2,}/g,
+    "/"
+  );
+
   if (
-    req.url !== "/" &&
-    !req.url.startsWith("/api/") &&
-    !req.url.startsWith("/uploads/")
+    path !== "/" &&
+    !path.startsWith("/api/") &&
+    !path.startsWith("/uploads/")
   ) {
-    req.url = "/api" + (req.url.startsWith("/") ? req.url : `/${req.url}`);
+    path = "/api" + (path.startsWith("/") ? path : `/${path}`);
   }
+
+  req.url = path + query;
   next();
 });
 
