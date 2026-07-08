@@ -1,6 +1,7 @@
 import express from "express";
 import {
 	getOwnerDashboard,
+	getOwnerDashboardInsights,
 	getOwnerExpensesDashboard,
 	getOwnerJobAssignmentUsers,
 	getOwnerSalesDashboard,
@@ -17,15 +18,18 @@ import {
 	postOwnerStockPriceUpdates,
 	approveOwnerOfficeExpense,
 	createOwnerJobAssignmentUser,
+	updateOwnerJobAssignmentUserStatus,
 } from "../controllers/ownerController.js";
 
 const router = express.Router();
 
 router.get("/dashboard", getOwnerDashboard);
+router.get("/dashboard/insights", getOwnerDashboardInsights);
 router.get("/expenses/dashboard", getOwnerExpensesDashboard);
 router.put("/expenses/:expenseId/approve", approveOwnerOfficeExpense);
 router.get("/job-assignment/users", getOwnerJobAssignmentUsers);
 router.post("/job-assignment/users", createOwnerJobAssignmentUser);
+router.patch("/job-assignment/users/:id/status", updateOwnerJobAssignmentUserStatus);
 router.get("/sales/dashboard", getOwnerSalesDashboard);
 router.get("/drivers/dashboard", getOwnerDriversDashboard);
 router.get("/stocks/dashboard", getOwnerStocksDashboard);

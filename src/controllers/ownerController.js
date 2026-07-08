@@ -347,6 +347,338 @@ export const getOwnerDashboard = async (req, res) => {
   }
 };
 
+export const getOwnerDashboardInsights = async (req, res) => {
+  try {
+    const { startDate, endDate } = resolveDateRange(req.query);
+
+    // ---- Sales Performance: daily trend (independent 7 / 30 day toggle) ----
+    const requestedDays = Number(req.query.days);
+    const trendDays = requestedDays === 30 ? 30 : 7;
+
+    const trendStartObj = new Date();
+    trendStartObj.setHours(0, 0, 0, 0);
+    trendStartObj.setDate(trendStartObj.getDate() - (trendDays - 1));
+
+    const toKey = (value) => {
+      const d = new Date(value);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+
+    const trendStart = toKey(trendStartObj);
+    const trendEnd = toKey(new Date());
+
+    const [salesTrendRows] = await db.execute(
+      `
+      SELECT DATE(COALESCE(delivered_at, created_at)) AS day,
+             COALESCE(SUM(total_amount), 0) AS sales
+      FROM sales
+      WHERE status = 'DELIVERED'
+        AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
+      GROUP BY day
+      `,
+      [trendStart, trendEnd]
+    );
+
+    const [deliveredTrendRows] = await db.execute(
+      `
+      SELECT DATE(COALESCE(s.delivered_at, s.created_at)) AS day,
+             COALESCE(SUM(si.delivered_qty), 0) AS delivered
+      FROM sales s
+      INNER JOIN sales_items si ON si.sale_id = s.id
+      WHERE s.status = 'DELIVERED'
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      GROUP BY day
+      `,
+      [trendStart, trendEnd]
+    );
+
+    const salesByDay = {};
+    salesTrendRows.forEach((row) => {
+      salesByDay[toKey(row.day)] = Number(row.sales || 0);
+    });
+
+    const deliveredByDay = {};
+    deliveredTrendRows.forEach((row) => {
+      deliveredByDay[toKey(row.day)] = Number(row.delivered || 0);
+    });
+
+    const trendPoints = [];
+    for (let i = 0; i < trendDays; i += 1) {
+      const d = new Date(trendStartObj);
+      d.setDate(d.getDate() + i);
+      const key = toKey(d);
+      trendPoints.push({
+        date: key,
+        label: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        sales: salesByDay[key] || 0,
+        delivered: deliveredByDay[key] || 0,
+      });
+    }
+
+    // ---- Stock Overview (capacity = full + empty + defective per fleet) ----
+    const [stockRows] = await db.execute(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN p.type = 'DOMESTIC' THEN s.quantity ELSE 0 END), 0) AS dom_full,
+        COALESCE(SUM(CASE WHEN p.type = 'DOMESTIC' THEN COALESCE(s.empty_quantity, 0) + COALESCE(s.defective_quantity, 0) ELSE 0 END), 0) AS dom_rest,
+        COALESCE(SUM(CASE WHEN p.type = 'COMMERCIAL' THEN s.quantity ELSE 0 END), 0) AS com_full,
+        COALESCE(SUM(CASE WHEN p.type = 'COMMERCIAL' THEN COALESCE(s.empty_quantity, 0) + COALESCE(s.defective_quantity, 0) ELSE 0 END), 0) AS com_rest,
+        COALESCE(SUM(COALESCE(s.empty_quantity, 0)), 0) AS empty_total
+      FROM stock s
+      INNER JOIN products p ON p.id = s.product_id
+      WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
+      `
+    );
+
+    const sr = stockRows[0] || {};
+    const domFull = Number(sr.dom_full || 0);
+    const domTotal = domFull + Number(sr.dom_rest || 0);
+    const comFull = Number(sr.com_full || 0);
+    const comTotal = comFull + Number(sr.com_rest || 0);
+    const emptyCurrent = Number(sr.empty_total || 0);
+    const fleetTotal = domTotal + comTotal;
+
+    const ratio = (current, total) => (total > 0 ? current / total : 0);
+
+    const stockOverview = {
+      domestic: {
+        current: domFull,
+        total: domTotal,
+        low: domTotal > 0 && ratio(domFull, domTotal) < 0.3,
+      },
+      commercial: {
+        current: comFull,
+        total: comTotal,
+        low: comTotal > 0 && ratio(comFull, comTotal) < 0.3,
+      },
+      empty: {
+        current: emptyCurrent,
+        total: fleetTotal,
+        low: fleetTotal > 0 && ratio(emptyCurrent, fleetTotal) < 0.4,
+      },
+    };
+
+    // ---- Driver Cash Tracking (collected / settled / pending per driver) ----
+    const [driverCashRows] = await db.execute(
+      `
+      SELECT
+        d.id AS driver_id,
+        u.name AS driver_name,
+        COALESCE(dc.cylinders, 0) AS cylinders,
+        COALESCE(pc.collected, 0) AS collected,
+        COALESCE(st.settled, 0) AS settled,
+        COALESCE(pc.collected, 0) - COALESCE(st.settled, 0) AS pending
+      FROM drivers d
+      INNER JOIN users u ON u.id = d.user_id
+      LEFT JOIN (
+        SELECT s.driver_id, SUM(si.delivered_qty) AS cylinders
+        FROM sales s
+        INNER JOIN sales_items si ON si.sale_id = s.id
+        WHERE s.status = 'DELIVERED'
+          AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+        GROUP BY s.driver_id
+      ) dc ON dc.driver_id = d.id
+      LEFT JOIN (
+        SELECT s.driver_id, SUM(p.amount) AS collected
+        FROM sales s
+        INNER JOIN payments p ON p.sale_id = s.id
+        WHERE s.status = 'DELIVERED' AND p.type = 'DRIVER' AND p.status = 'SUCCESS'
+          AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+        GROUP BY s.driver_id
+      ) pc ON pc.driver_id = d.id
+      LEFT JOIN (
+        SELECT driver_id, SUM(amount) AS settled
+        FROM settlement_history
+        WHERE status = 'SETTLED'
+          AND DATE(created_at) BETWEEN ? AND ?
+        GROUP BY driver_id
+      ) st ON st.driver_id = d.id
+      HAVING cylinders > 0 OR collected > 0 OR settled > 0
+      ORDER BY collected DESC
+      `,
+      [startDate, endDate, startDate, endDate, startDate, endDate]
+    );
+
+    const driverCashTracking = driverCashRows.map((row) => {
+      const collected = Number(row.collected || 0);
+      const settled = Number(row.settled || 0);
+      const pending = collected - settled;
+
+      let status = "Pending";
+      if (collected === 0) status = "No Activity";
+      else if (pending <= 0) status = "Settled";
+
+      return {
+        driverId: Number(row.driver_id),
+        driverName: row.driver_name,
+        cylinders: Number(row.cylinders || 0),
+        collected,
+        settled,
+        pending: Math.max(pending, 0),
+        status,
+      };
+    });
+
+    // ---- Recent Activity (unified feed across the system) ----
+    const [activityRows] = await db.query(
+      `
+      (
+        SELECT 'SETTLEMENT' AS kind, u.name AS actor, sh.amount AS amount, NULL AS qty, NULL AS extra, sh.created_at AS ts
+        FROM settlement_history sh
+        INNER JOIN drivers d ON d.id = sh.driver_id
+        INNER JOIN users u ON u.id = d.user_id
+        WHERE sh.status = 'SETTLED'
+        ORDER BY sh.created_at DESC
+        LIMIT 6
+      )
+      UNION ALL
+      (
+        SELECT 'STOCK' AS kind, p.name AS actor, NULL AS amount, stt.quantity AS qty, stt.type AS extra, stt.created_at AS ts
+        FROM stock_transactions stt
+        LEFT JOIN products p ON p.id = stt.product_id
+        ORDER BY stt.created_at DESC
+        LIMIT 6
+      )
+      UNION ALL
+      (
+        SELECT 'DELIVERY' AS kind, u.name AS actor, NULL AS amount, NULL AS qty, NULL AS extra, s.delivered_at AS ts
+        FROM sales s
+        INNER JOIN drivers d ON d.id = s.driver_id
+        INNER JOIN users u ON u.id = d.user_id
+        WHERE s.status = 'DELIVERED' AND s.delivered_at IS NOT NULL
+        ORDER BY s.delivered_at DESC
+        LIMIT 6
+      )
+      UNION ALL
+      (
+        SELECT 'EXPENSE' AS kind, u.name AS actor, e.amount AS amount, NULL AS qty, e.category AS extra, e.created_at AS ts
+        FROM expenses e
+        LEFT JOIN users u ON u.id = e.created_by
+        ORDER BY e.created_at DESC
+        LIMIT 6
+      )
+      UNION ALL
+      (
+        SELECT 'ORDER' AS kind, c.name AS actor, NULL AS amount, NULL AS qty, NULL AS extra, s.created_at AS ts
+        FROM sales s
+        INNER JOIN users c ON c.id = s.customer_id
+        ORDER BY s.created_at DESC
+        LIMIT 6
+      )
+      ORDER BY ts DESC
+      LIMIT 10
+      `
+    );
+
+    const formatInr = (value) => Number(value || 0).toLocaleString("en-IN");
+
+    const recentActivity = activityRows.map((row) => {
+      const amount = row.amount != null ? Number(row.amount) : null;
+      const qty = row.qty != null ? Number(row.qty) : null;
+      let title = "Activity";
+
+      switch (row.kind) {
+        case "SETTLEMENT":
+          title = `${row.actor || "Driver"} settled ₹${formatInr(amount)} cash`;
+          break;
+        case "STOCK": {
+          const sign = qty != null && qty >= 0 ? "+" : "";
+          title = `Stock updated: ${sign}${qty ?? 0} ${row.actor || "cylinders"}`;
+          break;
+        }
+        case "DELIVERY":
+          title = `${row.actor || "Driver"} completed a delivery`;
+          break;
+        case "EXPENSE":
+          title = `${row.extra || "Expense"} ₹${formatInr(amount)} submitted by ${row.actor || "staff"}`;
+          break;
+        case "ORDER":
+          title = `New delivery order for ${row.actor || "customer"}`;
+          break;
+        default:
+          title = "Activity";
+      }
+
+      return {
+        type: row.kind,
+        title,
+        createdAt: row.ts,
+      };
+    });
+
+    // ---- Expense Breakdown (by category) ----
+    const [expenseRows] = await db.execute(
+      `
+      SELECT COALESCE(NULLIF(TRIM(category), ''), 'Other') AS category,
+             COALESCE(SUM(amount), 0) AS amount
+      FROM expenses
+      WHERE status = 'APPROVED'
+        AND DATE(created_at) BETWEEN ? AND ?
+      GROUP BY COALESCE(NULLIF(TRIM(category), ''), 'Other')
+      ORDER BY amount DESC
+      `,
+      [startDate, endDate]
+    );
+
+    const expenseItems = expenseRows.map((row) => ({
+      category: row.category,
+      amount: Number(row.amount || 0),
+    }));
+    const expenseTotal = expenseItems.reduce((sum, item) => sum + item.amount, 0);
+
+    // ---- Top Drivers Today (by deliveries completed) ----
+    const [topDriverRows] = await db.execute(
+      `
+      SELECT
+        d.id AS driver_id,
+        u.name AS driver_name,
+        COUNT(DISTINCT s.id) AS deliveries
+      FROM drivers d
+      INNER JOIN users u ON u.id = d.user_id
+      LEFT JOIN sales s
+        ON s.driver_id = d.id
+       AND s.status = 'DELIVERED'
+       AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      GROUP BY d.id, u.name
+      HAVING deliveries > 0
+      ORDER BY deliveries DESC, u.name ASC
+      LIMIT 5
+      `,
+      [startDate, endDate]
+    );
+
+    const topDrivers = topDriverRows.map((row) => ({
+      driverId: Number(row.driver_id),
+      driverName: row.driver_name,
+      deliveries: Number(row.deliveries || 0),
+    }));
+
+    return res.status(200).json({
+      success: true,
+      message: "Owner dashboard insights fetched successfully",
+      data: {
+        dateRange: { startDate, endDate },
+        salesTrend: { days: trendDays, points: trendPoints },
+        stockOverview,
+        driverCashTracking,
+        recentActivity,
+        expenseBreakdown: { items: expenseItems, total: expenseTotal },
+        topDrivers,
+      },
+    });
+  } catch (error) {
+    console.error("getOwnerDashboardInsights error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch owner dashboard insights",
+      error: error.message,
+    });
+  }
+};
+
 export const getOwnerSalesDashboard = async (req, res) => {
   return getSalesDashboard(req, res);
 };
@@ -959,5 +1291,56 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
     });
   } finally {
     connection.release();
+  }
+};
+
+export const updateOwnerJobAssignmentUserStatus = async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    const status = String(req.body.status || "").toUpperCase();
+
+    if (!userId || Number.isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid user id is required",
+      });
+    }
+
+    if (status !== "ACTIVE" && status !== "INACTIVE") {
+      return res.status(400).json({
+        success: false,
+        message: "status must be either ACTIVE or INACTIVE",
+      });
+    }
+
+    const [result] = await db.execute(
+      `
+      UPDATE users
+      SET status = ?
+      WHERE id = ?
+        AND role IN ('GODOWN_MANAGER', 'PURCHASE_MANAGER', 'DRIVER', 'CASHIER', 'SUPPORT')
+      `,
+      [status, userId]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "User status updated successfully",
+      data: { id: userId, status },
+    });
+  } catch (error) {
+    console.error("updateOwnerJobAssignmentUserStatus error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update user status",
+      error: error.message,
+    });
   }
 };

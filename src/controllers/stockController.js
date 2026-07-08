@@ -324,6 +324,37 @@ export const getStockDashboard = async (req, res) => {
         by: row.movedBy || "System",
       }));
 
+    // Recent Stock Entries (created via the "Add Stock" flow → type = 'NEW_VALUE')
+    const [recentEntryRows] = await connection.query(
+      `
+      SELECT
+        st.created_at AS date,
+        c.name AS category,
+        p.name AS item,
+        sa.name AS location,
+        st.quantity AS qty,
+        p.price AS price,
+        st.batch_no AS note
+      FROM stock_transactions st
+      INNER JOIN products p ON p.id = st.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN stock_areas sa ON sa.id = st.stock_area_id
+      WHERE st.type = 'NEW_VALUE'
+      ORDER BY st.created_at DESC, st.id DESC
+      LIMIT 15
+      `
+    );
+
+    const recentEntries = recentEntryRows.map((row) => ({
+      date: row.date,
+      category: row.category || "-",
+      item: row.item || "-",
+      location: row.location || "-",
+      qty: Number(row.qty || 0),
+      price: row.price == null ? null : Number(row.price),
+      note: row.note || null,
+    }));
+
     return res.status(200).json({
       success: true,
       summary: {
@@ -352,6 +383,7 @@ export const getStockDashboard = async (req, res) => {
         };
       }),
       movements,
+      recentEntries,
       pagination: {
         total,
         page,

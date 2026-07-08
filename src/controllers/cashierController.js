@@ -170,6 +170,27 @@ export const getCashierDashboard = async (req, res) => {
   try {
     const lastClosing = await getLatestClosingBalance(connection);
 
+    // Optional date-range filter (YYYY-MM-DD). No range => all-time (default).
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+    const rangeParams = hasRange ? [startDate, endDate] : [];
+
+    const receiptDateClause = hasRange
+      ? 'AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?'
+      : '';
+    const expenseWhereClause = hasRange ? 'WHERE DATE(e.created_at) BETWEEN ? AND ?' : '';
+    const pendingExpenseDateClause = hasRange ? 'AND DATE(e.created_at) BETWEEN ? AND ?' : '';
+    const settlementDateClause = hasRange ? 'AND DATE(sh.created_at) BETWEEN ? AND ?' : '';
+
     const [receiptRows] = await connection.query(
       `
       SELECT
@@ -179,7 +200,9 @@ export const getCashierDashboard = async (req, res) => {
       FROM payments p
       INNER JOIN sales s ON s.id = p.sale_id
       WHERE p.status = 'SUCCESS'
-      `
+      ${receiptDateClause}
+      `,
+      rangeParams
     );
 
     const [expenseRows] = await connection.query(
@@ -188,7 +211,9 @@ export const getCashierDashboard = async (req, res) => {
         COALESCE(SUM(e.amount), 0) AS totalExpenses,
         COALESCE(SUM(CASE WHEN e.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingApproval
       FROM expenses e
-      `
+      ${expenseWhereClause}
+      `,
+      rangeParams
     );
 
     const [pendingExpenses] = await connection.query(
@@ -204,9 +229,11 @@ export const getCashierDashboard = async (req, res) => {
       FROM expenses e
       LEFT JOIN users u ON u.id = e.created_by
       WHERE e.status = 'PENDING'
+      ${pendingExpenseDateClause}
       ORDER BY e.created_at DESC
       LIMIT 2
-      `
+      `,
+      rangeParams
     );
 
     const [driverRows] = await connection.query(
@@ -229,11 +256,12 @@ export const getCashierDashboard = async (req, res) => {
         END AS status
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
-      LEFT JOIN settlement_history sh ON sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')
+      LEFT JOIN settlement_history sh ON sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') ${settlementDateClause}
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
       LIMIT 4
-      `
+      `,
+      rangeParams
     );
 
     const receiptSummary = receiptRows[0] || { cash: 0, upi: 0, card: 0 };
@@ -1686,14 +1714,60 @@ export const recordOfficeSale = async (req, res) => {
       );
     }
 
-    await connection.execute(
-      `
-      INSERT INTO payments
-        (sale_id, amount, method, status, type, created_at)
-      VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW())
-      `,
-      [saleId, totalAmount, payment_method]
-    );
+    if (payment_method === 'PART_PAYMENT') {
+      // Split a part payment into two payment rows: cash portion + bank/UTR portion.
+      const rawCash = Number(req.body.cash_amount);
+      const cashPart = Math.min(Math.max(Number.isFinite(rawCash) ? rawCash : 0, 0), totalAmount);
+      const bankPart = Math.max(totalAmount - cashPart, 0);
+
+      if (cashPart > 0) {
+        await connection.execute(
+          `
+          INSERT INTO payments
+            (sale_id, amount, method, status, type, created_at)
+          VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW())
+          `,
+          [saleId, cashPart]
+        );
+      }
+
+      if (bankPart > 0) {
+        await connection.execute(
+          `
+          INSERT INTO payments
+            (sale_id, amount, method, status, type, created_at)
+          VALUES (?, ?, 'UPI', 'SUCCESS', 'COMPANY', NOW())
+          `,
+          [saleId, bankPart]
+        );
+      }
+
+      // Guarantee at least one payment row exists (e.g. zero-value edge case).
+      if (cashPart <= 0 && bankPart <= 0) {
+        await connection.execute(
+          `
+          INSERT INTO payments
+            (sale_id, amount, method, status, type, created_at)
+          VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW())
+          `,
+          [saleId, 0]
+        );
+      }
+    } else {
+      // payments.method only supports CASH/UPI/CARD; map anything else to UPI.
+      const paymentMethodForRow = ['CASH', 'UPI', 'CARD'].includes(payment_method)
+        ? payment_method
+        : 'UPI';
+
+      await connection.execute(
+        `
+        INSERT INTO payments
+          (sale_id, amount, method, status, type, created_at)
+        VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW())
+        `,
+        [saleId, totalAmount, paymentMethodForRow]
+      );
+    }
 
     await connection.commit();
 
@@ -1767,7 +1841,7 @@ export const recordOfficeExpense = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const { category, amount, description } = req.body;
+    const { category, amount, description, bill_url: billUrl } = req.body;
     const adminId = 6;
 
     if (!adminId) {
@@ -1783,15 +1857,34 @@ export const recordOfficeExpense = async (req, res) => {
       return res.status(400).json({ success: false, message: 'amount must be a non-negative number' });
     }
 
+    // Ensure a receipt column exists so the uploaded bill can be persisted.
+    const [billColumns] = await connection.query(
+      `SHOW COLUMNS FROM office_expenses LIKE 'bill_url'`
+    );
+    let hasBillUrl = billColumns.length > 0;
+    if (!hasBillUrl && billUrl) {
+      try {
+        await connection.query(`ALTER TABLE office_expenses ADD COLUMN bill_url TEXT NULL`);
+        hasBillUrl = true;
+      } catch (alterError) {
+        console.warn('Could not add bill_url column to office_expenses:', alterError.message);
+      }
+    }
+
+    const extraCols = hasBillUrl ? ', bill_url' : '';
+    const extraPlaceholder = hasBillUrl ? ', ?' : '';
+    const baseParams = [adminId, category, numericAmount, description || null];
+    const billParams = hasBillUrl ? [billUrl || null] : [];
+
     let result;
 
     try {
       [result] = await connection.execute(
         `
-        INSERT INTO office_expenses (admin_id, category, amount, description, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'PENDING', NOW(), NOW())
+        INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?${extraPlaceholder}, 'PENDING', NOW(), NOW())
         `,
-        [adminId, category, numericAmount, description || null]
+        [...baseParams, ...billParams]
       );
     } catch (queryError) {
       if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
@@ -1800,10 +1893,10 @@ export const recordOfficeExpense = async (req, res) => {
 
       [result] = await connection.execute(
         `
-        INSERT INTO office_expenses (admin_id, category, amount, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, NOW(), NOW())
+        INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, created_at, updated_at)
+        VALUES (?, ?, ?, ?${extraPlaceholder}, NOW(), NOW())
         `,
-        [adminId, category, numericAmount, description || null]
+        [...baseParams, ...billParams]
       );
     }
 
@@ -2198,6 +2291,7 @@ export const getTodaysCashFlow = async (req, res) => {
       SELECT
         COALESCE(SUM(p.amount), 0) AS total,
         COALESCE(SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash_total,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' THEN p.amount ELSE 0 END), 0) AS upi_total,
         COUNT(DISTINCT p.id) AS count
       FROM payments p
       INNER JOIN sales s ON s.id = p.sale_id
@@ -2214,6 +2308,7 @@ export const getTodaysCashFlow = async (req, res) => {
       SELECT
         COALESCE(SUM(op.amount), 0) AS total,
         COALESCE(SUM(CASE WHEN UPPER(op.method) = 'CASH' THEN op.amount ELSE 0 END), 0) AS cash_total,
+        COALESCE(SUM(CASE WHEN UPPER(op.method) = 'UPI' THEN op.amount ELSE 0 END), 0) AS upi_total,
         COUNT(DISTINCT op.id) AS count
       FROM other_payments op
       WHERE DATE(op.created_at) = CURDATE()
@@ -2227,6 +2322,7 @@ export const getTodaysCashFlow = async (req, res) => {
       SELECT
         COALESCE(SUM(p.penalty_amount), 0) AS total,
         COALESCE(SUM(CASE WHEN p.payment_mode = 'CASH' THEN p.penalty_amount ELSE 0 END), 0) AS cash_total,
+        COALESCE(SUM(CASE WHEN p.payment_mode = 'UPI' THEN p.penalty_amount ELSE 0 END), 0) AS upi_total,
         COUNT(DISTINCT p.id) AS count
       FROM customer_pr_penalties p
       WHERE p.payment_status = 'PAID'
@@ -2240,6 +2336,7 @@ export const getTodaysCashFlow = async (req, res) => {
       SELECT
         COALESCE(SUM(r.service_fee), 0) AS total,
         COALESCE(SUM(CASE WHEN r.payment_mode = 'CASH' THEN r.service_fee ELSE 0 END), 0) AS cash_total,
+        COALESCE(SUM(CASE WHEN r.payment_mode = 'UPI' THEN r.service_fee ELSE 0 END), 0) AS upi_total,
         COUNT(DISTINCT r.id) AS count
       FROM customer_name_change_requests r
       WHERE r.status = 'APPROVED'
@@ -2253,6 +2350,7 @@ export const getTodaysCashFlow = async (req, res) => {
       SELECT
         COALESCE(SUM(cnc.total_amount), 0) AS total,
         COALESCE(SUM(CASE WHEN cnc.payment_mode = 'CASH' THEN cnc.total_amount ELSE 0 END), 0) AS cash_total,
+        COALESCE(SUM(CASE WHEN cnc.payment_mode = 'UPI' THEN cnc.total_amount ELSE 0 END), 0) AS upi_total,
         COUNT(DISTINCT cnc.id) AS count
       FROM customer_new_connections cnc
       WHERE cnc.payment_status = 'PAID'
@@ -2316,6 +2414,9 @@ export const getTodaysCashFlow = async (req, res) => {
     const inflowTotal = sumField(inflowSources, "total");
     const inflowCount = sumField(inflowSources, "count");
     const inflowCashTotal = sumField(inflowSources, "cash_total");
+    const inflowUpiTotal = sumField(inflowSources, "upi_total");
+    // Anything that is neither cash nor UPI (card / bank transfer) is "bank".
+    const inflowBankTotal = Math.max(inflowTotal - inflowCashTotal - inflowUpiTotal, 0);
 
     const outflowTotal = sumField(outflowSources, "total");
     const outflowCount = sumField(outflowSources, "count");
@@ -2334,6 +2435,11 @@ export const getTodaysCashFlow = async (req, res) => {
       cashInflow: inflowCashTotal,
       cashOutflow: outflowCashTotal,
       currentBalance,
+      breakdown: {
+        cash: inflowCashTotal,
+        online: inflowUpiTotal,
+        bank: inflowBankTotal,
+      },
     });
   } catch (error) {
     console.error('getTodaysCashFlow error:', error);
