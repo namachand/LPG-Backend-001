@@ -733,6 +733,26 @@ export const getDriverDeliveriesApp = async (req, res) => {
 
     const pendingCollection = Number(pendingCollectionRows[0]?.pending_collection || 0);
 
+    // System stock for this driver: quantity of products sold on sales whose
+    // IOC OTP has been marked SENT from the customer-issues dashboard, scoped to
+    // the same date range as the other stats (by sale delivered/created date).
+    const [systemStockRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(si.quantity), 0) AS system_stock
+      FROM sales s
+      INNER JOIN sales_items si ON si.sale_id = s.id
+      WHERE s.driver_id = ?
+        AND EXISTS (
+          SELECT 1 FROM driver_sale_otps dso
+          WHERE dso.sale_id = s.id AND dso.status = 'SENT'
+        )
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    const systemStock = Number(systemStockRows[0]?.system_stock || 0);
+
     const stats = {
       allocated,
       delivered,
@@ -741,6 +761,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
       emptiesOriginal,
       inHand,
       inHandOriginal,
+      systemStock,
       newDelivery: 0,
     };
 

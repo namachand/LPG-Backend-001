@@ -299,3 +299,8 @@ CREATE TABLE IF NOT EXISTS `driver_sale_otps` (
   KEY `idx_driver_sale_otps_status` (`status`),
   CONSTRAINT `fk_driver_sale_otps_sale` FOREIGN KEY (`sale_id`) REFERENCES `sales` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Running tally of quantity confirmed/sent to IOC, accumulated when an IOC OTP
+-- is marked SENT (increments by the sale's sold quantity per product).
+ALTER TABLE `stock`
+  ADD COLUMN `system_quantity` int NOT NULL DEFAULT 0 AFTER `defective_quantity`;

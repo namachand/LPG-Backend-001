@@ -222,6 +222,7 @@ CREATE TABLE `stock` (
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `empty_quantity` int DEFAULT NULL,
   `defective_quantity` int DEFAULT NULL,
+  `system_quantity` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_stock_product_area` (`product_id`,`stock_area_id`),
   KEY `idx_stock_area_id` (`stock_area_id`),

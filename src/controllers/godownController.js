@@ -254,7 +254,8 @@ export const getGodownDashboardData = async (req, res) => {
         p.name AS product_name,
         p.type AS product_type,
         c.name AS category_name,
-        COALESCE(SUM(s.quantity), 0) AS system_quantity,
+        COALESCE(SUM(s.quantity), 0) AS physical_quantity,
+        COALESCE(SUM(s.system_quantity), 0) AS system_quantity,
         COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity,
         COALESCE(SUM(s.defective_quantity), 0) AS defective_quantity
       FROM products p
@@ -348,11 +349,14 @@ export const getGodownDashboardData = async (req, res) => {
       const group = normalizeType(row);
       const key = group === "COMMERCIAL" ? "commercial" : "domestic";
 
+      // physical = actual on-hand stock (stock.quantity)
+      // system   = running tally accumulated when IOC OTPs are marked SENT (stock.system_quantity)
+      const physicalQty = Number(row.physical_quantity || 0);
       const systemQty = Number(row.system_quantity || 0);
       const emptyQty = Number(row.empty_quantity || 0);
       const defectiveQty = Number(row.defective_quantity || 0);
 
-      const availablePhysical = Math.max(systemQty, 0);
+      const availablePhysical = Math.max(physicalQty, 0);
       const defectivePhysical = Math.max(defectiveQty, 0);
       const emptyPhysical = Math.max(emptyQty, 0);
 
@@ -477,6 +481,7 @@ export const getStockDetailByType = async (req, res) => {
         p.name AS product_name,
         p.type AS product_type,
         COALESCE(SUM(s.quantity), 0) AS quantity,
+        COALESCE(SUM(s.system_quantity), 0) AS system_quantity,
         COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity,
         COALESCE(SUM(s.defective_quantity), 0) AS defective_quantity
       FROM products p
@@ -515,6 +520,7 @@ export const getStockDetailByType = async (req, res) => {
 
     const items = rows.map((row) => {
       const qty = Number(row.quantity || 0);
+      const systemQty = Number(row.system_quantity || 0);
       const emptyQty = Number(row.empty_quantity || 0);   // stock.empty_quantity (in-stock / approved)
       const defectiveQty = Number(row.defective_quantity || 0);
 
@@ -526,8 +532,9 @@ export const getStockDetailByType = async (req, res) => {
         physical = emptyQty;
         system = emptyReturnByProduct[Number(row.product_id)] ?? 0;
       } else {
+        // system = running tally from IOC OTPs marked SENT (stock.system_quantity)
         physical = Math.max(qty - defectiveQty, 0);
-        system = Math.max(qty, 0);
+        system = Math.max(systemQty, 0);
       }
 
       const compactName = String(row.product_name || "")

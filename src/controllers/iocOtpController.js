@@ -1,5 +1,50 @@
 import db from "../config/db.js";
 
+const DEFAULT_STOCK_AREA_ID = 1;
+
+// Adds `qty` to the running system_quantity tally for a product, on the
+// canonical stock row (default area preferred, otherwise the lowest-id row).
+// Creates a stock row if none exists. Floored at 0.
+const addSystemQuantity = async (connection, productId, qty) => {
+  const amount = Number(qty || 0);
+
+  if (!Number(productId) || amount <= 0) {
+    return;
+  }
+
+  const [rows] = await connection.query(
+    `
+    SELECT id
+    FROM stock
+    WHERE product_id = ?
+    ORDER BY (stock_area_id = ?) DESC, id ASC
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [Number(productId), DEFAULT_STOCK_AREA_ID]
+  );
+
+  if (rows.length) {
+    await connection.query(
+      `
+      UPDATE stock
+      SET system_quantity = GREATEST(COALESCE(system_quantity, 0) + ?, 0),
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [amount, rows[0].id]
+    );
+  } else {
+    await connection.query(
+      `
+      INSERT INTO stock (product_id, stock_area_id, quantity, system_quantity)
+      VALUES (?, ?, 0, GREATEST(?, 0))
+      `,
+      [Number(productId), DEFAULT_STOCK_AREA_ID, amount]
+    );
+  }
+};
+
 export const getIocOtpSummary = async (_req, res) => {
   const connection = await db.getConnection();
 
@@ -118,23 +163,56 @@ export const markIocOtpSent = async (req, res) => {
       });
     }
 
+    await connection.beginTransaction();
+
+    // The PENDING guard makes this transition (and the stock update below)
+    // fire exactly once per OTP, so system_quantity is never double-counted.
     const [result] = await connection.query(
-      "UPDATE driver_sale_otps SET status = 'SENT' WHERE id = ? AND status = 'PENDING'",
+      "UPDATE driver_sale_otps SET status = 'SENT' WHERE id = ? AND status = 'PENDING' AND sale_id IS NOT NULL",
       [otpId]
     );
 
     if (!result.affectedRows) {
+      await connection.rollback();
       return res.status(404).json({
         success: false,
         message: "Pending OTP not found",
       });
     }
 
+    const [otpRows] = await connection.query(
+      "SELECT sale_id FROM driver_sale_otps WHERE id = ? LIMIT 1",
+      [otpId]
+    );
+
+    const saleId = Number(otpRows[0]?.sale_id) || null;
+
+    if (saleId) {
+      // A sale can have multiple products; accumulate system stock per product
+      // by the quantity sold in this sale.
+      const [items] = await connection.query(
+        `
+        SELECT product_id, SUM(quantity) AS quantity
+        FROM sales_items
+        WHERE sale_id = ?
+        GROUP BY product_id
+        `,
+        [saleId]
+      );
+
+      for (const item of items) {
+        await addSystemQuantity(connection, item.product_id, item.quantity);
+      }
+    }
+
+    await connection.commit();
+
     return res.status(200).json({
       success: true,
       message: "OTP marked as sent to IOC",
     });
   } catch (error) {
+    await connection.rollback();
     console.error("markIocOtpSent error:", error);
     return res.status(500).json({
       success: false,

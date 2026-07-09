@@ -135,14 +135,7 @@ export const getStockDashboard = async (req, res) => {
         COALESCE(pr.purchaseReturn, 0) AS purchaseReturn,
         COALESCE(def.defective, 0) AS defective,
         COALESCE(stk.emptyQty, 0) AS emptyCylinders,
-        GREATEST(
-          COALESCE(stk.opening, 0)
-          + COALESCE(pur.purchase, 0)
-          + COALESCE(sa.salesReturn, 0)
-          - COALESCE(sa.sales, 0)
-          - COALESCE(pr.purchaseReturn, 0),
-          0
-        ) AS systemStock
+        GREATEST(COALESCE(stk.systemQty, 0), 0) AS systemStock
 
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
@@ -151,6 +144,7 @@ export const getStockDashboard = async (req, res) => {
         SELECT
           s.product_id,
           COALESCE(SUM(COALESCE(s.quantity, 0)), 0) AS opening,
+          COALESCE(SUM(COALESCE(s.system_quantity, 0)), 0) AS systemQty,
           COALESCE(SUM(COALESCE(s.empty_quantity, 0)), 0) AS emptyQty
         FROM stock s
         ${stockSubAreaFilter}
