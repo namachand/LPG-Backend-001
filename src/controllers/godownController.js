@@ -533,7 +533,10 @@ export const getStockDetailByType = async (req, res) => {
         system = emptyReturnByProduct[Number(row.product_id)] ?? 0;
       } else {
         // system = running tally from IOC OTPs marked SENT (stock.system_quantity)
-        physical = Math.max(qty - defectiveQty, 0);
+        // physical = stock.quantity (full cylinders on hand). Defective is a
+        // separate bucket, so it is NOT subtracted here — this keeps the
+        // available total identical to the dashboard card and allocation logic.
+        physical = Math.max(qty, 0);
         system = Math.max(systemQty, 0);
       }
 
@@ -546,7 +549,7 @@ export const getStockDetailByType = async (req, res) => {
         productId: Number(row.product_id),
         productName: row.product_name,
         item: compactName || row.product_name,
-        quantity: Math.max(qty - defectiveQty, 0),
+        quantity: Math.max(qty, 0),
         emptyQuantity: emptyQty,
         defectiveQuantity: defectiveQty,
         physical,
@@ -600,7 +603,7 @@ export const getStockDetailByType = async (req, res) => {
         totalAvailable,
         totalEmpty,
         totalDefective,
-        totalStock: isEmptyView ? totalSystem : totalAvailable,
+        totalStock: isEmptyView ? totalPhysical : totalAvailable,
         physical: totalPhysical,
         system: totalSystem,
         diff: totalPhysical - totalSystem,
@@ -920,9 +923,12 @@ export const getCylinderProducts = async (req, res) => {
         p.id,
         p.name,
         p.type,
-        c.name AS category_name
+        c.name AS category_name,
+        COALESCE(SUM(s.quantity), 0) AS available_quantity
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN stock s ON s.product_id = p.id
+      GROUP BY p.id, p.name, p.type, c.name
       ORDER BY p.type ASC, p.name ASC
     `);
 
@@ -939,6 +945,7 @@ export const getCylinderProducts = async (req, res) => {
             id: item.id,
             name: item.name,
             category: item.category_name,
+            availableQuantity: Number(item.available_quantity || 0),
           })),
 
         commercial: rows
@@ -951,6 +958,7 @@ export const getCylinderProducts = async (req, res) => {
             id: item.id,
             name: item.name,
             category: item.category_name,
+            availableQuantity: Number(item.available_quantity || 0),
           })),
       },
     });

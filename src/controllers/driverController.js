@@ -1301,6 +1301,12 @@ export const createDriverSale = async (req, res) => {
 
     const normalizedOtp = String(otp || "").trim();
 
+    // Diagnostic: makes it visible in server logs whether the client actually
+    // sent the OTP for this sale (the IOC OTP row is only created when it did).
+    console.log(
+      `createDriverSale: saleId=${saleId} otpReceived=${normalizedOtp ? "yes" : "no"} otpLength=${normalizedOtp.length}`
+    );
+
     if (normalizedOtp) {
       await connection.execute(
         `
@@ -1313,6 +1319,10 @@ export const createDriverSale = async (req, res) => {
         VALUES (?, ?, 'PENDING')
         `,
         [saleId, normalizedOtp]
+      );
+    } else {
+      console.warn(
+        `createDriverSale: no OTP stored for saleId=${saleId} — client did not send a non-empty 'otp' field.`
       );
     }
 
