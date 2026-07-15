@@ -709,7 +709,8 @@ export const getDriverDeliveriesApp = async (req, res) => {
       [numericDriverId, startDate, endDate]
     );
 
-    // Returned empties include pending + approved explicit empty return requests.
+    // Returned empties count only APPROVED explicit empty return requests, so the
+    // driver's returned/in-hand numbers match what the godown has actually received.
     const [emptiesReturnedRows] = await db.execute(
       `
       SELECT COALESCE(SUM(st.quantity), 0) AS returned
@@ -720,7 +721,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
       WHERE st.driver_id = ?
         AND st.stock_from = 'driver'
         AND st.type = 'EMPTY_RETURN'
-        AND COALESCE(st.isApproved, 0) IN (0, 1)
+        AND COALESCE(st.isApproved, 0) = 1
         AND linked_sale.id IS NULL
         AND DATE(st.created_at) BETWEEN ? AND ?
       `,
@@ -2222,8 +2223,12 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
       0
     );
 
+    // Count as "returned" only once the godown manager has approved the return
+    // (matches what physically enters godown stock). Pending requests still
+    // appear in returnRequests below as "awaiting approval".
     const returned = returnRows.reduce(
-      (sum, row) => sum + Number(row.quantity || 0),
+      (sum, row) =>
+        Number(row.isApproved) === 1 ? sum + Number(row.quantity || 0) : sum,
       0
     );
 
@@ -2379,8 +2384,10 @@ export const getDriverEmptyCylindersHistory = async (req, res) => {
         0
       );
 
+      // Approved returns only (see getDriverEmptyCylindersToday for rationale).
       const returned = returns.reduce(
-        (sum, row) => sum + Number(row.quantity || 0),
+        (sum, row) =>
+          Number(row.isApproved) === 1 ? sum + Number(row.quantity || 0) : sum,
         0
       );
 

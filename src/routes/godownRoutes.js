@@ -18,6 +18,8 @@ import {
     createDriverAllocation,
     getReturnsToday,
     approveReturnByCondition,
+    getTransferEmptyReturns,
+    approveTransferEmptyReturn,
     cancelStockOutLoad,
     getCommercialDriverBookings,
     approveCommercialDriverBooking
@@ -45,6 +47,8 @@ router.get("/drivers/:driverId/day-wise-summary", getDriverDayWiseSummary);
 router.post("/driver-allocation", createDriverAllocation);
 router.get("/returns-today", getReturnsToday);
 router.put("/returns-today/approve", approveReturnByCondition);
+router.get("/transfer-empty-returns", getTransferEmptyReturns);
+router.put("/transfer-empty-returns/approve", approveTransferEmptyReturn);
 router.put("/stock-out-loads/:loadId/cancel", cancelStockOutLoad);
 router.get("/commercial-bookings", getCommercialDriverBookings);
 router.put("/commercial-bookings/:bookingId/approve", approveCommercialDriverBooking);

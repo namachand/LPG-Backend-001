@@ -204,9 +204,20 @@ export const createCustomerTransfer = async (req, res) => {
       reason,
       depositLiability,
       isRegulatorReceived,
+      emptyProductId,
+      emptyCylinderQty,
     } = req.body || {};
 
     const regulatorReceivedValue = Number(isRegulatorReceived) === 1 || isRegulatorReceived === true ? 1 : 0;
+
+    // Optional empty-cylinder return received during the transfer. When provided,
+    // a pending EMPTY_RETURN request is raised for the godown manager to approve.
+    let parsedEmptyProductId = Number(emptyProductId) || null;
+    let parsedEmptyQty = Number(emptyCylinderQty) || 0;
+    if (!parsedEmptyProductId || parsedEmptyQty <= 0) {
+      parsedEmptyProductId = null;
+      parsedEmptyQty = 0;
+    }
 
     if (!existingCustomerId) {
       return res.status(400).json({
@@ -276,6 +287,20 @@ export const createCustomerTransfer = async (req, res) => {
       });
     }
 
+    if (parsedEmptyProductId) {
+      const [emptyProductRows] = await connection.query(
+        "SELECT id FROM products WHERE id = ? LIMIT 1",
+        [parsedEmptyProductId]
+      );
+
+      if (!emptyProductRows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "Selected empty cylinder product not found",
+        });
+      }
+    }
+
     const snapshot = await getExistingCustomerSnapshot(connection, Number(existingCustomerId));
 
     await ensureRegulatorReceivedColumn(connection);
@@ -321,6 +346,23 @@ export const createCustomerTransfer = async (req, res) => {
         regulatorReceivedValue,
       ]
     );
+
+    const transferId = Number(transferResult.insertId);
+
+    // Raise a pending empty-cylinder return request to the godown manager,
+    // mirroring the driver flow. No driver is involved, so driver_id is NULL and
+    // reference_id points at this transfer; the manager approves it from the
+    // Returns screen, which adds the empties into godown stock.
+    if (parsedEmptyProductId && parsedEmptyQty > 0) {
+      await connection.query(
+        `
+        INSERT INTO stock_transactions
+          (product_id, stock_area_id, type, quantity, isApproved, reference_id, created_by, driver_id, stock_from, is_defective)
+        VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, NULL, NULL, 'default', 0)
+        `,
+        [parsedEmptyProductId, parsedEmptyQty, transferId]
+      );
+    }
 
     await connection.commit();
 

@@ -1585,7 +1585,16 @@ export const getPurchaseExpenses = async (req, res) => {
         e.amount,
         e.bill_url,
         e.status,
-        e.created_at
+        e.created_at,
+        (
+          SELECT pt.id
+          FROM purchase_trips pt
+          WHERE pt.purchase_manager_id = e.created_by
+            AND e.created_at >= pt.started_at
+            AND (pt.ended_at IS NULL OR e.created_at <= pt.ended_at)
+          ORDER BY pt.started_at DESC
+          LIMIT 1
+        ) AS trip_id
       FROM expenses e
       WHERE e.created_by = ?
       ORDER BY e.created_at DESC, e.id DESC
@@ -1597,6 +1606,7 @@ export const getPurchaseExpenses = async (req, res) => {
       success: true,
       data: rows.map((row) => ({
         id: row.id,
+        tripId: row.trip_id ?? undefined,
         category: row.category,
         description: row.description,
         amount: Number(row.amount || 0),

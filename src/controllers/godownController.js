@@ -274,6 +274,23 @@ export const getGodownDashboardData = async (req, res) => {
         AND DATE(st.created_at) BETWEEN ? AND ?
     `, [startDate, endDate]);
 
+    // Stock in (approved full cylinders received into the godown) per product,
+    // used to derive System = opening stock (IOC baseline) + stock in.
+    const [stockInRows] = await db.execute(`
+      SELECT
+        st.product_id,
+        COALESCE(SUM(st.quantity), 0) AS stock_in
+      FROM stock_transactions st
+      WHERE st.type IN ('PURCHASE', 'NEW_VALUE', 'ADJUSTMENT_ADD')
+        AND COALESCE(st.isApproved, 0) = 1
+        AND COALESCE(st.is_defective, 0) = 0
+      GROUP BY st.product_id
+    `);
+    const stockInByProduct = {};
+    stockInRows.forEach((r) => {
+      stockInByProduct[Number(r.product_id)] = Number(r.stock_in || 0);
+    });
+
     const [returnedTodayRows] = await db.execute(`
       SELECT
         COALESCE(SUM(st.quantity), 0) AS returned_today
@@ -350,9 +367,12 @@ export const getGodownDashboardData = async (req, res) => {
       const key = group === "COMMERCIAL" ? "commercial" : "domestic";
 
       // physical = actual on-hand stock (stock.quantity)
-      // system   = running tally accumulated when IOC OTPs are marked SENT (stock.system_quantity)
+      // system   = opening stock (IOC baseline in stock.system_quantity)
+      //            + stock in (approved cylinders received into the godown)
       const physicalQty = Number(row.physical_quantity || 0);
       const systemQty = Number(row.system_quantity || 0);
+      const stockInQty = stockInByProduct[Number(row.product_id)] ?? 0;
+      const systemTotal = Math.max(systemQty + stockInQty, 0);
       const emptyQty = Number(row.empty_quantity || 0);
       const defectiveQty = Number(row.defective_quantity || 0);
 
@@ -360,7 +380,7 @@ export const getGodownDashboardData = async (req, res) => {
       const defectivePhysical = Math.max(defectiveQty, 0);
       const emptyPhysical = Math.max(emptyQty, 0);
 
-      initial.available[key].system += systemQty;
+      initial.available[key].system += systemTotal;
       initial.available[key].defective += defectivePhysical;
       initial.available[key].total += availablePhysical;
 
@@ -371,8 +391,8 @@ export const getGodownDashboardData = async (req, res) => {
         product_id: row.product_id,
         item: row.product_name,
         physical: availablePhysical,
-        system: systemQty,
-        diff: availablePhysical - systemQty,
+        system: systemTotal,
+        diff: availablePhysical - systemTotal,
       });
     });
 
@@ -518,6 +538,28 @@ export const getStockDetailByType = async (req, res) => {
       });
     }
 
+    // For the available view, "System" = opening stock (IOC baseline held in
+    // stock.system_quantity) + stock in (approved full cylinders received into
+    // the godown via depot purchases / manual stock entries).
+    let stockInByProduct = {};
+    if (!isEmptyView) {
+      const [stockInRows] = await db.execute(
+        `
+        SELECT
+          st.product_id,
+          COALESCE(SUM(st.quantity), 0) AS stock_in
+        FROM stock_transactions st
+        WHERE st.type IN ('PURCHASE', 'NEW_VALUE', 'ADJUSTMENT_ADD')
+          AND COALESCE(st.isApproved, 0) = 1
+          AND COALESCE(st.is_defective, 0) = 0
+        GROUP BY st.product_id
+        `
+      );
+      stockInRows.forEach((r) => {
+        stockInByProduct[Number(r.product_id)] = Number(r.stock_in || 0);
+      });
+    }
+
     const items = rows.map((row) => {
       const qty = Number(row.quantity || 0);
       const systemQty = Number(row.system_quantity || 0);
@@ -532,12 +574,14 @@ export const getStockDetailByType = async (req, res) => {
         physical = emptyQty;
         system = emptyReturnByProduct[Number(row.product_id)] ?? 0;
       } else {
-        // system = running tally from IOC OTPs marked SENT (stock.system_quantity)
         // physical = stock.quantity (full cylinders on hand). Defective is a
         // separate bucket, so it is NOT subtracted here — this keeps the
         // available total identical to the dashboard card and allocation logic.
         physical = Math.max(qty, 0);
-        system = Math.max(systemQty, 0);
+        // system = opening stock (IOC baseline in stock.system_quantity)
+        //          + stock in (approved cylinders received into the godown).
+        const stockInQty = stockInByProduct[Number(row.product_id)] ?? 0;
+        system = Math.max(systemQty + stockInQty, 0);
       }
 
       const compactName = String(row.product_name || "")
@@ -1931,6 +1975,68 @@ export const createDriverAllocation = async (req, res) => {
       });
     }
 
+    // Enforce "settle before allocate": a driver must return (or deliver) any
+    // cylinders still in hand from a PREVIOUS day before a new allocation can
+    // be created. In-hand per batch = allocated - delivered - returned - defective.
+    const [outstandingRows] = await connection.execute(
+      `
+      SELECT
+        COALESCE(SUM(GREATEST(
+          COALESCE(asi.quantity, 0)
+          - COALESCE(delivered_data.delivered_qty, 0)
+          - COALESCE(return_data.return_qty, 0)
+          - COALESCE(return_data.defective_qty, 0), 0
+        )), 0) AS outstanding
+      FROM sales_items asi
+      INNER JOIN sales a
+        ON a.id = asi.sale_id
+
+      LEFT JOIN (
+        SELECT
+          child.allocation_sales_item_id,
+          SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
+        FROM sales_items child
+        INNER JOIN sales cs
+          ON cs.id = child.sale_id
+        WHERE child.allocation_sales_item_id IS NOT NULL
+          AND cs.status = 'DELIVERED'
+        GROUP BY child.allocation_sales_item_id
+      ) delivered_data
+        ON delivered_data.allocation_sales_item_id = asi.id
+
+      LEFT JOIN (
+        SELECT
+          st.allocation_sales_item_id,
+          SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS return_qty,
+          SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS defective_qty
+        FROM stock_transactions st
+        WHERE st.stock_from = 'driver'
+          AND st.type = 'PURCHASE_RETURN'
+          AND st.isApproved IN (0, 1)
+          AND st.allocation_sales_item_id IS NOT NULL
+        GROUP BY st.allocation_sales_item_id
+      ) return_data
+        ON return_data.allocation_sales_item_id = asi.id
+
+      WHERE a.driver_id = ?
+        AND a.status = 'ASSIGNED'
+        AND asi.allocation_sales_item_id IS NULL
+        AND DATE(COALESCE(a.assigned_at, a.created_at)) < CURDATE()
+      `,
+      [driver_id]
+    );
+
+    const outstandingInHand = Number(outstandingRows[0]?.outstanding || 0);
+
+    if (outstandingInHand > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `This driver still has ${outstandingInHand} cylinder(s) in hand from a previous day. They must be delivered or returned before a new allocation can be created.`,
+        code: "OUTSTANDING_IN_HAND",
+        outstandingInHand,
+      });
+    }
+
     await connection.beginTransaction();
 
     const productIds = [
@@ -2351,6 +2457,129 @@ export const approveReturnByCondition = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to approve returns",
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// Empty-cylinder return requests raised by the customer-issues transfer flow.
+// These have no driver (driver_id IS NULL) and reference a connection transfer,
+// so they are surfaced and approved separately from the driver returns.
+export const getTransferEmptyReturns = async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `
+      SELECT
+        st.id,
+        st.product_id,
+        st.quantity,
+        st.created_at,
+        t.id AS transfer_id,
+        p.name AS product_name,
+        p.type AS product_type,
+        c.name AS category_name,
+        eu.name AS from_customer_name,
+        nu.name AS to_customer_name
+      FROM stock_transactions st
+      JOIN customer_connection_transfers t ON t.id = st.reference_id
+      JOIN products p ON p.id = st.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN users eu ON eu.id = t.existing_customer_id
+      LEFT JOIN users nu ON nu.id = t.new_customer_id
+      WHERE st.type = 'EMPTY_RETURN'
+        AND st.driver_id IS NULL
+        AND st.stock_from = 'default'
+        AND COALESCE(st.isApproved, 0) = 0
+      ORDER BY st.created_at DESC, st.id DESC
+      `
+    );
+
+    const data = rows.map((row) => ({
+      id: Number(row.id),
+      transferId: Number(row.transfer_id),
+      productId: Number(row.product_id),
+      productName: row.product_name,
+      productType: row.product_type,
+      category: row.category_name,
+      quantity: Number(row.quantity || 0),
+      fromCustomer: row.from_customer_name || "",
+      toCustomer: row.to_customer_name || "",
+      createdAt: row.created_at,
+    }));
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    console.error("getTransferEmptyReturns error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch transfer empty returns",
+    });
+  }
+};
+
+export const approveTransferEmptyReturn = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const txnId = Number(req.body?.id);
+
+    if (!txnId) {
+      return res.status(400).json({
+        success: false,
+        message: "id is required",
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute(
+      `
+      SELECT st.id, st.product_id, st.quantity
+      FROM stock_transactions st
+      JOIN customer_connection_transfers t ON t.id = st.reference_id
+      WHERE st.id = ?
+        AND st.type = 'EMPTY_RETURN'
+        AND st.driver_id IS NULL
+        AND st.stock_from = 'default'
+        AND COALESCE(st.isApproved, 0) = 0
+      LIMIT 1
+      `,
+      [txnId]
+    );
+
+    if (!rows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Pending transfer empty return not found",
+      });
+    }
+
+    const row = rows[0];
+
+    await increaseStock(connection, {
+      productId: Number(row.product_id),
+      emptyQuantity: Number(row.quantity || 0),
+    });
+
+    await connection.execute(
+      `UPDATE stock_transactions SET isApproved = 1 WHERE id = ?`,
+      [txnId]
+    );
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: "Transfer empty return approved successfully",
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("approveTransferEmptyReturn error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to approve transfer empty return",
     });
   } finally {
     connection.release();
