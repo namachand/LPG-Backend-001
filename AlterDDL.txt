@@ -304,3 +304,36 @@ CREATE TABLE IF NOT EXISTS `driver_sale_otps` (
 -- is marked SENT (increments by the sale's sold quantity per product).
 ALTER TABLE `stock`
   ADD COLUMN `system_quantity` int NOT NULL DEFAULT 0 AFTER `defective_quantity`;
+
+-- Records each cashier "Start Day". The running-day window (dashboard cash
+-- in/out, live position, closing "System Calculated") is anchored at the latest
+-- of last Close Day / last Start Day, so counters reset to 0 on Start Day and
+-- only the opening balance carries into the new day.
+CREATE TABLE IF NOT EXISTS `cashier_openings` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `opening_amount` decimal(10,2) NOT NULL DEFAULT 0,
+  `denominations` json DEFAULT NULL,
+  `started_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_cashier_openings_started_at` (`started_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Connection transfers now move a connection to an EXTERNAL AGENCY (no new
+-- customer is created). new_customer_id becomes nullable (the FK still holds
+-- because it ignores NULLs) and the destination agency is recorded separately,
+-- mapping the existing customer + transfer to the agency they were moved to.
+ALTER TABLE `customer_connection_transfers`
+  MODIFY COLUMN `new_customer_id` int NULL;
+
+CREATE TABLE IF NOT EXISTS `customer_transfer_agencies` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `transfer_id` int NOT NULL,
+  `existing_customer_id` int NOT NULL,
+  `agency_name` varchar(255) NOT NULL,
+  `agency_phone` varchar(30) DEFAULT NULL,
+  `agency_address` text,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_cta_transfer` (`transfer_id`),
+  KEY `idx_cta_existing_customer` (`existing_customer_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

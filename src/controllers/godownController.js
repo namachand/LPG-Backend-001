@@ -274,68 +274,21 @@ export const getGodownDashboardData = async (req, res) => {
         AND DATE(st.created_at) BETWEEN ? AND ?
     `, [startDate, endDate]);
 
-    // Available Physical/System are derived from live data (no stock mutation):
-    //   Physical = stock.quantity (in godown) + cylinders in hand with drivers
-    //   System   = Physical + cylinders sold whose OTP is still PENDING
-    // driverInHandByProduct = undelivered cylinders currently with drivers.
-    const [inHandRows] = await db.execute(`
+    // Stock in (approved full cylinders received into the godown) per product,
+    // used to derive System = opening stock (IOC baseline) + stock in.
+    const [stockInRows] = await db.execute(`
       SELECT
-        asi.product_id,
-        COALESCE(SUM(GREATEST(
-          COALESCE(asi.quantity, 0)
-          - COALESCE(delivered_data.delivered_qty, 0)
-          - COALESCE(return_data.return_qty, 0)
-          - COALESCE(return_data.defective_qty, 0), 0
-        )), 0) AS in_hand
-      FROM sales_items asi
-      INNER JOIN sales a ON a.id = asi.sale_id
-      LEFT JOIN (
-        SELECT child.allocation_sales_item_id,
-               SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
-        FROM sales_items child
-        INNER JOIN sales cs ON cs.id = child.sale_id
-        WHERE child.allocation_sales_item_id IS NOT NULL
-          AND cs.status = 'DELIVERED'
-        GROUP BY child.allocation_sales_item_id
-      ) delivered_data ON delivered_data.allocation_sales_item_id = asi.id
-      LEFT JOIN (
-        SELECT st.allocation_sales_item_id,
-               SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS return_qty,
-               SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS defective_qty
-        FROM stock_transactions st
-        WHERE st.stock_from = 'driver'
-          AND st.type = 'PURCHASE_RETURN'
-          AND st.isApproved IN (0, 1)
-          AND st.allocation_sales_item_id IS NOT NULL
-        GROUP BY st.allocation_sales_item_id
-      ) return_data ON return_data.allocation_sales_item_id = asi.id
-      WHERE a.status = 'ASSIGNED'
-        AND asi.allocation_sales_item_id IS NULL
-      GROUP BY asi.product_id
+        st.product_id,
+        COALESCE(SUM(st.quantity), 0) AS stock_in
+      FROM stock_transactions st
+      WHERE st.type IN ('PURCHASE', 'NEW_VALUE', 'ADJUSTMENT_ADD')
+        AND COALESCE(st.isApproved, 0) = 1
+        AND COALESCE(st.is_defective, 0) = 0
+      GROUP BY st.product_id
     `);
-    const driverInHandByProduct = {};
-    inHandRows.forEach((r) => {
-      driverInHandByProduct[Number(r.product_id)] = Number(r.in_hand || 0);
-    });
-
-    // pendingOtpByProduct = cylinders sold but whose OTP is still PENDING.
-    const [pendingOtpRows] = await db.execute(`
-      SELECT
-        si.product_id,
-        COALESCE(SUM(COALESCE(si.delivered_qty, si.quantity, 0)), 0) AS pending_otp
-      FROM sales_items si
-      INNER JOIN sales s ON s.id = si.sale_id
-      WHERE si.allocation_sales_item_id IS NOT NULL
-        AND s.status = 'DELIVERED'
-        AND EXISTS (
-          SELECT 1 FROM driver_sale_otps dso
-          WHERE dso.sale_id = s.id AND dso.status = 'PENDING'
-        )
-      GROUP BY si.product_id
-    `);
-    const pendingOtpByProduct = {};
-    pendingOtpRows.forEach((r) => {
-      pendingOtpByProduct[Number(r.product_id)] = Number(r.pending_otp || 0);
+    const stockInByProduct = {};
+    stockInRows.forEach((r) => {
+      stockInByProduct[Number(r.product_id)] = Number(r.stock_in || 0);
     });
 
     const [returnedTodayRows] = await db.execute(`
@@ -413,20 +366,21 @@ export const getGodownDashboardData = async (req, res) => {
       const group = normalizeType(row);
       const key = group === "COMMERCIAL" ? "commercial" : "domestic";
 
-      // physical = total unsold = godown on-hand (stock.quantity) + driver in-hand
-      // system   = physical + cylinders sold whose OTP is still pending
+      // physical = actual on-hand stock (stock.quantity)
+      // system   = opening stock (IOC baseline in stock.system_quantity)
+      //            + stock in (approved cylinders received into the godown)
       const physicalQty = Number(row.physical_quantity || 0);
-      const inHand = driverInHandByProduct[Number(row.product_id)] ?? 0;
-      const pendingOtp = pendingOtpByProduct[Number(row.product_id)] ?? 0;
+      const systemQty = Number(row.system_quantity || 0);
+      const stockInQty = stockInByProduct[Number(row.product_id)] ?? 0;
+      const systemTotal = Math.max(systemQty + stockInQty, 0);
       const emptyQty = Number(row.empty_quantity || 0);
       const defectiveQty = Number(row.defective_quantity || 0);
 
-      const availablePhysical = Math.max(physicalQty, 0) + inHand;
-      const availableSystem = availablePhysical + pendingOtp;
+      const availablePhysical = Math.max(physicalQty, 0);
       const defectivePhysical = Math.max(defectiveQty, 0);
       const emptyPhysical = Math.max(emptyQty, 0);
 
-      initial.available[key].system += availableSystem;
+      initial.available[key].system += systemTotal;
       initial.available[key].defective += defectivePhysical;
       initial.available[key].total += availablePhysical;
 
@@ -437,8 +391,8 @@ export const getGodownDashboardData = async (req, res) => {
         product_id: row.product_id,
         item: row.product_name,
         physical: availablePhysical,
-        system: availableSystem,
-        diff: availablePhysical - availableSystem,
+        system: systemTotal,
+        diff: availablePhysical - systemTotal,
       });
     });
 
@@ -2574,13 +2528,14 @@ export const getTransferEmptyReturns = async (req, res) => {
         p.type AS product_type,
         c.name AS category_name,
         eu.name AS from_customer_name,
-        nu.name AS to_customer_name
+        COALESCE(cta.agency_name, nu.name) AS to_customer_name
       FROM stock_transactions st
       JOIN customer_connection_transfers t ON t.id = st.reference_id
       JOIN products p ON p.id = st.product_id
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN users eu ON eu.id = t.existing_customer_id
       LEFT JOIN users nu ON nu.id = t.new_customer_id
+      LEFT JOIN customer_transfer_agencies cta ON cta.transfer_id = t.id
       WHERE st.type = 'EMPTY_RETURN'
         AND st.driver_id IS NULL
         AND st.stock_from = 'default'

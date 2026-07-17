@@ -12,6 +12,331 @@ const getLatestClosingBalance = async (connection) => {
   return rows.length ? Number(rows[0].total_cash || 0) : null;
 };
 
+// created_at of the most recent day-close. Null if the day was never closed.
+const getLastClosingAt = async (connection) => {
+  const [rows] = await connection.query(
+    `SELECT created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`
+  );
+  return rows.length ? rows[0].created_at : null;
+};
+
+// Persists each "Start Day" so the running-day window can be anchored at the
+// moment the cashier opened the day (not just the previous close).
+const ensureCashierOpeningsTable = async (connection) => {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS cashier_openings (
+      id INT NOT NULL AUTO_INCREMENT,
+      opening_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+      denominations JSON NULL,
+      started_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_cashier_openings_started_at (started_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+};
+
+// started_at of the most recent Start Day. Null if a day was never started.
+const getLastOpeningAt = async (connection) => {
+  await ensureCashierOpeningsTable(connection);
+  const [rows] = await connection.query(
+    `SELECT started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`
+  );
+  return rows.length ? rows[0].started_at : null;
+};
+
+// Anchor for the current running day = the latest of (last close, last start).
+// The window counts only activity AFTER this point, so:
+//   • right after a Close Day → anchor is the close → cash in/out start at 0;
+//   • after a Start Day       → anchor is the start → cash in/out start at 0
+//     again and only accumulate from the freshly opened day.
+// Null only when the cashier has never closed nor started a day (=> falls back
+// to "today" in makeSinceCloseDateCond).
+const getCurrentDayAnchor = async (connection) => {
+  const closeAt = await getLastClosingAt(connection);
+  const openAt = await getLastOpeningAt(connection);
+  if (!closeAt && !openAt) return null;
+  if (!closeAt) return openAt;
+  if (!openAt) return closeAt;
+  return new Date(openAt).getTime() >= new Date(closeAt).getTime() ? openAt : closeAt;
+};
+
+// settlement_history.settled_at is stamped when the cashier verifies a driver's
+// collection, so cash-in can be dated by when it actually reached the drawer.
+const ensureSettlementSettledAtColumn = async (connection) => {
+  const [cols] = await connection.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'settlement_history' AND COLUMN_NAME = 'settled_at'`
+  );
+  if (!cols.length) {
+    await connection.query(
+      `ALTER TABLE settlement_history ADD COLUMN settled_at DATETIME NULL AFTER status`
+    );
+  }
+};
+
+// Driver/purchase expense requests carry the payment mode chosen by the cashier
+// at approval time (CASH / UPI / CARD / BANK_TRANSFER). The cash ledger only
+// counts CASH approvals as cash outflow, so the column must exist for non-cash
+// expenses to be excluded correctly.
+const ensureExpensePaymentColumns = async (connection) => {
+  const requiredColumns = {
+    payment_mode: "ALTER TABLE expenses ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER status",
+    payment_reference: "ALTER TABLE expenses ADD COLUMN payment_reference varchar(120) DEFAULT NULL AFTER payment_mode",
+  };
+
+  const [rows] = await connection.query(
+    `
+    SELECT COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'expenses'
+      AND COLUMN_NAME IN ('payment_mode', 'payment_reference')
+    `
+  );
+
+  const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
+  for (const [columnName, ddl] of Object.entries(requiredColumns)) {
+    if (existing.has(columnName)) {
+      continue;
+    }
+
+    try {
+      await connection.query(ddl);
+    } catch (error) {
+      // Ignore duplicate column race conditions from parallel requests.
+      if (error?.code !== 'ER_DUP_FIELDNAME') {
+        throw error;
+      }
+    }
+  }
+};
+
+// Office expense entries carry the payment mode the cashier used to pay the
+// operational expense (CASH / UPI / CARD / BANK_TRANSFER) plus a reference id.
+// The cash ledger only counts CASH office expenses as cash outflow.
+const ensureOfficeExpensePaymentColumns = async (connection) => {
+  const requiredColumns = {
+    payment_mode: "ALTER TABLE office_expenses ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER description",
+    payment_reference: "ALTER TABLE office_expenses ADD COLUMN payment_reference varchar(120) DEFAULT NULL AFTER payment_mode",
+  };
+
+  const [rows] = await connection.query(
+    `
+    SELECT COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'office_expenses'
+      AND COLUMN_NAME IN ('payment_mode', 'payment_reference')
+    `
+  );
+
+  const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
+  for (const [columnName, ddl] of Object.entries(requiredColumns)) {
+    if (existing.has(columnName)) {
+      continue;
+    }
+
+    try {
+      await connection.query(ddl);
+    } catch (error) {
+      // Ignore duplicate column race conditions from parallel requests.
+      if (error?.code !== 'ER_DUP_FIELDNAME') {
+        throw error;
+      }
+    }
+  }
+};
+
+// Dashboard window: honor an optional [startDate,endDate]; no range => today.
+const makeRangeDateCond = (startDate, endDate) => (dateExpr) => {
+  if (startDate && endDate) {
+    return { sql: `AND DATE(${dateExpr}) BETWEEN ? AND ?`, params: [startDate, endDate] };
+  }
+  return { sql: `AND DATE(${dateExpr}) = CURDATE()`, params: [] };
+};
+
+// Running-day window: everything AFTER the given anchor (see getCurrentDayAnchor
+// = latest of last close / last start). Right after a Close Day or a Start Day
+// this returns nothing, so the running totals restart from 0 and only accumulate
+// as new activity happens on the freshly opened day.
+const makeSinceCloseDateCond = (anchorAt) => (dateExpr) => {
+  if (anchorAt) {
+    return { sql: `AND ${dateExpr} > ?`, params: [anchorAt] };
+  }
+  return { sql: `AND DATE(${dateExpr}) = CURDATE()`, params: [] };
+};
+
+// Single source of truth for cashier cash accounting. `makeDateCond(dateExpr)`
+// returns the date predicate + params for a source's own timestamp column.
+//
+// CASH IN (cash) = driver-collection cash (settled) + office cash sales
+//                  + approved cashier-request cash (PR penalty, name change,
+//                  new connection) — TRANSFER VOUCHERS ARE NOT CASH IN.
+// ONLINE (upi)   = the UPI equivalents of the same sources.
+// BANK           = card / bank-transfer equivalents.
+// CASH OUT (cash)= approved driver/purchase expenses (cash) + approved office
+//                  expenses (cash) + approved transfer-voucher payouts (cash).
+//                  A transfer voucher is a CASH OUT (deposit refunded to the
+//                  customer), so it lowers the drawer when paid in cash.
+const getCashLedger = async (connection, makeDateCond) => {
+  await ensureNewConnectionCashierTables(connection);
+  await ensureTransferVoucherPaymentColumns(connection);
+  await ensureSettlementSettledAtColumn(connection);
+  await ensureExpensePaymentColumns(connection);
+  await ensureOfficeExpensePaymentColumns(connection);
+
+  const num = (v) => Number(v || 0);
+
+  const [expModeCol] = await connection.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'expenses' AND COLUMN_NAME = 'payment_mode'`
+  );
+  const expenseCashOnly = expModeCol.length
+    ? "SUM(CASE WHEN e.payment_mode = 'CASH' OR e.payment_mode IS NULL THEN e.amount ELSE 0 END)"
+    : "SUM(e.amount)";
+
+  const [oeStatusCol] = await connection.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'status'`
+  );
+
+  const [oeModeCol] = await connection.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'payment_mode'`
+  );
+  // Legacy office expenses (no payment_mode) are treated as CASH.
+  const officeCashOnly = oeModeCol.length
+    ? "SUM(CASE WHEN oe.payment_mode = 'CASH' OR oe.payment_mode IS NULL THEN oe.amount ELSE 0 END)"
+    : "SUM(oe.amount)";
+
+  // ---- CASH IN ----
+  const drvC = makeDateCond('COALESCE(sh.settled_at, sh.created_at)');
+  const [drv] = await connection.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN sh.method = 'CASH' THEN sh.amount ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN sh.method = 'UPI'  THEN sh.amount ELSE 0 END), 0) AS upi,
+       COUNT(*) AS cnt
+     FROM settlement_history sh
+     WHERE sh.status = 'SETTLED' ${drvC.sql}`,
+    drvC.params
+  );
+
+  const offC = makeDateCond('p.created_at');
+  const [off] = await connection.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN p.method = 'UPI'  THEN p.amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN p.method = 'CARD' THEN p.amount ELSE 0 END), 0) AS bank,
+       COUNT(*) AS cnt
+     FROM payments p
+     INNER JOIN sales s ON s.id = p.sale_id
+     WHERE p.status = 'SUCCESS' AND s.sales_from = 'CASHIER' ${offC.sql}`,
+    offC.params
+  );
+
+  const prC = makeDateCond('pr.paid_at');
+  const [pr] = await connection.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN pr.payment_mode = 'CASH' THEN pr.penalty_amount ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN pr.payment_mode = 'UPI'  THEN pr.penalty_amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN pr.payment_mode IN ('CARD','BANK_TRANSFER') THEN pr.penalty_amount ELSE 0 END), 0) AS bank,
+       COUNT(*) AS cnt
+     FROM customer_pr_penalties pr
+     WHERE pr.payment_status = 'PAID' ${prC.sql}`,
+    prC.params
+  );
+
+  const ncC = makeDateCond('nc.approved_at');
+  const [nc] = await connection.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN nc.payment_mode = 'CASH' THEN nc.service_fee ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN nc.payment_mode = 'UPI'  THEN nc.service_fee ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN nc.payment_mode IN ('CARD','BANK_TRANSFER') THEN nc.service_fee ELSE 0 END), 0) AS bank,
+       COUNT(*) AS cnt
+     FROM customer_name_change_requests nc
+     WHERE nc.status = 'APPROVED' ${ncC.sql}`,
+    ncC.params
+  );
+
+  const cnC = makeDateCond('cnc.paid_at');
+  const [cn] = await connection.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN cnc.payment_mode = 'CASH' THEN cnc.total_amount ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN cnc.payment_mode = 'UPI'  THEN cnc.total_amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN cnc.payment_mode IN ('CARD','BANK_TRANSFER') THEN cnc.total_amount ELSE 0 END), 0) AS bank,
+       COUNT(*) AS cnt
+     FROM customer_new_connections cnc
+     WHERE cnc.payment_status = 'PAID' ${cnC.sql}`,
+    cnC.params
+  );
+
+  const cashIn = {
+    cash: num(drv[0].cash) + num(off[0].cash) + num(pr[0].cash) + num(nc[0].cash) + num(cn[0].cash),
+    online: num(drv[0].upi) + num(off[0].upi) + num(pr[0].upi) + num(nc[0].upi) + num(cn[0].upi),
+    bank: num(off[0].bank) + num(pr[0].bank) + num(nc[0].bank) + num(cn[0].bank),
+    count: num(drv[0].cnt) + num(off[0].cnt) + num(pr[0].cnt) + num(nc[0].cnt) + num(cn[0].cnt),
+  };
+  cashIn.total = cashIn.cash + cashIn.online + cashIn.bank;
+
+  // ---- CASH OUT (approved only) ----
+  const expC = makeDateCond('e.created_at');
+  const [exp] = await connection.query(
+    `SELECT COALESCE(SUM(e.amount), 0) AS total,
+            COALESCE(${expenseCashOnly}, 0) AS cash,
+            COUNT(*) AS cnt
+     FROM expenses e
+     WHERE e.status = 'APPROVED' ${expC.sql}`,
+    expC.params
+  );
+
+  let office = { total: 0, cash: 0, cnt: 0 };
+  if (oeStatusCol.length) {
+    const oeC = makeDateCond('oe.updated_at');
+    const [oe] = await connection.query(
+      `SELECT COALESCE(SUM(oe.amount), 0) AS total,
+              COALESCE(${officeCashOnly}, 0) AS cash,
+              COUNT(*) AS cnt
+       FROM office_expenses oe
+       WHERE oe.status = 'APPROVED' ${oeC.sql}`,
+      oeC.params
+    );
+    office = oe[0];
+  }
+
+  // Transfer vouchers: an APPROVED voucher refunds the deposit to the customer,
+  // so a CASH-mode approval is a cash outflow. Dated by updated_at (stamped at
+  // approval). payment_mode column is guaranteed by ensureTransferVoucherPaymentColumns.
+  const tvC = makeDateCond('t.updated_at');
+  const [tv] = await connection.query(
+    `SELECT COALESCE(SUM(t.deposit_liability), 0) AS total,
+            COALESCE(SUM(CASE WHEN t.payment_mode = 'CASH' THEN t.deposit_liability ELSE 0 END), 0) AS cash,
+            COUNT(*) AS cnt
+     FROM customer_connection_transfers t
+     WHERE t.status = 'APPROVED' ${tvC.sql}`,
+    tvC.params
+  );
+
+  const cashOut = {
+    cash: num(exp[0].cash) + num(office.cash) + num(tv[0].cash),
+    total: num(exp[0].total) + num(office.total) + num(tv[0].total),
+    count: num(exp[0].cnt) + num(office.cnt) + num(tv[0].cnt),
+  };
+
+  return { cashIn, cashOut };
+};
+
+// Cash physically available in the drawer right now =
+//   opening balance (last closing) + approved cash in − approved cash out,
+// all since the last Close Day. This is the same figure the Live Position /
+// dashboard shows as "Current Balance", and it is the ceiling for any new cash
+// payout: you can never pay out more cash than you are holding.
+const getAvailableCashBalance = async (connection) => {
+  const openingBalance = Number((await getLatestClosingBalance(connection)) ?? 0);
+  const anchorAt = await getCurrentDayAnchor(connection);
+  const ledger = await getCashLedger(connection, makeSinceCloseDateCond(anchorAt));
+  return openingBalance + Number(ledger.cashIn.cash || 0) - Number(ledger.cashOut.cash || 0);
+};
+
 const purchaseExpenseTripJoin = `
   LEFT JOIN purchase_trips pt ON pt.id = (
     SELECT pt2.id
@@ -191,20 +516,6 @@ export const getCashierDashboard = async (req, res) => {
     const pendingExpenseDateClause = hasRange ? 'AND DATE(e.created_at) BETWEEN ? AND ?' : '';
     const settlementDateClause = hasRange ? 'AND DATE(sh.created_at) BETWEEN ? AND ?' : '';
 
-    const [receiptRows] = await connection.query(
-      `
-      SELECT
-        SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END) AS cash,
-        SUM(CASE WHEN p.method = 'UPI' THEN p.amount ELSE 0 END) AS upi,
-        SUM(CASE WHEN p.method = 'CARD' THEN p.amount ELSE 0 END) AS card
-      FROM payments p
-      INNER JOIN sales s ON s.id = p.sale_id
-      WHERE p.status = 'SUCCESS'
-      ${receiptDateClause}
-      `,
-      rangeParams
-    );
-
     const [expenseRows] = await connection.query(
       `
       SELECT
@@ -264,11 +575,23 @@ export const getCashierDashboard = async (req, res) => {
       rangeParams
     );
 
-    const receiptSummary = receiptRows[0] || { cash: 0, upi: 0, card: 0 };
     const expenseSummary = expenseRows[0] || { totalExpenses: 0, pendingApproval: 0 };
-    const totalCashIn = Number(receiptSummary.cash || 0) + Number(receiptSummary.upi || 0) + Number(receiptSummary.card || 0);
-    const totalCashOut = Number(expenseSummary.totalExpenses || 0);
-    const currentBalance = totalCashIn - totalCashOut;
+
+    // Unified cash accounting. An explicit date range is for historical viewing;
+    // with no range we show the CURRENT RUNNING DAY (since the last Close/Start),
+    // so cash in/out reset to 0 on Start Day and only the opening balance carries.
+    // Total Cash In = CASH only; Cash Out = APPROVED cash only;
+    // Current Balance = opening + cash in − cash out.
+    const ledgerCond = hasRange
+      ? makeRangeDateCond(startDate, endDate)
+      : makeSinceCloseDateCond(await getCurrentDayAnchor(connection));
+    const ledger = await getCashLedger(connection, ledgerCond);
+    const openingBalance = Number(lastClosing ?? 0);
+    const totalCashIn = ledger.cashIn.cash;
+    const totalCashOut = ledger.cashOut.cash;
+    const currentBalance = openingBalance + totalCashIn - totalCashOut;
+    const onlineIn = ledger.cashIn.online;
+    const bankIn = ledger.cashIn.bank;
 
     return res.status(200).json({
       success: true,
@@ -348,9 +671,8 @@ export const getCashierDashboard = async (req, res) => {
         time: expense.date,
       })),
       receipts: [
-        { type: 'UPI Payments', count: 0, amount: `₹${Number(receiptSummary.upi || 0).toLocaleString('en-IN')}`, icon: '📱' },
-        { type: 'Bank Transfer', count: 0, amount: `₹${Number(receiptSummary.card || 0).toLocaleString('en-IN')}`, icon: '🏦' },
-        { type: 'Card Payments', count: 0, amount: `₹${Number(receiptSummary.card || 0).toLocaleString('en-IN')}`, icon: '💳' },
+        { type: 'UPI / Online', count: 0, amount: `₹${Number(onlineIn || 0).toLocaleString('en-IN')}`, icon: '📱' },
+        { type: 'Bank / Card', count: 0, amount: `₹${Number(bankIn || 0).toLocaleString('en-IN')}`, icon: '🏦' },
       ],
     });
   } catch (error) {
@@ -807,13 +1129,14 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
         DATE_FORMAT(t.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
         old_u.name AS old_customer_name,
         CONCAT('LPG-', LPAD(t.existing_customer_id, 5, '0')) AS consumer_number,
-        new_u.name AS new_customer_name,
-        COALESCE(new_u.phone, '') AS new_customer_phone,
-        COALESCE(a.address, '') AS new_customer_address
+        COALESCE(cta.agency_name, new_u.name) AS new_customer_name,
+        COALESCE(cta.agency_phone, new_u.phone, '') AS new_customer_phone,
+        COALESCE(cta.agency_address, a.address, '') AS new_customer_address
       FROM customer_connection_transfers t
       INNER JOIN users old_u ON old_u.id = t.existing_customer_id
-      INNER JOIN users new_u ON new_u.id = t.new_customer_id
+      LEFT JOIN users new_u ON new_u.id = t.new_customer_id
       LEFT JOIN addresses a ON a.user_id = t.new_customer_id AND a.is_default = 1
+      LEFT JOIN customer_transfer_agencies cta ON cta.transfer_id = t.id
       ${whereClause}
       ORDER BY t.created_at DESC, t.id DESC
       LIMIT 100
@@ -886,6 +1209,33 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
         success: false,
         message: "Payment ID is required for non-cash modes",
       });
+    }
+
+    // A transfer voucher is a CASH OUT (deposit refund). A cash payout can never
+    // exceed the cash currently in the drawer.
+    if (paymentMode === "CASH") {
+      const [transferRows] = await connection.query(
+        "SELECT deposit_liability FROM customer_connection_transfers WHERE id = ? AND status = 'PENDING_MANAGER' LIMIT 1",
+        [requestId]
+      );
+
+      if (!transferRows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "Pending request not found",
+        });
+      }
+
+      const transferAmount = Number(transferRows[0].deposit_liability || 0);
+      const availableCash = await getAvailableCashBalance(connection);
+      if (transferAmount > availableCash) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient cash balance. Available ₹${availableCash.toLocaleString("en-IN")}, transfer voucher ₹${transferAmount.toLocaleString("en-IN")}. Pay via UPI/Card/Bank Transfer or reduce the amount.`,
+          availableCash,
+          requestedAmount: transferAmount,
+        });
+      }
     }
 
     const [result] = await connection.query(
@@ -1272,6 +1622,10 @@ export const verifyDriverCollections = async (req, res) => {
       });
     }
 
+    // Stamp when cash actually reaches the drawer (used to date cash-in). ALTER
+    // outside the transaction so it doesn't trigger an implicit commit mid-txn.
+    await ensureSettlementSettledAtColumn(connection);
+
     await connection.beginTransaction();
 
     const [rows] = await connection.query(
@@ -1302,7 +1656,8 @@ export const verifyDriverCollections = async (req, res) => {
     const [updateResult] = await connection.execute(
       `
       UPDATE settlement_history
-      SET status = 'SETTLED'
+      SET status = 'SETTLED',
+          settled_at = NOW()
       WHERE driver_id = ?
         AND status = 'PENDING'
       `,
@@ -1378,21 +1733,21 @@ export const getClosingSummary = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const [rows] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(p.amount), 0) AS cashTotal
-      FROM payments p
-      INNER JOIN sales s ON s.id = p.sale_id
-      WHERE p.method = 'CASH'
-        AND p.status = 'SUCCESS'
-        AND DATE(p.created_at) = CURDATE()
-      `
-    );
+    // System Calculated = net CASH in the drawer for the current running day
+    // = approved CASH in − approved CASH out.
+    //   CASH in  = driver-collection cash + office cash sales + approved
+    //              cashier-request cash (excl. transfer voucher).
+    //   CASH out = approved driver/purchase expense cash + approved office
+    //              expenses.
+    // Resets to 0 right after a Close Day or a Start Day (the running-day window
+    // is empty) and accumulates as new billing/expenses happen.
+    const anchorAt = await getCurrentDayAnchor(connection);
+    const ledger = await getCashLedger(connection, makeSinceCloseDateCond(anchorAt));
+    const cashTotal = Number(ledger.cashIn.cash || 0) - Number(ledger.cashOut.cash || 0);
 
     return res.status(200).json({
       success: true,
-      cashTotal: Number(rows[0]?.cashTotal || 0),
+      cashTotal,
     });
   } catch (error) {
     console.error('getClosingSummary error:', error);
@@ -1428,10 +1783,19 @@ export const startCashierDay = async (req, res) => {
       });
     }
 
+    // Persist the Start Day so the running-day window anchors here: cash in/out
+    // reset to 0 and only the opening balance carries into the new day.
+    await ensureCashierOpeningsTable(connection);
+    const [result] = await connection.execute(
+      `INSERT INTO cashier_openings (opening_amount, denominations) VALUES (?, ?)`,
+      [Number(totalAmount) || 0, JSON.stringify(denominations)]
+    );
+
     cashierDayLog.opening = {
       startedAt: new Date().toLocaleString('en-IN', { hour12: true }),
       totalAmount,
       denominations,
+      openingId: result.insertId,
     };
 
     return res.status(200).json({
@@ -1841,7 +2205,16 @@ export const recordOfficeExpense = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const { category, amount, description, bill_url: billUrl } = req.body;
+    const {
+      category,
+      amount,
+      description,
+      bill_url: billUrl,
+      payment_mode: rawPaymentMode,
+      payment_method: rawPaymentMethod,
+      transaction_id: rawTransactionId,
+      payment_reference: rawPaymentReference,
+    } = req.body;
     const adminId = 6;
 
     if (!adminId) {
@@ -1855,6 +2228,30 @@ export const recordOfficeExpense = async (req, res) => {
     const numericAmount = Number(amount);
     if (Number.isNaN(numericAmount) || numericAmount < 0) {
       return res.status(400).json({ success: false, message: 'amount must be a non-negative number' });
+    }
+
+    const validPaymentModes = ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER'];
+    const paymentMode = String(rawPaymentMode || rawPaymentMethod || 'CASH').trim().toUpperCase();
+    if (!validPaymentModes.includes(paymentMode)) {
+      return res.status(400).json({ success: false, message: 'Invalid payment mode' });
+    }
+
+    const paymentReference = String(rawTransactionId || rawPaymentReference || '').trim();
+    if (paymentMode !== 'CASH' && !paymentReference) {
+      return res.status(400).json({ success: false, message: 'Transaction ID is required for non-cash payments' });
+    }
+
+    // A cash payout can never exceed the cash currently in the drawer.
+    if (paymentMode === 'CASH') {
+      const availableCash = await getAvailableCashBalance(connection);
+      if (numericAmount > availableCash) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient cash balance. Available ₹${availableCash.toLocaleString('en-IN')}, expense ₹${numericAmount.toLocaleString('en-IN')}. Pay via UPI/Card/Bank Transfer or reduce the amount.`,
+          availableCash,
+          requestedAmount: numericAmount,
+        });
+      }
     }
 
     // Ensure a receipt column exists so the uploaded bill can be persisted.
@@ -1871,10 +2268,14 @@ export const recordOfficeExpense = async (req, res) => {
       }
     }
 
-    const extraCols = hasBillUrl ? ', bill_url' : '';
-    const extraPlaceholder = hasBillUrl ? ', ?' : '';
+    // Ensure the payment columns exist so mode + reference can be persisted.
+    await ensureOfficeExpensePaymentColumns(connection);
+
+    const extraCols = `${hasBillUrl ? ', bill_url' : ''}, payment_mode, payment_reference`;
+    const extraPlaceholder = `${hasBillUrl ? ', ?' : ''}, ?, ?`;
     const baseParams = [adminId, category, numericAmount, description || null];
     const billParams = hasBillUrl ? [billUrl || null] : [];
+    const paymentParams = [paymentMode, paymentReference || null];
 
     let result;
 
@@ -1884,7 +2285,7 @@ export const recordOfficeExpense = async (req, res) => {
         INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, status, created_at, updated_at)
         VALUES (?, ?, ?, ?${extraPlaceholder}, 'PENDING', NOW(), NOW())
         `,
-        [...baseParams, ...billParams]
+        [...baseParams, ...billParams, ...paymentParams]
       );
     } catch (queryError) {
       if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
@@ -1896,7 +2297,7 @@ export const recordOfficeExpense = async (req, res) => {
         INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, created_at, updated_at)
         VALUES (?, ?, ?, ?${extraPlaceholder}, NOW(), NOW())
         `,
-        [...baseParams, ...billParams]
+        [...baseParams, ...billParams, ...paymentParams]
       );
     }
 
@@ -1923,6 +2324,8 @@ export const getTodayOfficeExpenses = async (req, res) => {
           o.category,
           o.description,
           o.amount,
+          o.payment_mode,
+          o.payment_reference,
           DATE_FORMAT(o.created_at, '%Y-%m-%d') AS date,
           COALESCE(u.name, 'Unknown') AS createdBy,
           COALESCE(o.status, 'PENDING') AS status
@@ -1956,7 +2359,7 @@ export const getTodayOfficeExpenses = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: rows.map((r) => ({ id: `OE-${String(r.id).padStart(3, '0')}`, category: r.category, description: r.description, amount: Number(r.amount || 0), date: r.date, by: r.createdBy, status: r.status || 'PENDING' })),
+      data: rows.map((r) => ({ id: `OE-${String(r.id).padStart(3, '0')}`, category: r.category, description: r.description, amount: Number(r.amount || 0), paymentMode: r.payment_mode || null, paymentReference: r.payment_reference || null, date: r.date, by: r.createdBy, status: r.status || 'PENDING' })),
     });
   } catch (error) {
     console.error('getTodayOfficeExpenses error:', error);
@@ -2084,9 +2487,11 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
       });
     }
 
+    await ensureExpensePaymentColumns(connection);
+
     const [rows] = await connection.query(
       `
-      SELECT e.id, e.status, e.description
+      SELECT e.id, e.status, e.description, e.amount
       FROM expenses e
       INNER JOIN users u ON u.id = e.created_by
       WHERE e.id = ?
@@ -2108,6 +2513,20 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
         success: false,
         message: 'Only pending expense requests can be reviewed',
       });
+    }
+
+    // A cash payout can never exceed the cash currently in the drawer.
+    if (status === 'APPROVED' && paymentMode === 'CASH') {
+      const expenseAmount = Number(rows[0].amount || 0);
+      const availableCash = await getAvailableCashBalance(connection);
+      if (expenseAmount > availableCash) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient cash balance. Available ₹${availableCash.toLocaleString('en-IN')}, expense ₹${expenseAmount.toLocaleString('en-IN')}. Pay via UPI/Card/Bank Transfer or reduce the amount.`,
+          availableCash,
+          requestedAmount: expenseAmount,
+        });
+      }
     }
 
     let savedViaColumns = false;
@@ -2249,182 +2668,24 @@ export const getTodaysCashFlow = async (req, res) => {
     const lastClosing = await getLatestClosingBalance(connection);
     const openingBalance = lastClosing ?? 0;
 
-    // Ensure the payment-mode columns exist on the cashier-request tables we read
-    // below (idempotent — safe to call on every request).
-    await ensureNewConnectionCashierTables(connection);
-    await ensureTransferVoucherPaymentColumns(connection);
+    // Everything for the current running day (resets to 0 at Close Day and at
+    // Start Day, per spec), anchored at the latest of last close / last start.
+    const anchorAt = await getCurrentDayAnchor(connection);
+    const ledger = await getCashLedger(connection, makeSinceCloseDateCond(anchorAt));
 
-    // The expenses table's payment_mode column is only present on migrated DBs
-    // (older rows tag the mode inside the description instead). Detect it so
-    // non-cash expenses can be excluded from the CASH balance without breaking
-    // databases that never got the column.
-    const [expenseModeColumn] = await connection.query(
-      `
-      SELECT COLUMN_NAME
-      FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = 'expenses'
-        AND COLUMN_NAME = 'payment_mode'
-      `
-    );
-    const expensesCashOnlySum = expenseModeColumn.length
-      ? "SUM(CASE WHEN e.payment_mode = 'CASH' OR e.payment_mode IS NULL THEN e.amount ELSE 0 END)"
-      : "SUM(e.amount)";
+    // Inflow = CASH received for the current running day (cash only, per spec).
+    const inflowCashTotal = ledger.cashIn.cash;
+    const inflowUpiTotal = ledger.cashIn.online;
+    const inflowBankTotal = ledger.cashIn.bank;
+    const inflowTotal = inflowCashTotal;
+    const inflowCount = ledger.cashIn.count;
 
-    // ---------------- INFLOW (cash-in) ----------------
-    // Driver settlements store no payment-mode split, so the settled amount is
-    // counted as cash (preserves the previous behavior for this source).
-    const [settledInflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(s.amount), 0) AS total,
-        COALESCE(SUM(s.amount), 0) AS cash_total,
-        COUNT(DISTINCT s.id) AS count
-      FROM settlements s
-      WHERE s.status = 'SETTLED'
-        AND s.settlement_date = CURDATE()
-      `
-    );
+    // Outflow = APPROVED cash paid out since the last close.
+    const outflowCashTotal = ledger.cashOut.cash;
+    const outflowTotal = outflowCashTotal;
+    const outflowCount = ledger.cashOut.count;
 
-    const [cashierSalesInflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(p.amount), 0) AS total,
-        COALESCE(SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash_total,
-        COALESCE(SUM(CASE WHEN p.method = 'UPI' THEN p.amount ELSE 0 END), 0) AS upi_total,
-        COUNT(DISTINCT p.id) AS count
-      FROM payments p
-      INNER JOIN sales s ON s.id = p.sale_id
-      WHERE p.status = 'SUCCESS'
-        AND s.sales_from = 'CASHIER'
-        AND DATE(p.created_at) = CURDATE()
-      `
-    );
-
-    // Other payments are always non-cash (UPI / bank transfer / card): they add
-    // to inflow but never to the cash balance.
-    const [otherPaymentsInflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(op.amount), 0) AS total,
-        COALESCE(SUM(CASE WHEN UPPER(op.method) = 'CASH' THEN op.amount ELSE 0 END), 0) AS cash_total,
-        COALESCE(SUM(CASE WHEN UPPER(op.method) = 'UPI' THEN op.amount ELSE 0 END), 0) AS upi_total,
-        COUNT(DISTINCT op.id) AS count
-      FROM other_payments op
-      WHERE DATE(op.created_at) = CURDATE()
-        AND UPPER(COALESCE(op.status, 'PENDING')) <> 'REJECTED'
-      `
-    );
-
-    // PR penalty collections — cash-in cashier requests.
-    const [prPenaltyInflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(p.penalty_amount), 0) AS total,
-        COALESCE(SUM(CASE WHEN p.payment_mode = 'CASH' THEN p.penalty_amount ELSE 0 END), 0) AS cash_total,
-        COALESCE(SUM(CASE WHEN p.payment_mode = 'UPI' THEN p.penalty_amount ELSE 0 END), 0) AS upi_total,
-        COUNT(DISTINCT p.id) AS count
-      FROM customer_pr_penalties p
-      WHERE p.payment_status = 'PAID'
-        AND DATE(p.paid_at) = CURDATE()
-      `
-    );
-
-    // Name change collections — cash-in cashier requests.
-    const [nameChangeInflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(r.service_fee), 0) AS total,
-        COALESCE(SUM(CASE WHEN r.payment_mode = 'CASH' THEN r.service_fee ELSE 0 END), 0) AS cash_total,
-        COALESCE(SUM(CASE WHEN r.payment_mode = 'UPI' THEN r.service_fee ELSE 0 END), 0) AS upi_total,
-        COUNT(DISTINCT r.id) AS count
-      FROM customer_name_change_requests r
-      WHERE r.status = 'APPROVED'
-        AND DATE(r.approved_at) = CURDATE()
-      `
-    );
-
-    // New connection collections — cash-in cashier requests.
-    const [newConnectionInflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(cnc.total_amount), 0) AS total,
-        COALESCE(SUM(CASE WHEN cnc.payment_mode = 'CASH' THEN cnc.total_amount ELSE 0 END), 0) AS cash_total,
-        COALESCE(SUM(CASE WHEN cnc.payment_mode = 'UPI' THEN cnc.total_amount ELSE 0 END), 0) AS upi_total,
-        COUNT(DISTINCT cnc.id) AS count
-      FROM customer_new_connections cnc
-      WHERE cnc.payment_status = 'PAID'
-        AND DATE(cnc.paid_at) = CURDATE()
-      `
-    );
-
-    // ---------------- OUTFLOW (cash-out) ----------------
-    // Office expenses have no payment-mode column, so they are treated as cash.
-    const [officeExpensesOutflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(oe.amount), 0) AS total,
-        COALESCE(SUM(oe.amount), 0) AS cash_total,
-        COUNT(DISTINCT oe.id) AS count
-      FROM office_expenses oe
-      WHERE DATE(oe.created_at) = CURDATE()
-      `
-    );
-
-    // Approved expenses: only cash (or legacy/untagged) expenses reduce the cash
-    // balance. UPI / card / bank-transfer expenses add to outflow but not to cash.
-    const [approvedExpensesOutflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(e.amount), 0) AS total,
-        COALESCE(${expensesCashOnlySum}, 0) AS cash_total,
-        COUNT(DISTINCT e.id) AS count
-      FROM expenses e
-      WHERE e.status = 'APPROVED'
-        AND DATE(e.created_at) = CURDATE()
-      `
-    );
-
-    // Transfer voucher collections — cash-out cashier requests.
-    const [transferVoucherOutflow] = await connection.query(
-      `
-      SELECT
-        COALESCE(SUM(t.deposit_liability), 0) AS total,
-        COALESCE(SUM(CASE WHEN t.payment_mode = 'CASH' THEN t.deposit_liability ELSE 0 END), 0) AS cash_total,
-        COUNT(DISTINCT t.id) AS count
-      FROM customer_connection_transfers t
-      WHERE t.status = 'APPROVED'
-        AND DATE(t.updated_at) = CURDATE()
-      `
-    );
-
-    const inflowSources = [
-      settledInflow,
-      cashierSalesInflow,
-      otherPaymentsInflow,
-      prPenaltyInflow,
-      nameChangeInflow,
-      newConnectionInflow,
-    ];
-    const outflowSources = [officeExpensesOutflow, approvedExpensesOutflow, transferVoucherOutflow];
-
-    const sumField = (sources, field) =>
-      sources.reduce((acc, rows) => acc + Number(rows[0]?.[field] || 0), 0);
-
-    const inflowTotal = sumField(inflowSources, "total");
-    const inflowCount = sumField(inflowSources, "count");
-    const inflowCashTotal = sumField(inflowSources, "cash_total");
-    const inflowUpiTotal = sumField(inflowSources, "upi_total");
-    // Anything that is neither cash nor UPI (card / bank transfer) is "bank".
-    const inflowBankTotal = Math.max(inflowTotal - inflowCashTotal - inflowUpiTotal, 0);
-
-    const outflowTotal = sumField(outflowSources, "total");
-    const outflowCount = sumField(outflowSources, "count");
-    const outflowCashTotal = sumField(outflowSources, "cash_total");
-
-    // Current cash balance is CASH ONLY: opening cash + cash received − cash paid.
-    // Non-cash inflow/outflow (UPI, card, bank transfer) still shows in the
-    // inflow/outflow totals but does not move the cash balance.
+    // Current cash balance = opening cash + cash in − cash out.
     const currentBalance = openingBalance + inflowCashTotal - outflowCashTotal;
 
     return res.status(200).json({

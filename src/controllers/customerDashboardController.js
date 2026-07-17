@@ -123,9 +123,10 @@ export const getCustomerDashboardDetails = async (req, res) => {
         t.status,
         t.reason,
         t.created_at,
-        new_u.name AS transfer_to_name
+        COALESCE(cta.agency_name, new_u.name) AS transfer_to_name
       FROM customer_connection_transfers t
       LEFT JOIN users new_u ON new_u.id = t.new_customer_id
+      LEFT JOIN customer_transfer_agencies cta ON cta.transfer_id = t.id
       WHERE t.existing_customer_id = ?
       ORDER BY t.created_at DESC, t.id DESC
       LIMIT 10

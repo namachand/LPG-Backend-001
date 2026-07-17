@@ -143,6 +143,45 @@ const ensureRegulatorReceivedColumn = async (connection) => {
   }
 };
 
+// A connection transfer now moves the connection to an external AGENCY (we do
+// not create a new customer). The agency details are stored in a dedicated
+// table that maps the existing customer -> the agency they were transferred to.
+const ensureTransferAgencyTable = async (connection) => {
+  await connection.query(
+    `
+    CREATE TABLE IF NOT EXISTS customer_transfer_agencies (
+      id INT NOT NULL AUTO_INCREMENT,
+      transfer_id INT NOT NULL,
+      existing_customer_id INT NOT NULL,
+      agency_name VARCHAR(255) NOT NULL,
+      agency_phone VARCHAR(30) DEFAULT NULL,
+      agency_address TEXT DEFAULT NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_cta_transfer (transfer_id),
+      KEY idx_cta_existing_customer (existing_customer_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `
+  );
+
+  // No new customer is created for agency transfers, so new_customer_id must
+  // allow NULL. The existing FK stays valid because it ignores NULL values.
+  const [rows] = await connection.query(
+    `
+    SELECT IS_NULLABLE
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'customer_connection_transfers'
+      AND COLUMN_NAME = 'new_customer_id'
+    `
+  );
+  if (rows.length && String(rows[0].IS_NULLABLE).toUpperCase() === "NO") {
+    await connection.query(
+      "ALTER TABLE customer_connection_transfers MODIFY COLUMN new_customer_id INT NULL"
+    );
+  }
+};
+
 export const lookupTransferCustomer = async (req, res) => {
   const connection = await db.getConnection();
 
@@ -198,6 +237,12 @@ export const createCustomerTransfer = async (req, res) => {
   try {
     const {
       existingCustomerId,
+      // New: the connection is transferred to an external agency. `newAgency*`
+      // are the current fields; the legacy `newCustomer*` names are still
+      // accepted so older clients keep working.
+      newAgencyName,
+      newAgencyPhone,
+      newAgencyAddress,
       newCustomerName,
       newCustomerPhone,
       newCustomerAddress,
@@ -207,6 +252,10 @@ export const createCustomerTransfer = async (req, res) => {
       emptyProductId,
       emptyCylinderQty,
     } = req.body || {};
+
+    const agencyName = String(newAgencyName || newCustomerName || "").trim();
+    const agencyPhone = String(newAgencyPhone || newCustomerPhone || "").trim();
+    const agencyAddress = String(newAgencyAddress || newCustomerAddress || "").trim();
 
     const regulatorReceivedValue = Number(isRegulatorReceived) === 1 || isRegulatorReceived === true ? 1 : 0;
 
@@ -226,24 +275,10 @@ export const createCustomerTransfer = async (req, res) => {
       });
     }
 
-    if (!String(newCustomerName || "").trim()) {
+    if (!agencyName) {
       return res.status(400).json({
         success: false,
-        message: "newCustomerName is required",
-      });
-    }
-
-    if (!String(newCustomerPhone || "").trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "newCustomerPhone is required",
-      });
-    }
-
-    if (!String(newCustomerAddress || "").trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "newCustomerAddress is required",
+        message: "newAgencyName is required",
       });
     }
 
@@ -275,18 +310,6 @@ export const createCustomerTransfer = async (req, res) => {
       });
     }
 
-    const [phoneRows] = await connection.query(
-      "SELECT id FROM users WHERE phone = ? LIMIT 1",
-      [String(newCustomerPhone).trim()]
-    );
-
-    if (phoneRows.length) {
-      return res.status(409).json({
-        success: false,
-        message: "A user with this new customer phone already exists",
-      });
-    }
-
     if (parsedEmptyProductId) {
       const [emptyProductRows] = await connection.query(
         "SELECT id FROM products WHERE id = ? LIMIT 1",
@@ -304,27 +327,12 @@ export const createCustomerTransfer = async (req, res) => {
     const snapshot = await getExistingCustomerSnapshot(connection, Number(existingCustomerId));
 
     await ensureRegulatorReceivedColumn(connection);
+    await ensureTransferAgencyTable(connection);
 
     await connection.beginTransaction();
 
-    const [newUserResult] = await connection.query(
-      `
-      INSERT INTO users (name, phone, role, status)
-      VALUES (?, ?, 'CUSTOMER', 'ACTIVE')
-      `,
-      [String(newCustomerName).trim(), String(newCustomerPhone).trim()]
-    );
-
-    const newCustomerId = Number(newUserResult.insertId);
-
-    await connection.query(
-      `
-      INSERT INTO addresses (user_id, address, is_default)
-      VALUES (?, ?, 1)
-      `,
-      [newCustomerId, String(newCustomerAddress).trim()]
-    );
-
+    // No new customer is created — the connection is transferred to an external
+    // agency. new_customer_id stays NULL; the agency is recorded separately.
     const [transferResult] = await connection.query(
       `
       INSERT INTO customer_connection_transfers (
@@ -335,11 +343,10 @@ export const createCustomerTransfer = async (req, res) => {
         reason,
         is_regulator_received,
         status
-      ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING_MANAGER')
+      ) VALUES (?, NULL, ?, ?, ?, ?, 'PENDING_MANAGER')
       `,
       [
         Number(existingCustomerId),
-        newCustomerId,
         snapshot.productDetails,
         parsedDepositLiability,
         String(reason).trim(),
@@ -348,6 +355,27 @@ export const createCustomerTransfer = async (req, res) => {
     );
 
     const transferId = Number(transferResult.insertId);
+
+    // Store the agency the connection was transferred to, mapped to the
+    // existing customer and this transfer request.
+    await connection.query(
+      `
+      INSERT INTO customer_transfer_agencies (
+        transfer_id,
+        existing_customer_id,
+        agency_name,
+        agency_phone,
+        agency_address
+      ) VALUES (?, ?, ?, ?, ?)
+      `,
+      [
+        transferId,
+        Number(existingCustomerId),
+        agencyName,
+        agencyPhone || null,
+        agencyAddress || null,
+      ]
+    );
 
     // Raise a pending empty-cylinder return request to the godown manager,
     // mirroring the driver flow. No driver is involved, so driver_id is NULL and
@@ -370,10 +398,11 @@ export const createCustomerTransfer = async (req, res) => {
       success: true,
       message: "Transfer request sent to manager and cashier",
       data: {
-        id: Number(transferResult.insertId),
+        id: transferId,
         existingCustomerId: Number(existingCustomerId),
-        newCustomerId,
-        newConsumerNumber: `LPG-${String(newCustomerId).padStart(5, "0")}`,
+        agencyName,
+        agencyPhone: agencyPhone || null,
+        agencyAddress: agencyAddress || null,
         isRegulatorReceived: regulatorReceivedValue,
         status: "PENDING_MANAGER",
       },
@@ -396,7 +425,11 @@ export const getRecentCustomerTransfers = async (_req, res) => {
 
   try {
     await ensureRegulatorReceivedColumn(connection);
+    await ensureTransferAgencyTable(connection);
 
+    // new_customer_id is NULL for agency transfers, so LEFT JOIN users and fall
+    // back to the mapped agency name. Legacy rows (with a new customer) still
+    // show that customer's name.
     const [rows] = await connection.query(
       `
       SELECT
@@ -404,7 +437,10 @@ export const getRecentCustomerTransfers = async (_req, res) => {
         t.existing_customer_id,
         t.new_customer_id,
         old_user.name AS existing_customer_name,
-        new_user.name AS new_customer_name,
+        COALESCE(cta.agency_name, new_user.name) AS new_customer_name,
+        cta.agency_name AS new_agency_name,
+        cta.agency_phone AS new_agency_phone,
+        cta.agency_address AS new_agency_address,
         t.product_details_snapshot,
         t.deposit_liability,
         t.reason,
@@ -413,7 +449,8 @@ export const getRecentCustomerTransfers = async (_req, res) => {
         DATE_FORMAT(t.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
       FROM customer_connection_transfers t
       INNER JOIN users old_user ON old_user.id = t.existing_customer_id
-      INNER JOIN users new_user ON new_user.id = t.new_customer_id
+      LEFT JOIN users new_user ON new_user.id = t.new_customer_id
+      LEFT JOIN customer_transfer_agencies cta ON cta.transfer_id = t.id
       ORDER BY t.created_at DESC, t.id DESC
       LIMIT 8
       `
