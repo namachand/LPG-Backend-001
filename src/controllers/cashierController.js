@@ -60,6 +60,22 @@ const getCurrentDayAnchor = async (connection) => {
   return new Date(openAt).getTime() >= new Date(closeAt).getTime() ? openAt : closeAt;
 };
 
+// Opening balance of the CURRENT open day (the amount entered at Start Day).
+// Returns 0 when the day is closed — i.e. no Start Day has happened since the
+// last Close Day — so figures anchored on this reset to 0 right after a close
+// and pick the opening balance back up only once the next day is started.
+const getCurrentDayOpeningBalance = async (connection) => {
+  await ensureCashierOpeningsTable(connection);
+  const closeAt = await getLastClosingAt(connection);
+  const [openRows] = await connection.query(
+    `SELECT opening_amount, started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`
+  );
+  if (!openRows.length) return 0;
+  const openAt = openRows[0].started_at;
+  const dayIsOpen = !closeAt || new Date(openAt).getTime() >= new Date(closeAt).getTime();
+  return dayIsOpen ? Number(openRows[0].opening_amount || 0) : 0;
+};
+
 // settlement_history.settled_at is stamped when the cashier verifies a driver's
 // collection, so cash-in can be dated by when it actually reached the drawer.
 const ensureSettlementSettledAtColumn = async (connection) => {
@@ -172,8 +188,8 @@ const makeSinceCloseDateCond = (anchorAt) => (dateExpr) => {
 // CASH IN (cash) = driver-collection cash (settled) + office cash sales
 //                  + approved cashier-request cash (PR penalty, name change,
 //                  new connection) — TRANSFER VOUCHERS ARE NOT CASH IN.
-// ONLINE (upi)   = the UPI equivalents of the same sources.
-// BANK           = card / bank-transfer equivalents.
+// ONLINE (upi)   = UPI + CARD equivalents of the same sources.
+// BANK           = bank-transfer equivalents.
 // CASH OUT (cash)= approved driver/purchase expenses (cash) + approved office
 //                  expenses (cash) + approved transfer-voucher payouts (cash).
 //                  A transfer voucher is a CASH OUT (deposit refunded to the
@@ -225,8 +241,8 @@ const getCashLedger = async (connection, makeDateCond) => {
   const [off] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash,
-       COALESCE(SUM(CASE WHEN p.method = 'UPI'  THEN p.amount ELSE 0 END), 0) AS upi,
-       COALESCE(SUM(CASE WHEN p.method = 'CARD' THEN p.amount ELSE 0 END), 0) AS bank,
+       COALESCE(SUM(CASE WHEN p.method IN ('UPI','CARD') THEN p.amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN p.method = 'BANK_TRANSFER' THEN p.amount ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM payments p
      INNER JOIN sales s ON s.id = p.sale_id
@@ -238,8 +254,8 @@ const getCashLedger = async (connection, makeDateCond) => {
   const [pr] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN pr.payment_mode = 'CASH' THEN pr.penalty_amount ELSE 0 END), 0) AS cash,
-       COALESCE(SUM(CASE WHEN pr.payment_mode = 'UPI'  THEN pr.penalty_amount ELSE 0 END), 0) AS upi,
-       COALESCE(SUM(CASE WHEN pr.payment_mode IN ('CARD','BANK_TRANSFER') THEN pr.penalty_amount ELSE 0 END), 0) AS bank,
+       COALESCE(SUM(CASE WHEN pr.payment_mode IN ('UPI','CARD') THEN pr.penalty_amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN pr.payment_mode = 'BANK_TRANSFER' THEN pr.penalty_amount ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM customer_pr_penalties pr
      WHERE pr.payment_status = 'PAID' ${prC.sql}`,
@@ -250,8 +266,8 @@ const getCashLedger = async (connection, makeDateCond) => {
   const [nc] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN nc.payment_mode = 'CASH' THEN nc.service_fee ELSE 0 END), 0) AS cash,
-       COALESCE(SUM(CASE WHEN nc.payment_mode = 'UPI'  THEN nc.service_fee ELSE 0 END), 0) AS upi,
-       COALESCE(SUM(CASE WHEN nc.payment_mode IN ('CARD','BANK_TRANSFER') THEN nc.service_fee ELSE 0 END), 0) AS bank,
+       COALESCE(SUM(CASE WHEN nc.payment_mode IN ('UPI','CARD') THEN nc.service_fee ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN nc.payment_mode = 'BANK_TRANSFER' THEN nc.service_fee ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM customer_name_change_requests nc
      WHERE nc.status = 'APPROVED' ${ncC.sql}`,
@@ -262,8 +278,8 @@ const getCashLedger = async (connection, makeDateCond) => {
   const [cn] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN cnc.payment_mode = 'CASH' THEN cnc.total_amount ELSE 0 END), 0) AS cash,
-       COALESCE(SUM(CASE WHEN cnc.payment_mode = 'UPI'  THEN cnc.total_amount ELSE 0 END), 0) AS upi,
-       COALESCE(SUM(CASE WHEN cnc.payment_mode IN ('CARD','BANK_TRANSFER') THEN cnc.total_amount ELSE 0 END), 0) AS bank,
+       COALESCE(SUM(CASE WHEN cnc.payment_mode IN ('UPI','CARD') THEN cnc.total_amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN cnc.payment_mode = 'BANK_TRANSFER' THEN cnc.total_amount ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM customer_new_connections cnc
      WHERE cnc.payment_status = 'PAID' ${cnC.sql}`,
@@ -577,19 +593,31 @@ export const getCashierDashboard = async (req, res) => {
 
     const expenseSummary = expenseRows[0] || { totalExpenses: 0, pendingApproval: 0 };
 
-    // Unified cash accounting. An explicit date range is for historical viewing;
-    // with no range we show the CURRENT RUNNING DAY (since the last Close/Start),
-    // so cash in/out reset to 0 on Start Day and only the opening balance carries.
-    // Total Cash In = CASH only; Cash Out = APPROVED cash only;
-    // Current Balance = opening + cash in − cash out.
-    const ledgerCond = hasRange
-      ? makeRangeDateCond(startDate, endDate)
-      : makeSinceCloseDateCond(await getCurrentDayAnchor(connection));
+    // Unified cash accounting. A historical date range is for viewing past days;
+    // but the DEFAULT / today-only view shows the CURRENT RUNNING DAY (since the
+    // last Close/Start), so cash in/out reset to 0 on Start Day and only the
+    // opening balance carries. Total Cash In = CASH only; Cash Out = APPROVED
+    // cash only; Current Balance = opening + cash in − cash out.
+    let requestIsTodayOnly = false;
+    if (hasRange && startDate === endDate) {
+      const [todayCheck] = await connection.query('SELECT (? = CURDATE()) AS isToday', [startDate]);
+      requestIsTodayOnly = Number(todayCheck[0]?.isToday) === 1;
+    }
+    const useRunningDay = !hasRange || requestIsTodayOnly;
+    const ledgerCond = useRunningDay
+      ? makeSinceCloseDateCond(await getCurrentDayAnchor(connection))
+      : makeRangeDateCond(startDate, endDate);
     const ledger = await getCashLedger(connection, ledgerCond);
     const openingBalance = Number(lastClosing ?? 0);
     const totalCashIn = ledger.cashIn.cash;
     const totalCashOut = ledger.cashOut.cash;
-    const currentBalance = openingBalance + totalCashIn - totalCashOut;
+    // Current Balance reflects the FULL money position across ALL payment modes
+    // (cash + online + bank) on both sides — every cash-in mode (driver sales,
+    // office sales, PR penalty / name change / new connection) minus every
+    // cash-out mode (driver/office expenses + transfer vouchers). The Total Cash
+    // In / Out cards above stay cash-only; only this figure spans all modes.
+    const currentBalance =
+      openingBalance + Number(ledger.cashIn.total || 0) - Number(ledger.cashOut.total || 0);
     const onlineIn = ledger.cashIn.online;
     const bankIn = ledger.cashIn.bank;
 
@@ -1528,10 +1556,31 @@ export const recordOtherPayment = async (req, res) => {
   }
 };
 
+// Optional [startDate,endDate] (YYYY-MM-DD) filter on other_payments.created_at.
+// No valid range => no filter (caller/UI decides the default window).
+const buildOtherPaymentsDateFilter = (query = {}) => {
+  const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+  let startDate = DATE_ONLY.test(String(query.startDate || '')) ? String(query.startDate) : null;
+  let endDate = DATE_ONLY.test(String(query.endDate || '')) ? String(query.endDate) : null;
+  if (startDate && !endDate) endDate = startDate;
+  if (endDate && !startDate) startDate = endDate;
+  if (startDate && endDate && startDate > endDate) {
+    const tmp = startDate;
+    startDate = endDate;
+    endDate = tmp;
+  }
+  if (startDate && endDate) {
+    return { whereClause: 'WHERE DATE(created_at) BETWEEN ? AND ?', params: [startDate, endDate] };
+  }
+  return { whereClause: '', params: [] };
+};
+
 export const getOtherPayments = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const { whereClause, params } = buildOtherPaymentsDateFilter(req.query);
+
     const [rows] = await connection.query(
       `
       SELECT
@@ -1544,9 +1593,11 @@ export const getOtherPayments = async (req, res) => {
         status,
         DATE_FORMAT(created_at, '%Y-%m-%d') AS date
       FROM other_payments
+      ${whereClause}
       ORDER BY created_at DESC
       LIMIT 100
-      `
+      `,
+      params
     );
 
     return res.status(200).json({
@@ -1569,6 +1620,8 @@ export const getOtherPaymentsSummary = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const { whereClause, params } = buildOtherPaymentsDateFilter(req.query);
+
     const [rows] = await connection.query(
       `
       SELECT
@@ -1576,8 +1629,10 @@ export const getOtherPaymentsSummary = async (req, res) => {
         COUNT(*) AS count,
         COALESCE(SUM(amount), 0) AS totalAmount
       FROM other_payments
+      ${whereClause}
       GROUP BY method
-      `
+      `,
+      params
     );
 
     const summary = {
@@ -1733,17 +1788,21 @@ export const getClosingSummary = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    // System Calculated = net CASH in the drawer for the current running day
-    // = approved CASH in − approved CASH out.
-    //   CASH in  = driver-collection cash + office cash sales + approved
-    //              cashier-request cash (excl. transfer voucher).
-    //   CASH out = approved driver/purchase expense cash + approved office
-    //              expenses.
-    // Resets to 0 right after a Close Day or a Start Day (the running-day window
-    // is empty) and accumulates as new billing/expenses happen.
+    // System Calculated = opening balance + approved CASH in − approved CASH out
+    // for the current running day (same as the Live Position "Current Balance").
+    //   opening   = amount entered at Start Day (0 while the day is closed).
+    //   CASH in   = driver-collection cash + office cash sales + approved
+    //               cashier-request cash (excl. transfer voucher).
+    //   CASH out  = approved driver/purchase expense cash + approved office
+    //               expenses + approved cash transfer vouchers.
+    // Right after Close Day: opening = 0 and the running window is empty, so it
+    // is 0. Right after Start Day: cash in/out are 0, so it equals the opening
+    // balance. Then it moves as new billing/expenses happen.
     const anchorAt = await getCurrentDayAnchor(connection);
     const ledger = await getCashLedger(connection, makeSinceCloseDateCond(anchorAt));
-    const cashTotal = Number(ledger.cashIn.cash || 0) - Number(ledger.cashOut.cash || 0);
+    const openingBalance = await getCurrentDayOpeningBalance(connection);
+    const cashTotal =
+      openingBalance + Number(ledger.cashIn.cash || 0) - Number(ledger.cashOut.cash || 0);
 
     return res.status(200).json({
       success: true,
