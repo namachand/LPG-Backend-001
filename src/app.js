@@ -23,6 +23,7 @@ import customerConnectionRoutes from "./routes/customerConnectionRoutes.js";
 import customerTransferRoutes from "./routes/customerTransferRoutes.js";
 import nameChangeRoutes from "./routes/nameChangeRoutes.js";
 import iocOtpRoutes from "./routes/iocOtpRoutes.js";
+import emptyCylinderLoadRoutes from "./routes/emptyCylinderLoadRoutes.js";
 
 const app = express();
 
@@ -86,6 +87,7 @@ app.use("/api/customer-connections", customerConnectionRoutes);
 app.use("/api/customer-transfers", customerTransferRoutes);
 app.use("/api/name-changes", nameChangeRoutes);
 app.use("/api/ioc-otps", iocOtpRoutes);
+app.use("/api/empty-cylinder-loads", emptyCylinderLoadRoutes);
 
 
 export default app;
