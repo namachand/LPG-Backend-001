@@ -1482,6 +1482,348 @@ export const createDriverSale = async (req, res) => {
   }
 };
 
+const RETURN_REASONS = ["DISCONNECTION", "TRANSFER", "SURRENDER", "OTHER"];
+const RETURN_PAYMENT_METHODS = ["CASH", "UPI", "CARD"];
+
+// Ensures the tables backing the driver-collected customer return flow exist.
+// Follows the same CREATE TABLE IF NOT EXISTS convention used elsewhere in the
+// codebase so no separate migration step is required.
+const ensureDriverReturnTables = async (connection) => {
+  await connection.execute(
+    `
+    CREATE TABLE IF NOT EXISTS driver_returns (
+      id BIGINT NOT NULL AUTO_INCREMENT,
+      driver_id INT NOT NULL,
+      customer_id INT NULL,
+      address_id INT NULL,
+      category VARCHAR(20) NOT NULL,
+      product_id INT NOT NULL,
+      quantity INT NOT NULL,
+      return_reason VARCHAR(30) NULL,
+      payment_method VARCHAR(20) NULL,
+      amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+      stock_transaction_id BIGINT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+      created_by INT NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_driver_returns_driver_id (driver_id),
+      KEY idx_driver_returns_customer_id (customer_id),
+      KEY idx_driver_returns_product_id (product_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `
+  );
+
+  await connection.execute(
+    `
+    CREATE TABLE IF NOT EXISTS driver_return_otps (
+      id BIGINT NOT NULL AUTO_INCREMENT,
+      return_id BIGINT NOT NULL,
+      otp VARCHAR(10) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_driver_return_otps_return_id (return_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `
+  );
+};
+
+// Driver-collected customer return: the driver picks up empty cylinders from a
+// customer (commercial return with payment, or domestic return with a reason)
+// without delivering a replacement. The collected empties are added to the
+// driver's return stock as an unapproved EMPTY_RETURN transaction — the exact
+// same mechanism the godown settlement approves into the empty stock. The
+// stock_transaction row also serves as the audit/activity entry (the godown
+// activity feed is derived from stock_transactions).
+export const createDriverReturn = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const {
+      driver_id,
+      customer_name,
+      phone,
+      address,
+
+      category,
+      product_id,
+      quantity = 1,
+
+      return_reason = null,
+      payment_method = null,
+      amount = 0,
+
+      otp = null,
+    } = req.body;
+
+    const numericDriverId = await resolveDriverId(driver_id);
+    const numericProductId = Number(product_id);
+    const numericQuantity = Number(quantity || 0);
+    const normalizedCategory = String(category || "").toUpperCase();
+    const normalizedReason = return_reason
+      ? String(return_reason).toUpperCase()
+      : null;
+    const normalizedPaymentMethod = payment_method
+      ? String(payment_method).toUpperCase()
+      : null;
+    const numericAmount = Number(amount || 0);
+    const normalizedOtp = String(otp || "").trim();
+
+    if (!numericDriverId) {
+      return res.status(400).json({
+        success: false,
+        message: "valid driver_id is required",
+      });
+    }
+
+    if (!customer_name || !phone || !address) {
+      return res.status(400).json({
+        success: false,
+        message: "customer_name, phone and address are required",
+      });
+    }
+
+    if (!["COMMERCIAL", "DOMESTIC"].includes(normalizedCategory)) {
+      return res.status(400).json({
+        success: false,
+        message: "category must be COMMERCIAL or DOMESTIC",
+      });
+    }
+
+    if (!numericProductId || Number.isNaN(numericProductId)) {
+      return res.status(400).json({
+        success: false,
+        message: "product_id is required",
+      });
+    }
+
+    if (!numericQuantity || numericQuantity <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "quantity must be greater than 0",
+      });
+    }
+
+    if (normalizedOtp.length !== 6) {
+      return res.status(400).json({
+        success: false,
+        message: "A 6 digit customer OTP is required",
+      });
+    }
+
+    if (normalizedCategory === "COMMERCIAL") {
+      if (!RETURN_PAYMENT_METHODS.includes(normalizedPaymentMethod)) {
+        return res.status(400).json({
+          success: false,
+          message: "payment_method must be CASH, UPI or CARD for a commercial return",
+        });
+      }
+    } else {
+      if (!RETURN_REASONS.includes(normalizedReason)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "return_reason must be DISCONNECTION, TRANSFER, SURRENDER or OTHER for a domestic return",
+        });
+      }
+    }
+
+    // Fetch the driver's user_id so it can be used as created_by (matches the
+    // sale flow's stock_transactions attribution).
+    const [driverUserRows] = await connection.execute(
+      `SELECT user_id FROM drivers WHERE id = ? LIMIT 1`,
+      [numericDriverId]
+    );
+    const driverUserId = driverUserRows[0]?.user_id || null;
+
+    await connection.beginTransaction();
+
+    await ensureDriverReturnTables(connection);
+
+    const [productRows] = await connection.execute(
+      `SELECT id, name, type, price FROM products WHERE id = ? LIMIT 1`,
+      [numericProductId]
+    );
+
+    if (!productRows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    const selectedProduct = productRows[0];
+
+    if (String(selectedProduct.type).toUpperCase() !== normalizedCategory) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Selected product does not match the chosen category",
+      });
+    }
+
+    // Resolve or create the customer + address (same upsert pattern as sales).
+    let customerId = null;
+
+    const [existingCustomers] = await connection.execute(
+      `SELECT id FROM users WHERE phone = ? LIMIT 1`,
+      [phone]
+    );
+
+    if (existingCustomers.length) {
+      customerId = existingCustomers[0].id;
+
+      await connection.execute(
+        `UPDATE users SET name = ?, role = 'CUSTOMER' WHERE id = ?`,
+        [customer_name, customerId]
+      );
+    } else {
+      const [customerResult] = await connection.execute(
+        `
+        INSERT INTO users (name, phone, role, created_at, updated_at)
+        VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
+        `,
+        [customer_name, phone]
+      );
+
+      customerId = customerResult.insertId;
+    }
+
+    let addressId = null;
+
+    const [addressRows] = await connection.execute(
+      `SELECT id FROM addresses WHERE user_id = ? AND address = ? LIMIT 1`,
+      [customerId, address]
+    );
+
+    if (addressRows.length) {
+      addressId = addressRows[0].id;
+    } else {
+      const [addressResult] = await connection.execute(
+        `
+        INSERT INTO addresses (user_id, address, created_at, updated_at)
+        VALUES (?, ?, NOW(), NOW())
+        `,
+        [customerId, address]
+      );
+
+      addressId = addressResult.insertId;
+    }
+
+    const finalAmount =
+      normalizedCategory === "COMMERCIAL" ? Math.max(numericAmount, 0) : 0;
+
+    const [returnResult] = await connection.execute(
+      `
+      INSERT INTO driver_returns
+      (
+        driver_id,
+        customer_id,
+        address_id,
+        category,
+        product_id,
+        quantity,
+        return_reason,
+        payment_method,
+        amount,
+        status,
+        created_by
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+      `,
+      [
+        numericDriverId,
+        customerId,
+        addressId,
+        normalizedCategory,
+        numericProductId,
+        numericQuantity,
+        normalizedCategory === "DOMESTIC" ? normalizedReason : null,
+        normalizedCategory === "COMMERCIAL" ? normalizedPaymentMethod : null,
+        finalAmount,
+        driverUserId,
+      ]
+    );
+
+    const returnId = returnResult.insertId;
+
+    // Add the collected empties to the driver's return stock. reference_id is
+    // left NULL so this row is never mis-linked to a sale — the godown "return
+    // to godown" settlement picks up unapproved driver EMPTY_RETURN rows and
+    // calls addEmptyStockToGodown for each.
+    const [stockResult] = await connection.execute(
+      `
+      INSERT INTO stock_transactions
+      (
+        product_id,
+        stock_area_id,
+        type,
+        quantity,
+        isApproved,
+        reference_id,
+        created_by,
+        driver_id,
+        stock_from,
+        is_defective
+      )
+      VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, NULL, ?, ?, 'driver', 0)
+      `,
+      [numericProductId, numericQuantity, driverUserId, numericDriverId]
+    );
+
+    await connection.execute(
+      `UPDATE driver_returns SET stock_transaction_id = ? WHERE id = ?`,
+      [stockResult.insertId, returnId]
+    );
+
+    await connection.execute(
+      `
+      INSERT INTO driver_return_otps (return_id, otp, status)
+      VALUES (?, ?, 'PENDING')
+      `,
+      [returnId, normalizedOtp]
+    );
+
+    await connection.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: "Return recorded successfully",
+      data: {
+        returnId,
+        customerId,
+        addressId,
+        category: normalizedCategory,
+        product: {
+          id: Number(selectedProduct.id),
+          name: selectedProduct.name,
+          type: selectedProduct.type,
+        },
+        quantity: numericQuantity,
+        returnReason: normalizedCategory === "DOMESTIC" ? normalizedReason : null,
+        paymentMethod:
+          normalizedCategory === "COMMERCIAL" ? normalizedPaymentMethod : null,
+        amount: finalAmount,
+        stockTransactionId: Number(stockResult.insertId),
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    console.error("createDriverReturn error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to record return",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
 export const getDriverCollectionSummary = async (req, res) => {
   try {
     const driverId = await resolveDriverId(req.params.driverId);
