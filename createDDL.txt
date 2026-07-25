@@ -340,6 +340,7 @@ CREATE TABLE `settlement_history` (
 CREATE TABLE `cashier_closings` (
   `id` int NOT NULL AUTO_INCREMENT,
   `total_cash` decimal(12,2) NOT NULL DEFAULT '0.00',
+  `petty_cash` decimal(12,2) NOT NULL DEFAULT '0.00',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)

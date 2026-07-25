@@ -1,5 +1,9 @@
 import db from "../config/db.js";
 import { syncPurchaseApprovalState } from "./purchaseController.js";
+import {
+  CARRY_FORWARD_DATE_EXPR,
+  getDriverCarryForward,
+} from "../utils/driverCarryForward.js";
 
 const DEFAULT_STOCK_AREA_ID = 1;
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -1739,15 +1743,28 @@ export const getDeliveryDrivers = async (req, res) => {
 
     let dateSalesCondition = "DATE(s.created_at) = CURDATE()";
     let dateReturnCondition = "DATE(st.created_at) = CURDATE()";
+    // Allocations are dated by assigned_at (an approved booking is only handed
+    // to the driver on the day it is approved), deliveries by created_at.
+    let dateAllocationCondition =
+      "DATE(COALESCE(s.assigned_at, s.created_at)) = CURDATE()";
+    // Start of the reported period - everything still in hand before it is
+    // carried forward into the period.
+    let carryForwardBoundary = CARRY_FORWARD_DATE_EXPR.TODAY;
 
     if (filter === "yesterday") {
       dateSalesCondition = "DATE(s.created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)";
       dateReturnCondition = "DATE(st.created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)";
+      dateAllocationCondition =
+        "DATE(COALESCE(s.assigned_at, s.created_at)) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)";
+      carryForwardBoundary = CARRY_FORWARD_DATE_EXPR.YESTERDAY;
     }
 
     if (filter === "week") {
       dateSalesCondition = "YEARWEEK(s.created_at, 1) = YEARWEEK(CURDATE(), 1)";
       dateReturnCondition = "YEARWEEK(st.created_at, 1) = YEARWEEK(CURDATE(), 1)";
+      dateAllocationCondition =
+        "YEARWEEK(COALESCE(s.assigned_at, s.created_at), 1) = YEARWEEK(CURDATE(), 1)";
+      carryForwardBoundary = CARRY_FORWARD_DATE_EXPR.WEEK_START;
     }
 
     // Get all drivers from the database
@@ -1769,6 +1786,7 @@ export const getDeliveryDrivers = async (req, res) => {
           CASE
             WHEN s.status = 'ASSIGNED'
               AND si.status = 'ASSIGNED'
+              AND ${dateAllocationCondition}
             THEN si.quantity
             ELSE 0
           END
@@ -1778,6 +1796,7 @@ export const getDeliveryDrivers = async (req, res) => {
           CASE
             WHEN s.status = 'DELIVERED'
               AND si.status = 'DELIVERED'
+              AND ${dateSalesCondition}
             THEN COALESCE(si.delivered_qty, si.quantity, 0)
             ELSE 0
           END
@@ -1786,6 +1805,7 @@ export const getDeliveryDrivers = async (req, res) => {
         COALESCE(SUM(
           CASE
             WHEN si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
+              AND ${dateSalesCondition}
             THEN COALESCE(si.empty_cylinder_qty, 0)
             ELSE 0
           END
@@ -1793,11 +1813,14 @@ export const getDeliveryDrivers = async (req, res) => {
 
       FROM sales s
       JOIN sales_items si ON si.sale_id = s.id
-      WHERE ${dateSalesCondition}
+      WHERE (${dateSalesCondition} OR ${dateAllocationCondition})
       GROUP BY s.driver_id
     `);
 
-    // Get approved in-hand returns for each driver within date range
+    // In-hand returns for each driver within date range. Requests awaiting
+    // approval count too (isApproved IN (0, 1)) so this figure - and therefore
+    // the in-hand total below - agrees with the driver app and with what gets
+    // carried forward to the next day.
     const [returnStats] = await db.execute(`
       SELECT
         st.driver_id,
@@ -1810,10 +1833,18 @@ export const getDeliveryDrivers = async (req, res) => {
       FROM stock_transactions st
       WHERE st.stock_from = 'driver'
         AND st.type = 'PURCHASE_RETURN'
-        AND st.isApproved = 1
+        AND st.isApproved IN (0, 1)
         AND ${dateReturnCondition}
       GROUP BY st.driver_id
     `);
+
+    // Cylinders left in hand from before the reported period. They are added to
+    // the period's allocated figure instead of blocking the next allocation.
+    const { byDriver: carryForwardByDriver } = await getDriverCarryForward(db, {
+      driverId: null,
+      asOfDate: carryForwardBoundary,
+      openingBalance: true,
+    });
 
     // Create maps for faster lookup
     const allocationMap = new Map();
@@ -1838,15 +1869,22 @@ export const getDeliveryDrivers = async (req, res) => {
       const driverId = Number(driver.driver_id);
       const allocation = allocationMap.get(driverId) || { allocated: 0, delivered: 0, empty: 0 };
       const returns = returnMap.get(driverId) || { empty: 0, defective: 0 };
+      const carriedForward = Number(carryForwardByDriver.get(driverId) || 0);
+
+      // Allocated now means "everything the driver is holding for this period":
+      // freshly allocated cylinders plus the ones brought forward.
+      const totalAllocated = allocation.allocated + carriedForward;
 
       return {
         id: driverId,
         name: driver.driver_name,
         vehicle: driver.vehicle_number || "N/A",
-        allocated: allocation.allocated,
+        allocated: totalAllocated,
+        allocatedToday: allocation.allocated,
+        carriedForward,
         delivered: allocation.delivered,
         empty: allocation.empty,
-        inHand: Math.max(allocation.allocated - allocation.delivered - returns.empty - returns.defective, 0),
+        inHand: Math.max(totalAllocated - allocation.delivered - returns.empty - returns.defective, 0),
       };
     });
 
@@ -1875,29 +1913,39 @@ export const getDriverDayWiseSummary = async (req, res) => {
       });
     }
 
-    // Fetch all allocations with their delivery status, day-wise
+    // Day-wise allocations (the batches handed to the driver on that day).
     const [allocationRows] = await db.execute(`
       SELECT
-        DATE(COALESCE(s.assigned_at, s.created_at)) AS allocation_date,
-        COALESCE(SUM(si.quantity), 0) AS allocated_qty,
-        COALESCE(SUM(
-          CASE WHEN s.status = 'DELIVERED' 
-            THEN COALESCE(si.delivered_qty, si.quantity, 0)
-            ELSE 0
-          END
-        ), 0) AS delivered_qty
+        DATE(COALESCE(s.assigned_at, s.created_at)) AS activity_date,
+        COALESCE(SUM(si.quantity), 0) AS allocated_qty
       FROM sales s
       JOIN sales_items si ON si.sale_id = s.id
       WHERE s.driver_id = ?
-        AND s.status IN ('ASSIGNED', 'DELIVERED')
+        AND s.status = 'ASSIGNED'
+        AND si.allocation_sales_item_id IS NULL
       GROUP BY DATE(COALESCE(s.assigned_at, s.created_at))
-      ORDER BY allocation_date DESC
     `, [driverId]);
 
-    // Fetch approved in-hand returns, day-wise
+    // Day-wise deliveries made out of those batches. Dated by the delivery
+    // itself, so a cylinder allocated yesterday and delivered today reduces
+    // today's in-hand - not yesterday's.
+    const [deliveryRows] = await db.execute(`
+      SELECT
+        DATE(COALESCE(cs.delivered_at, cs.created_at)) AS activity_date,
+        COALESCE(SUM(COALESCE(child.delivered_qty, child.quantity, 0)), 0) AS delivered_qty
+      FROM sales_items child
+      INNER JOIN sales cs ON cs.id = child.sale_id
+      WHERE cs.driver_id = ?
+        AND cs.status = 'DELIVERED'
+        AND child.allocation_sales_item_id IS NOT NULL
+      GROUP BY DATE(COALESCE(cs.delivered_at, cs.created_at))
+    `, [driverId]);
+
+    // Day-wise returns to the godown. Pending requests count too (isApproved
+    // IN (0, 1)) so the ledger matches the in-hand figure shown to the driver.
     const [returnRows] = await db.execute(`
       SELECT
-        DATE(st.created_at) AS return_date,
+        DATE(st.created_at) AS activity_date,
         COALESCE(SUM(
           CASE WHEN st.is_defective = 0 THEN st.quantity ELSE 0 END
         ), 0) AS empty_returned,
@@ -1908,13 +1956,10 @@ export const getDriverDayWiseSummary = async (req, res) => {
       WHERE st.driver_id = ?
         AND st.stock_from = 'driver'
         AND st.type = 'PURCHASE_RETURN'
-        AND st.isApproved = 1
+        AND st.isApproved IN (0, 1)
+        AND st.allocation_sales_item_id IS NOT NULL
       GROUP BY DATE(st.created_at)
-      ORDER BY return_date DESC
     `, [driverId]);
-
-    // Build day-wise summary combining allocations and returns
-    const dayWiseMap = new Map();
 
     const normalizeDateKey = (rawValue) => {
       if (!rawValue) {
@@ -1926,7 +1971,10 @@ export const getDriverDayWiseSummary = async (req, res) => {
       }
 
       if (rawValue instanceof Date && !Number.isNaN(rawValue.getTime())) {
-        return rawValue.toISOString().split("T")[0];
+        const y = rawValue.getFullYear();
+        const m = String(rawValue.getMonth() + 1).padStart(2, "0");
+        const d = String(rawValue.getDate()).padStart(2, "0");
+        return `${y}-${m}-${d}`;
       }
 
       const parsed = new Date(rawValue);
@@ -1935,55 +1983,68 @@ export const getDriverDayWiseSummary = async (req, res) => {
         return null;
       }
 
-      return parsed.toISOString().split("T")[0];
+      const y = parsed.getFullYear();
+      const m = String(parsed.getMonth() + 1).padStart(2, "0");
+      const d = String(parsed.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
     };
 
-    allocationRows.forEach((row) => {
-      const dateStr = normalizeDateKey(row.allocation_date);
+    const dayWiseMap = new Map();
 
-      if (!dateStr) {
-        return;
-      }
-
+    const ensureDay = (dateStr) => {
       if (!dayWiseMap.has(dateStr)) {
         dayWiseMap.set(dateStr, {
           date: dateStr,
+          carriedForward: 0,
           allocated: 0,
+          totalAllocated: 0,
           delivered: 0,
+          returned: 0,
           inHand: 0,
         });
       }
-      const existing = dayWiseMap.get(dateStr);
-      existing.allocated += Number(row.allocated_qty || 0);
-      existing.delivered += Number(row.delivered_qty || 0);
+
+      return dayWiseMap.get(dateStr);
+    };
+
+    allocationRows.forEach((row) => {
+      const dateStr = normalizeDateKey(row.activity_date);
+      if (!dateStr) return;
+      ensureDay(dateStr).allocated += Number(row.allocated_qty || 0);
+    });
+
+    deliveryRows.forEach((row) => {
+      const dateStr = normalizeDateKey(row.activity_date);
+      if (!dateStr) return;
+      ensureDay(dateStr).delivered += Number(row.delivered_qty || 0);
     });
 
     returnRows.forEach((row) => {
-      const dateStr = normalizeDateKey(row.return_date);
-
-      if (!dateStr) {
-        return;
-      }
-
-      if (dayWiseMap.has(dateStr)) {
-        const existing = dayWiseMap.get(dateStr);
-        existing.inHand = Math.max(
-          existing.allocated - existing.delivered - Number(row.empty_returned || 0) - Number(row.defective_returned || 0),
-          0
-        );
-      }
+      const dateStr = normalizeDateKey(row.activity_date);
+      if (!dateStr) return;
+      ensureDay(dateStr).returned +=
+        Number(row.empty_returned || 0) + Number(row.defective_returned || 0);
     });
 
-    // Calculate in-hand after returns for entries without returns
-    dayWiseMap.forEach((value) => {
-      if (value.inHand === 0) {
-        value.inHand = Math.max(value.allocated - value.delivered, 0);
-      }
-    });
-
-    const summary = Array.from(dayWiseMap.values()).sort(
-      (a, b) => new Date(b.date) - new Date(a.date)
+    // Walk the days oldest -> newest so each day opens with whatever was left
+    // in the driver's hands at the close of the previous one.
+    const ascendingDays = Array.from(dayWiseMap.values()).sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
     );
+
+    let openingBalance = 0;
+
+    ascendingDays.forEach((day) => {
+      day.carriedForward = openingBalance;
+      day.totalAllocated = openingBalance + day.allocated;
+      day.inHand = Math.max(
+        day.totalAllocated - day.delivered - day.returned,
+        0
+      );
+      openingBalance = day.inHand;
+    });
+
+    const summary = ascendingDays.slice().reverse();
 
     return res.json({
       success: true,
@@ -2023,67 +2084,22 @@ export const createDriverAllocation = async (req, res) => {
       });
     }
 
-    // Enforce "settle before allocate": a driver must return (or deliver) any
-    // cylinders still in hand from a PREVIOUS day before a new allocation can
-    // be created. In-hand per batch = allocated - delivered - returned - defective.
-    const [outstandingRows] = await connection.execute(
-      `
-      SELECT
-        COALESCE(SUM(GREATEST(
-          COALESCE(asi.quantity, 0)
-          - COALESCE(delivered_data.delivered_qty, 0)
-          - COALESCE(return_data.return_qty, 0)
-          - COALESCE(return_data.defective_qty, 0), 0
-        )), 0) AS outstanding
-      FROM sales_items asi
-      INNER JOIN sales a
-        ON a.id = asi.sale_id
+    // Cylinders still in hand from a PREVIOUS day no longer block a new
+    // allocation. They are carried forward instead: the old batches stay open
+    // (the driver can keep delivering or returning against them) and their
+    // outstanding quantity is reported alongside today's allocation so every
+    // screen shows the full quantity the driver is holding.
+    //
+    // Nothing is re-issued from godown stock for the carried-forward part -
+    // that stock was already deducted on the day it was originally allocated -
+    // so no duplicate sales_items or stock_transactions rows are created here.
+    const carryForward = await getDriverCarryForward(connection, {
+      driverId: driver_id,
+      asOfDate: CARRY_FORWARD_DATE_EXPR.TODAY,
+      openingBalance: true,
+    });
 
-      LEFT JOIN (
-        SELECT
-          child.allocation_sales_item_id,
-          SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
-        FROM sales_items child
-        INNER JOIN sales cs
-          ON cs.id = child.sale_id
-        WHERE child.allocation_sales_item_id IS NOT NULL
-          AND cs.status = 'DELIVERED'
-        GROUP BY child.allocation_sales_item_id
-      ) delivered_data
-        ON delivered_data.allocation_sales_item_id = asi.id
-
-      LEFT JOIN (
-        SELECT
-          st.allocation_sales_item_id,
-          SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS return_qty,
-          SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS defective_qty
-        FROM stock_transactions st
-        WHERE st.stock_from = 'driver'
-          AND st.type = 'PURCHASE_RETURN'
-          AND st.isApproved IN (0, 1)
-          AND st.allocation_sales_item_id IS NOT NULL
-        GROUP BY st.allocation_sales_item_id
-      ) return_data
-        ON return_data.allocation_sales_item_id = asi.id
-
-      WHERE a.driver_id = ?
-        AND a.status = 'ASSIGNED'
-        AND asi.allocation_sales_item_id IS NULL
-        AND DATE(COALESCE(a.assigned_at, a.created_at)) < CURDATE()
-      `,
-      [driver_id]
-    );
-
-    const outstandingInHand = Number(outstandingRows[0]?.outstanding || 0);
-
-    if (outstandingInHand > 0) {
-      return res.status(409).json({
-        success: false,
-        message: `This driver still has ${outstandingInHand} cylinder(s) in hand from a previous day. They must be delivered or returned before a new allocation can be created.`,
-        code: "OUTSTANDING_IN_HAND",
-        outstandingInHand,
-      });
-    }
+    const carriedForwardQty = carryForward.total;
 
     await connection.beginTransaction();
 
@@ -2233,12 +2249,30 @@ export const createDriverAllocation = async (req, res) => {
 
     await connection.commit();
 
+    const allocatedNow = validItems.reduce(
+      (sum, item) => sum + Number(item.quantity || 0),
+      0
+    );
+
     return res.status(201).json({
       success: true,
-      message: "Driver allocation created successfully",
+      message: carriedForwardQty
+        ? `Driver allocation created successfully. ${carriedForwardQty} cylinder(s) carried forward from previous day(s) are included in today's total.`
+        : "Driver allocation created successfully",
       data: {
         sale_id: saleId,
         batch_no: batchNo,
+        allocatedNow,
+        carriedForward: carriedForwardQty,
+        // Everything the driver is holding for today: freshly allocated plus
+        // whatever was left over from previous days.
+        totalAllocated: allocatedNow + carriedForwardQty,
+        carriedForwardItems: carryForward.byProduct.map((item) => ({
+          productId: item.productId,
+          productName: item.productName,
+          productType: item.productType,
+          quantity: item.quantity,
+        })),
       },
     });
   } catch (error) {

@@ -1,4 +1,5 @@
 import db from "../config/db.js";
+import { getDriverCarryForward } from "../utils/driverCarryForward.js";
 
 const getBatchNo = (saleId) => `B-${saleId}`;
 const toNumber = (value) => Number(value || 0);
@@ -15,6 +16,30 @@ const getTodayIsoDate = () => {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
+// Normalises a DB timestamp/date into a local YYYY-MM-DD string so it can be
+// compared against getTodayIsoDate() without timezone drift.
+const toIsoDateString = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value.slice(0, 10);
+  }
+
+  const parsed = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  const y = parsed.getFullYear();
+  const m = String(parsed.getMonth() + 1).padStart(2, "0");
+  const d = String(parsed.getDate()).padStart(2, "0");
+
   return `${y}-${m}-${d}`;
 };
 
@@ -566,43 +591,6 @@ export const getDriverDeliveriesApp = async (req, res) => {
       [numericDriverId, startDate, endDate]
     );
 
-    // In Hand: allocation-date range tracking (same scope as selected date range)
-    const [inHandRows] = await db.execute(
-      `
-      SELECT
-        COALESCE(SUM(asi.quantity), 0) AS allocated,
-        COALESCE(SUM(COALESCE(dd.delivered_qty, 0)), 0) AS delivered,
-        COALESCE(SUM(COALESCE(rd.return_qty, 0)), 0) AS returned,
-        COALESCE(SUM(COALESCE(rd.defective_qty, 0)), 0) AS defective
-      FROM sales_items asi
-      INNER JOIN sales a ON a.id = asi.sale_id
-      LEFT JOIN (
-        SELECT child.allocation_sales_item_id,
-               SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
-        FROM sales_items child
-        INNER JOIN sales cs ON cs.id = child.sale_id
-        WHERE child.allocation_sales_item_id IS NOT NULL AND cs.status = 'DELIVERED'
-        GROUP BY child.allocation_sales_item_id
-      ) dd ON dd.allocation_sales_item_id = asi.id
-      LEFT JOIN (
-        SELECT st.allocation_sales_item_id,
-               SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity,0) ELSE 0 END) AS return_qty,
-               SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity,0) ELSE 0 END) AS defective_qty
-        FROM stock_transactions st
-        WHERE st.stock_from = 'driver'
-          AND st.type = 'PURCHASE_RETURN'
-          AND st.isApproved IN (0, 1)
-          AND st.allocation_sales_item_id IS NOT NULL
-        GROUP BY st.allocation_sales_item_id
-      ) rd ON rd.allocation_sales_item_id = asi.id
-      WHERE a.driver_id = ?
-        AND a.status = 'ASSIGNED'
-        AND asi.allocation_sales_item_id IS NULL
-        AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
-      `,
-      [numericDriverId, startDate, endDate]
-    );
-
     // Dashboard collection should match driver collection flow:
     // include ASSIGNED (not yet sent) + PENDING (sent, awaiting cashier approval).
     const [pendingCollectionRows] = await db.execute(
@@ -680,18 +668,63 @@ export const getDriverDeliveriesApp = async (req, res) => {
       [numericDriverId, startDate, endDate]
     );
 
-    const allocated = Number(statsRows[0]?.allocated || 0);
+    // Cylinders the driver was still holding when the range opened. They are
+    // carried forward and counted as allocated for this range.
+    const { total: carriedForward } = await getDriverCarryForward(db, {
+      driverId: numericDriverId,
+      asOfDate: startDate,
+      openingBalance: true,
+    });
+
+    // Batch-linked deliveries and returns that happened inside the range, so
+    // clearing carried-forward stock lowers the in-hand figure for this range.
+    const [batchDeliveredRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(COALESCE(child.delivered_qty, child.quantity, 0)), 0) AS delivered
+      FROM sales_items child
+      INNER JOIN sales cs ON cs.id = child.sale_id
+      WHERE cs.driver_id = ?
+        AND cs.status = 'DELIVERED'
+        AND child.allocation_sales_item_id IS NOT NULL
+        AND DATE(COALESCE(cs.delivered_at, cs.created_at)) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    const [batchReturnedRows] = await db.execute(
+      `
+      SELECT
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS returned,
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS defective
+      FROM stock_transactions st
+      WHERE st.driver_id = ?
+        AND st.stock_from = 'driver'
+        AND st.type = 'PURCHASE_RETURN'
+        AND st.isApproved IN (0, 1)
+        AND st.allocation_sales_item_id IS NOT NULL
+        AND DATE(st.created_at) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    const allocatedInRange = Number(statsRows[0]?.allocated || 0);
+    const allocated = allocatedInRange + carriedForward;
     const returned = Number(statsRows[0]?.returned || 0);
     const defective = Number(statsRows[0]?.defective || 0);
 
     // delivered: from actual delivered sales in date range
     const delivered = Number(deliveredRows[0]?.delivered || 0);
 
-    // inHand: from allocation/delivery/return tracking in selected date range
-    const ihAllocated = Number(inHandRows[0]?.allocated || 0);
-    const ihDelivered = Number(inHandRows[0]?.delivered || 0);
-    const ihReturned = Number(inHandRows[0]?.returned || 0);
-    const ihDefective = Number(inHandRows[0]?.defective || 0);
+    // inHand: opening balance + this range's allocations, minus everything
+    // delivered or returned during the range.
+    const ihAllocated = allocated;
+    const ihDelivered = Number(batchDeliveredRows[0]?.delivered || 0);
+    const ihReturned = Number(batchReturnedRows[0]?.returned || 0);
+    const ihDefective = Number(batchReturnedRows[0]?.defective || 0);
     const inHand = Math.max(ihAllocated - ihDelivered - ihReturned - ihDefective, 0);
     const inHandOriginal = Math.max(ihAllocated, 0);
 
@@ -756,6 +789,8 @@ export const getDriverDeliveriesApp = async (req, res) => {
 
     const stats = {
       allocated,
+      allocatedToday: allocatedInRange,
+      carriedForward,
       delivered,
       pendingCollection,
       empties,
@@ -1482,6 +1517,348 @@ export const createDriverSale = async (req, res) => {
   }
 };
 
+const RETURN_REASONS = ["DISCONNECTION", "TRANSFER", "SURRENDER", "OTHER"];
+const RETURN_PAYMENT_METHODS = ["CASH", "UPI", "CARD"];
+
+// Ensures the tables backing the driver-collected customer return flow exist.
+// Follows the same CREATE TABLE IF NOT EXISTS convention used elsewhere in the
+// codebase so no separate migration step is required.
+const ensureDriverReturnTables = async (connection) => {
+  await connection.execute(
+    `
+    CREATE TABLE IF NOT EXISTS driver_returns (
+      id BIGINT NOT NULL AUTO_INCREMENT,
+      driver_id INT NOT NULL,
+      customer_id INT NULL,
+      address_id INT NULL,
+      category VARCHAR(20) NOT NULL,
+      product_id INT NOT NULL,
+      quantity INT NOT NULL,
+      return_reason VARCHAR(30) NULL,
+      payment_method VARCHAR(20) NULL,
+      amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+      stock_transaction_id BIGINT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+      created_by INT NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_driver_returns_driver_id (driver_id),
+      KEY idx_driver_returns_customer_id (customer_id),
+      KEY idx_driver_returns_product_id (product_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `
+  );
+
+  await connection.execute(
+    `
+    CREATE TABLE IF NOT EXISTS driver_return_otps (
+      id BIGINT NOT NULL AUTO_INCREMENT,
+      return_id BIGINT NOT NULL,
+      otp VARCHAR(10) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_driver_return_otps_return_id (return_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `
+  );
+};
+
+// Driver-collected customer return: the driver picks up empty cylinders from a
+// customer (commercial return with payment, or domestic return with a reason)
+// without delivering a replacement. The collected empties are added to the
+// driver's return stock as an unapproved EMPTY_RETURN transaction — the exact
+// same mechanism the godown settlement approves into the empty stock. The
+// stock_transaction row also serves as the audit/activity entry (the godown
+// activity feed is derived from stock_transactions).
+export const createDriverReturn = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const {
+      driver_id,
+      customer_name,
+      phone,
+      address,
+
+      category,
+      product_id,
+      quantity = 1,
+
+      return_reason = null,
+      payment_method = null,
+      amount = 0,
+
+      otp = null,
+    } = req.body;
+
+    const numericDriverId = await resolveDriverId(driver_id);
+    const numericProductId = Number(product_id);
+    const numericQuantity = Number(quantity || 0);
+    const normalizedCategory = String(category || "").toUpperCase();
+    const normalizedReason = return_reason
+      ? String(return_reason).toUpperCase()
+      : null;
+    const normalizedPaymentMethod = payment_method
+      ? String(payment_method).toUpperCase()
+      : null;
+    const numericAmount = Number(amount || 0);
+    const normalizedOtp = String(otp || "").trim();
+
+    if (!numericDriverId) {
+      return res.status(400).json({
+        success: false,
+        message: "valid driver_id is required",
+      });
+    }
+
+    if (!customer_name || !phone || !address) {
+      return res.status(400).json({
+        success: false,
+        message: "customer_name, phone and address are required",
+      });
+    }
+
+    if (!["COMMERCIAL", "DOMESTIC"].includes(normalizedCategory)) {
+      return res.status(400).json({
+        success: false,
+        message: "category must be COMMERCIAL or DOMESTIC",
+      });
+    }
+
+    if (!numericProductId || Number.isNaN(numericProductId)) {
+      return res.status(400).json({
+        success: false,
+        message: "product_id is required",
+      });
+    }
+
+    if (!numericQuantity || numericQuantity <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "quantity must be greater than 0",
+      });
+    }
+
+    if (normalizedOtp.length !== 6) {
+      return res.status(400).json({
+        success: false,
+        message: "A 6 digit customer OTP is required",
+      });
+    }
+
+    if (normalizedCategory === "COMMERCIAL") {
+      if (!RETURN_PAYMENT_METHODS.includes(normalizedPaymentMethod)) {
+        return res.status(400).json({
+          success: false,
+          message: "payment_method must be CASH, UPI or CARD for a commercial return",
+        });
+      }
+    } else {
+      if (!RETURN_REASONS.includes(normalizedReason)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "return_reason must be DISCONNECTION, TRANSFER, SURRENDER or OTHER for a domestic return",
+        });
+      }
+    }
+
+    // Fetch the driver's user_id so it can be used as created_by (matches the
+    // sale flow's stock_transactions attribution).
+    const [driverUserRows] = await connection.execute(
+      `SELECT user_id FROM drivers WHERE id = ? LIMIT 1`,
+      [numericDriverId]
+    );
+    const driverUserId = driverUserRows[0]?.user_id || null;
+
+    await connection.beginTransaction();
+
+    await ensureDriverReturnTables(connection);
+
+    const [productRows] = await connection.execute(
+      `SELECT id, name, type, price FROM products WHERE id = ? LIMIT 1`,
+      [numericProductId]
+    );
+
+    if (!productRows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    const selectedProduct = productRows[0];
+
+    if (String(selectedProduct.type).toUpperCase() !== normalizedCategory) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Selected product does not match the chosen category",
+      });
+    }
+
+    // Resolve or create the customer + address (same upsert pattern as sales).
+    let customerId = null;
+
+    const [existingCustomers] = await connection.execute(
+      `SELECT id FROM users WHERE phone = ? LIMIT 1`,
+      [phone]
+    );
+
+    if (existingCustomers.length) {
+      customerId = existingCustomers[0].id;
+
+      await connection.execute(
+        `UPDATE users SET name = ?, role = 'CUSTOMER' WHERE id = ?`,
+        [customer_name, customerId]
+      );
+    } else {
+      const [customerResult] = await connection.execute(
+        `
+        INSERT INTO users (name, phone, role, created_at, updated_at)
+        VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
+        `,
+        [customer_name, phone]
+      );
+
+      customerId = customerResult.insertId;
+    }
+
+    let addressId = null;
+
+    const [addressRows] = await connection.execute(
+      `SELECT id FROM addresses WHERE user_id = ? AND address = ? LIMIT 1`,
+      [customerId, address]
+    );
+
+    if (addressRows.length) {
+      addressId = addressRows[0].id;
+    } else {
+      const [addressResult] = await connection.execute(
+        `
+        INSERT INTO addresses (user_id, address, created_at, updated_at)
+        VALUES (?, ?, NOW(), NOW())
+        `,
+        [customerId, address]
+      );
+
+      addressId = addressResult.insertId;
+    }
+
+    const finalAmount =
+      normalizedCategory === "COMMERCIAL" ? Math.max(numericAmount, 0) : 0;
+
+    const [returnResult] = await connection.execute(
+      `
+      INSERT INTO driver_returns
+      (
+        driver_id,
+        customer_id,
+        address_id,
+        category,
+        product_id,
+        quantity,
+        return_reason,
+        payment_method,
+        amount,
+        status,
+        created_by
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+      `,
+      [
+        numericDriverId,
+        customerId,
+        addressId,
+        normalizedCategory,
+        numericProductId,
+        numericQuantity,
+        normalizedCategory === "DOMESTIC" ? normalizedReason : null,
+        normalizedCategory === "COMMERCIAL" ? normalizedPaymentMethod : null,
+        finalAmount,
+        driverUserId,
+      ]
+    );
+
+    const returnId = returnResult.insertId;
+
+    // Add the collected empties to the driver's return stock. reference_id is
+    // left NULL so this row is never mis-linked to a sale — the godown "return
+    // to godown" settlement picks up unapproved driver EMPTY_RETURN rows and
+    // calls addEmptyStockToGodown for each.
+    const [stockResult] = await connection.execute(
+      `
+      INSERT INTO stock_transactions
+      (
+        product_id,
+        stock_area_id,
+        type,
+        quantity,
+        isApproved,
+        reference_id,
+        created_by,
+        driver_id,
+        stock_from,
+        is_defective
+      )
+      VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, NULL, ?, ?, 'driver', 0)
+      `,
+      [numericProductId, numericQuantity, driverUserId, numericDriverId]
+    );
+
+    await connection.execute(
+      `UPDATE driver_returns SET stock_transaction_id = ? WHERE id = ?`,
+      [stockResult.insertId, returnId]
+    );
+
+    await connection.execute(
+      `
+      INSERT INTO driver_return_otps (return_id, otp, status)
+      VALUES (?, ?, 'PENDING')
+      `,
+      [returnId, normalizedOtp]
+    );
+
+    await connection.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: "Return recorded successfully",
+      data: {
+        returnId,
+        customerId,
+        addressId,
+        category: normalizedCategory,
+        product: {
+          id: Number(selectedProduct.id),
+          name: selectedProduct.name,
+          type: selectedProduct.type,
+        },
+        quantity: numericQuantity,
+        returnReason: normalizedCategory === "DOMESTIC" ? normalizedReason : null,
+        paymentMethod:
+          normalizedCategory === "COMMERCIAL" ? normalizedPaymentMethod : null,
+        amount: finalAmount,
+        stockTransactionId: Number(stockResult.insertId),
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    console.error("createDriverReturn error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to record return",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
 export const getDriverCollectionSummary = async (req, res) => {
   try {
     const driverId = await resolveDriverId(req.params.driverId);
@@ -1697,76 +2074,73 @@ export const getDriverInHandSummary = async (req, res) => {
       });
     }
 
-    const [summaryRows] = await db.execute(
+    // Cylinders freshly allocated inside the selected range.
+    const [allocationRows] = await db.execute(
       `
-      SELECT
-        COALESCE(SUM(allocated_qty), 0) AS allocated,
-        COALESCE(SUM(delivered_qty), 0) AS delivered,
-        COALESCE(SUM(return_qty), 0) AS returned,
-        COALESCE(SUM(defective_qty), 0) AS defective
-      FROM (
-        SELECT
-          asi.id,
-          COALESCE(asi.quantity, 0) AS allocated_qty,
-          COALESCE(delivered_data.delivered_qty, 0) AS delivered_qty,
-          COALESCE(return_data.return_qty, 0) AS return_qty,
-          COALESCE(return_data.defective_qty, 0) AS defective_qty
-        FROM sales_items asi
-        INNER JOIN sales a
-          ON a.id = asi.sale_id
-
-        LEFT JOIN (
-          SELECT
-            child.allocation_sales_item_id,
-            SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
-          FROM sales_items child
-          INNER JOIN sales cs
-            ON cs.id = child.sale_id
-          WHERE child.allocation_sales_item_id IS NOT NULL
-            AND cs.status = 'DELIVERED'
-          GROUP BY child.allocation_sales_item_id
-        ) delivered_data
-          ON delivered_data.allocation_sales_item_id = asi.id
-
-        LEFT JOIN (
-          SELECT
-            st.allocation_sales_item_id,
-            SUM(
-              CASE
-                WHEN st.is_defective = 0
-                THEN COALESCE(st.quantity, 0)
-                ELSE 0
-              END
-            ) AS return_qty,
-            SUM(
-              CASE
-                WHEN st.is_defective = 1
-                THEN COALESCE(st.quantity, 0)
-                ELSE 0
-              END
-            ) AS defective_qty
-          FROM stock_transactions st
-          WHERE st.stock_from = 'driver'
-            AND st.type = 'PURCHASE_RETURN'
-            AND st.isApproved IN (0, 1)
-            AND st.allocation_sales_item_id IS NOT NULL
-          GROUP BY st.allocation_sales_item_id
-        ) return_data
-          ON return_data.allocation_sales_item_id = asi.id
-
-        WHERE a.driver_id = ?
-          AND a.status = 'ASSIGNED'
-          AND asi.allocation_sales_item_id IS NULL
-          AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
-      ) x
+      SELECT COALESCE(SUM(asi.quantity), 0) AS allocated
+      FROM sales_items asi
+      INNER JOIN sales a
+        ON a.id = asi.sale_id
+      WHERE a.driver_id = ?
+        AND a.status = 'ASSIGNED'
+        AND asi.allocation_sales_item_id IS NULL
+        AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
       `,
       [driverId, startDate, endDate]
     );
 
-    const allocated = toNumber(summaryRows[0]?.allocated);
-    const delivered = toNumber(summaryRows[0]?.delivered);
-    const returned = toNumber(summaryRows[0]?.returned);
-    const defective = toNumber(summaryRows[0]?.defective);
+    // Cylinders still in hand from before the range - carried forward and
+    // added to the allocated figure instead of being lost from the summary.
+    const { total: carriedForward } = await getDriverCarryForward(db, {
+      driverId,
+      asOfDate: startDate,
+      openingBalance: true,
+    });
+
+    // Deliveries made inside the range out of ANY open batch, including the
+    // carried-forward ones, so delivering yesterday's stock lowers today's
+    // in-hand figure.
+    const [deliveredRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(COALESCE(child.delivered_qty, child.quantity, 0)), 0) AS delivered
+      FROM sales_items child
+      INNER JOIN sales cs
+        ON cs.id = child.sale_id
+      WHERE cs.driver_id = ?
+        AND cs.status = 'DELIVERED'
+        AND child.allocation_sales_item_id IS NOT NULL
+        AND DATE(COALESCE(cs.delivered_at, cs.created_at)) BETWEEN ? AND ?
+      `,
+      [driverId, startDate, endDate]
+    );
+
+    // Returns raised inside the range against any open batch. Pending requests
+    // count as well, matching the batch-level pending figures in the app.
+    const [returnedRows] = await db.execute(
+      `
+      SELECT
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS returned,
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS defective
+      FROM stock_transactions st
+      WHERE st.driver_id = ?
+        AND st.stock_from = 'driver'
+        AND st.type = 'PURCHASE_RETURN'
+        AND st.isApproved IN (0, 1)
+        AND st.allocation_sales_item_id IS NOT NULL
+        AND DATE(st.created_at) BETWEEN ? AND ?
+      `,
+      [driverId, startDate, endDate]
+    );
+
+    const allocatedInRange = toNumber(allocationRows[0]?.allocated);
+    const allocated = allocatedInRange + carriedForward;
+    const delivered = toNumber(deliveredRows[0]?.delivered);
+    const returned = toNumber(returnedRows[0]?.returned);
+    const defective = toNumber(returnedRows[0]?.defective);
 
     const inHand = Math.max(
       allocated - delivered - returned - defective,
@@ -1835,6 +2209,8 @@ export const getDriverInHandSummary = async (req, res) => {
       data: {
         summary: {
           allocated,
+          allocatedToday: allocatedInRange,
+          carriedForward,
           delivered,
           returned,
           defective,
@@ -3174,12 +3550,19 @@ export const getAllocatedCylinders = async (req, res) => {
       [driverId]
     );
 
+    const today = getTodayIsoDate();
+
     const items = rows.map((row) => {
       const totalAllocated = toNumber(row.total_allocated);
       const delivered = toNumber(row.delivered_qty);
       const returned = toNumber(row.return_qty);
       const defective = toNumber(row.defective_qty);
       const pending = Math.max(totalAllocated - delivered - returned - defective, 0);
+
+      // Batches handed over on an earlier day are still open: they were carried
+      // forward instead of blocking today's allocation.
+      const allocatedDate = toIsoDateString(row.allocated_at);
+      const isCarryForward = Boolean(allocatedDate && allocatedDate < today);
 
       return {
         id: Number(row.allocation_sales_item_id),
@@ -3201,6 +3584,9 @@ export const getAllocatedCylinders = async (req, res) => {
         defective,
         pending,
 
+        allocatedDate,
+        isCarryForward,
+
         lastAllocatedAt: row.allocated_at,
         latestSaleId: Number(row.allocation_sale_id),
       };
@@ -3213,6 +3599,13 @@ export const getAllocatedCylinders = async (req, res) => {
         acc.returned += item.returned;
         acc.defective += item.defective;
         acc.pending += item.pending;
+
+        if (item.isCarryForward) {
+          acc.carriedForward += item.pending;
+        } else {
+          acc.allocatedToday += item.totalAllocated;
+        }
+
         return acc;
       },
       {
@@ -3221,6 +3614,8 @@ export const getAllocatedCylinders = async (req, res) => {
         returned: 0,
         defective: 0,
         pending: 0,
+        carriedForward: 0,
+        allocatedToday: 0,
       }
     );
 

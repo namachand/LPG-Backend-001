@@ -5,7 +5,7 @@ import { createDriver, getDriverDeliveriesApp, markSaleAsDelivered, createDriver
 getDriverEmptyCylindersToday, getDriverEmptyCylindersHistory, approveTodayEmptyCylinderReturns, getDriverProfileHistory,
 searchProductsForDriverApp, findCustomerForDriverApp, getAllocatedCylinders, getDriverDeliveryDetails, createInHandRequest,
 createEmptyCylinderReturnRequest, getAllocatedBatchDetail, getAvailableBatchesForDriver, findBookingCustomer,
-createBookingCustomer, createDriverBooking, getDriverBookings, cancelDriverBooking, getDriverReturnableEmptyProducts} from "../controllers/driverController.js";
+createBookingCustomer, createDriverBooking, getDriverBookings, cancelDriverBooking, getDriverReturnableEmptyProducts, createDriverReturn} from "../controllers/driverController.js";
 
 const router = express.Router();
 
@@ -15,6 +15,7 @@ router.get("/:driverId/app-deliveries", getDriverDeliveriesApp);
 router.put("/sale/:saleId/deliver", markSaleAsDelivered);
 router.put("/sales/deliver", markSaleAsDelivered);
 router.post("/sales", createDriverSale);
+router.post("/returns", createDriverReturn);
 router.get("/:driverId/collection-summary", getDriverCollectionSummary);
 router.put("/:driverId/settle-collections", settleDriverCollectionsByMethod);
 router.get("/:driverId/in-hand-summary", getDriverInHandSummary);

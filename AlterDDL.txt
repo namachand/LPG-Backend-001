@@ -337,3 +337,31 @@ CREATE TABLE IF NOT EXISTS `customer_transfer_agencies` (
   KEY `idx_cta_transfer` (`transfer_id`),
   KEY `idx_cta_existing_customer` (`existing_customer_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Petty cash the cashier sets aside at Close Day. Recorded on the closing row
+-- so the next Start Day can read back how much was carried over
+-- (GET /api/cashier/opening/last-closing returns it). Kept separate from
+-- total_cash, which stays the counted closing balance.
+ALTER TABLE `cashier_closings`
+  ADD COLUMN `petty_cash` decimal(12,2) NOT NULL DEFAULT 0.00 AFTER `total_cash`;
+
+-- Cash In -> "Other Receipts": advances, due collections and miscellaneous cash
+-- taken over the counter. These receipts have no customer or sale attached, so
+-- they get their own table instead of being recorded as a sale.
+--   POST /api/cashier/receipts         creates a receipt
+--   GET  /api/cashier/receipts/recent  lists them (defaults to today)
+CREATE TABLE IF NOT EXISTS `cashier_receipts` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `cashier_id` int DEFAULT NULL,
+  `receipt_type` enum('ADVANCE','DUE_COLLECTION','OTHER') NOT NULL,
+  `amount` decimal(12,2) NOT NULL DEFAULT 0.00,
+  `description` varchar(255) DEFAULT NULL,
+  `payment_mode` enum('CASH','UPI','BANK_TRANSFER','CARD') NOT NULL DEFAULT 'CASH',
+  `transfer_id` varchar(255) DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_cashier_receipts_created_at` (`created_at`),
+  KEY `idx_cashier_receipts_type` (`receipt_type`),
+  KEY `idx_cashier_receipts_cashier` (`cashier_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
