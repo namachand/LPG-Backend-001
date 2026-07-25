@@ -53,9 +53,9 @@ export const getComplaintCustomers = async (req, res) => {
     let whereClause = "WHERE role = ?";
 
     if (search) {
-      whereClause += " AND (name LIKE ? OR phone LIKE ? OR email LIKE ?)";
+      whereClause += " AND (name LIKE ? OR phone LIKE ? OR email LIKE ? OR CONCAT('LPG-', LPAD(u.id, 5, '0')) LIKE ?)";
       const likeSearch = `%${search}%`;
-      params.push(likeSearch, likeSearch, likeSearch);
+      params.push(likeSearch, likeSearch, likeSearch, likeSearch);
     }
 
     params.push(limit);
