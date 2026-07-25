@@ -14,6 +14,8 @@ import {
   getCashOutExpenseRequests,
   reviewCashOutExpenseRequest,
   recordCashierReceipt,
+  createCashierReceipt,
+  getRecentCashierReceipts,
   getTodaysCashFlow,
   recordOtherPayment,
   getOtherPayments,
@@ -48,6 +50,9 @@ router.get("/other-payments/summary", getOtherPaymentsSummary);
 router.get("/office-sales/today", getTodayOfficeSales);
 router.get("/office-expenses/today", getTodayOfficeExpenses);
 router.post("/receipt", recordCashierReceipt);
+// Cash In -> Other Receipts (advance / due collection / other)
+router.post("/receipts", createCashierReceipt);
+router.get("/receipts/recent", getRecentCashierReceipts);
 router.get("/cash-flow/today", getTodaysCashFlow);
 router.get("/customers/find", findCustomerForCashierApp);
 router.get("/cashier-requests/pr-penalties", getCashierPenaltyRequests);

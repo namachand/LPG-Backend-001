@@ -1,4 +1,5 @@
 import db from "../config/db.js";
+import { getDriverCarryForward } from "../utils/driverCarryForward.js";
 
 const getBatchNo = (saleId) => `B-${saleId}`;
 const toNumber = (value) => Number(value || 0);
@@ -15,6 +16,30 @@ const getTodayIsoDate = () => {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
+// Normalises a DB timestamp/date into a local YYYY-MM-DD string so it can be
+// compared against getTodayIsoDate() without timezone drift.
+const toIsoDateString = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value.slice(0, 10);
+  }
+
+  const parsed = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  const y = parsed.getFullYear();
+  const m = String(parsed.getMonth() + 1).padStart(2, "0");
+  const d = String(parsed.getDate()).padStart(2, "0");
+
   return `${y}-${m}-${d}`;
 };
 
@@ -566,43 +591,6 @@ export const getDriverDeliveriesApp = async (req, res) => {
       [numericDriverId, startDate, endDate]
     );
 
-    // In Hand: allocation-date range tracking (same scope as selected date range)
-    const [inHandRows] = await db.execute(
-      `
-      SELECT
-        COALESCE(SUM(asi.quantity), 0) AS allocated,
-        COALESCE(SUM(COALESCE(dd.delivered_qty, 0)), 0) AS delivered,
-        COALESCE(SUM(COALESCE(rd.return_qty, 0)), 0) AS returned,
-        COALESCE(SUM(COALESCE(rd.defective_qty, 0)), 0) AS defective
-      FROM sales_items asi
-      INNER JOIN sales a ON a.id = asi.sale_id
-      LEFT JOIN (
-        SELECT child.allocation_sales_item_id,
-               SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
-        FROM sales_items child
-        INNER JOIN sales cs ON cs.id = child.sale_id
-        WHERE child.allocation_sales_item_id IS NOT NULL AND cs.status = 'DELIVERED'
-        GROUP BY child.allocation_sales_item_id
-      ) dd ON dd.allocation_sales_item_id = asi.id
-      LEFT JOIN (
-        SELECT st.allocation_sales_item_id,
-               SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity,0) ELSE 0 END) AS return_qty,
-               SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity,0) ELSE 0 END) AS defective_qty
-        FROM stock_transactions st
-        WHERE st.stock_from = 'driver'
-          AND st.type = 'PURCHASE_RETURN'
-          AND st.isApproved IN (0, 1)
-          AND st.allocation_sales_item_id IS NOT NULL
-        GROUP BY st.allocation_sales_item_id
-      ) rd ON rd.allocation_sales_item_id = asi.id
-      WHERE a.driver_id = ?
-        AND a.status = 'ASSIGNED'
-        AND asi.allocation_sales_item_id IS NULL
-        AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
-      `,
-      [numericDriverId, startDate, endDate]
-    );
-
     // Dashboard collection should match driver collection flow:
     // include ASSIGNED (not yet sent) + PENDING (sent, awaiting cashier approval).
     const [pendingCollectionRows] = await db.execute(
@@ -680,18 +668,63 @@ export const getDriverDeliveriesApp = async (req, res) => {
       [numericDriverId, startDate, endDate]
     );
 
-    const allocated = Number(statsRows[0]?.allocated || 0);
+    // Cylinders the driver was still holding when the range opened. They are
+    // carried forward and counted as allocated for this range.
+    const { total: carriedForward } = await getDriverCarryForward(db, {
+      driverId: numericDriverId,
+      asOfDate: startDate,
+      openingBalance: true,
+    });
+
+    // Batch-linked deliveries and returns that happened inside the range, so
+    // clearing carried-forward stock lowers the in-hand figure for this range.
+    const [batchDeliveredRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(COALESCE(child.delivered_qty, child.quantity, 0)), 0) AS delivered
+      FROM sales_items child
+      INNER JOIN sales cs ON cs.id = child.sale_id
+      WHERE cs.driver_id = ?
+        AND cs.status = 'DELIVERED'
+        AND child.allocation_sales_item_id IS NOT NULL
+        AND DATE(COALESCE(cs.delivered_at, cs.created_at)) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    const [batchReturnedRows] = await db.execute(
+      `
+      SELECT
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS returned,
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS defective
+      FROM stock_transactions st
+      WHERE st.driver_id = ?
+        AND st.stock_from = 'driver'
+        AND st.type = 'PURCHASE_RETURN'
+        AND st.isApproved IN (0, 1)
+        AND st.allocation_sales_item_id IS NOT NULL
+        AND DATE(st.created_at) BETWEEN ? AND ?
+      `,
+      [numericDriverId, startDate, endDate]
+    );
+
+    const allocatedInRange = Number(statsRows[0]?.allocated || 0);
+    const allocated = allocatedInRange + carriedForward;
     const returned = Number(statsRows[0]?.returned || 0);
     const defective = Number(statsRows[0]?.defective || 0);
 
     // delivered: from actual delivered sales in date range
     const delivered = Number(deliveredRows[0]?.delivered || 0);
 
-    // inHand: from allocation/delivery/return tracking in selected date range
-    const ihAllocated = Number(inHandRows[0]?.allocated || 0);
-    const ihDelivered = Number(inHandRows[0]?.delivered || 0);
-    const ihReturned = Number(inHandRows[0]?.returned || 0);
-    const ihDefective = Number(inHandRows[0]?.defective || 0);
+    // inHand: opening balance + this range's allocations, minus everything
+    // delivered or returned during the range.
+    const ihAllocated = allocated;
+    const ihDelivered = Number(batchDeliveredRows[0]?.delivered || 0);
+    const ihReturned = Number(batchReturnedRows[0]?.returned || 0);
+    const ihDefective = Number(batchReturnedRows[0]?.defective || 0);
     const inHand = Math.max(ihAllocated - ihDelivered - ihReturned - ihDefective, 0);
     const inHandOriginal = Math.max(ihAllocated, 0);
 
@@ -756,6 +789,8 @@ export const getDriverDeliveriesApp = async (req, res) => {
 
     const stats = {
       allocated,
+      allocatedToday: allocatedInRange,
+      carriedForward,
       delivered,
       pendingCollection,
       empties,
@@ -2039,76 +2074,73 @@ export const getDriverInHandSummary = async (req, res) => {
       });
     }
 
-    const [summaryRows] = await db.execute(
+    // Cylinders freshly allocated inside the selected range.
+    const [allocationRows] = await db.execute(
       `
-      SELECT
-        COALESCE(SUM(allocated_qty), 0) AS allocated,
-        COALESCE(SUM(delivered_qty), 0) AS delivered,
-        COALESCE(SUM(return_qty), 0) AS returned,
-        COALESCE(SUM(defective_qty), 0) AS defective
-      FROM (
-        SELECT
-          asi.id,
-          COALESCE(asi.quantity, 0) AS allocated_qty,
-          COALESCE(delivered_data.delivered_qty, 0) AS delivered_qty,
-          COALESCE(return_data.return_qty, 0) AS return_qty,
-          COALESCE(return_data.defective_qty, 0) AS defective_qty
-        FROM sales_items asi
-        INNER JOIN sales a
-          ON a.id = asi.sale_id
-
-        LEFT JOIN (
-          SELECT
-            child.allocation_sales_item_id,
-            SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
-          FROM sales_items child
-          INNER JOIN sales cs
-            ON cs.id = child.sale_id
-          WHERE child.allocation_sales_item_id IS NOT NULL
-            AND cs.status = 'DELIVERED'
-          GROUP BY child.allocation_sales_item_id
-        ) delivered_data
-          ON delivered_data.allocation_sales_item_id = asi.id
-
-        LEFT JOIN (
-          SELECT
-            st.allocation_sales_item_id,
-            SUM(
-              CASE
-                WHEN st.is_defective = 0
-                THEN COALESCE(st.quantity, 0)
-                ELSE 0
-              END
-            ) AS return_qty,
-            SUM(
-              CASE
-                WHEN st.is_defective = 1
-                THEN COALESCE(st.quantity, 0)
-                ELSE 0
-              END
-            ) AS defective_qty
-          FROM stock_transactions st
-          WHERE st.stock_from = 'driver'
-            AND st.type = 'PURCHASE_RETURN'
-            AND st.isApproved IN (0, 1)
-            AND st.allocation_sales_item_id IS NOT NULL
-          GROUP BY st.allocation_sales_item_id
-        ) return_data
-          ON return_data.allocation_sales_item_id = asi.id
-
-        WHERE a.driver_id = ?
-          AND a.status = 'ASSIGNED'
-          AND asi.allocation_sales_item_id IS NULL
-          AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
-      ) x
+      SELECT COALESCE(SUM(asi.quantity), 0) AS allocated
+      FROM sales_items asi
+      INNER JOIN sales a
+        ON a.id = asi.sale_id
+      WHERE a.driver_id = ?
+        AND a.status = 'ASSIGNED'
+        AND asi.allocation_sales_item_id IS NULL
+        AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
       `,
       [driverId, startDate, endDate]
     );
 
-    const allocated = toNumber(summaryRows[0]?.allocated);
-    const delivered = toNumber(summaryRows[0]?.delivered);
-    const returned = toNumber(summaryRows[0]?.returned);
-    const defective = toNumber(summaryRows[0]?.defective);
+    // Cylinders still in hand from before the range - carried forward and
+    // added to the allocated figure instead of being lost from the summary.
+    const { total: carriedForward } = await getDriverCarryForward(db, {
+      driverId,
+      asOfDate: startDate,
+      openingBalance: true,
+    });
+
+    // Deliveries made inside the range out of ANY open batch, including the
+    // carried-forward ones, so delivering yesterday's stock lowers today's
+    // in-hand figure.
+    const [deliveredRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(COALESCE(child.delivered_qty, child.quantity, 0)), 0) AS delivered
+      FROM sales_items child
+      INNER JOIN sales cs
+        ON cs.id = child.sale_id
+      WHERE cs.driver_id = ?
+        AND cs.status = 'DELIVERED'
+        AND child.allocation_sales_item_id IS NOT NULL
+        AND DATE(COALESCE(cs.delivered_at, cs.created_at)) BETWEEN ? AND ?
+      `,
+      [driverId, startDate, endDate]
+    );
+
+    // Returns raised inside the range against any open batch. Pending requests
+    // count as well, matching the batch-level pending figures in the app.
+    const [returnedRows] = await db.execute(
+      `
+      SELECT
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS returned,
+        COALESCE(SUM(
+          CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END
+        ), 0) AS defective
+      FROM stock_transactions st
+      WHERE st.driver_id = ?
+        AND st.stock_from = 'driver'
+        AND st.type = 'PURCHASE_RETURN'
+        AND st.isApproved IN (0, 1)
+        AND st.allocation_sales_item_id IS NOT NULL
+        AND DATE(st.created_at) BETWEEN ? AND ?
+      `,
+      [driverId, startDate, endDate]
+    );
+
+    const allocatedInRange = toNumber(allocationRows[0]?.allocated);
+    const allocated = allocatedInRange + carriedForward;
+    const delivered = toNumber(deliveredRows[0]?.delivered);
+    const returned = toNumber(returnedRows[0]?.returned);
+    const defective = toNumber(returnedRows[0]?.defective);
 
     const inHand = Math.max(
       allocated - delivered - returned - defective,
@@ -2177,6 +2209,8 @@ export const getDriverInHandSummary = async (req, res) => {
       data: {
         summary: {
           allocated,
+          allocatedToday: allocatedInRange,
+          carriedForward,
           delivered,
           returned,
           defective,
@@ -3504,12 +3538,19 @@ export const getAllocatedCylinders = async (req, res) => {
       [driverId]
     );
 
+    const today = getTodayIsoDate();
+
     const items = rows.map((row) => {
       const totalAllocated = toNumber(row.total_allocated);
       const delivered = toNumber(row.delivered_qty);
       const returned = toNumber(row.return_qty);
       const defective = toNumber(row.defective_qty);
       const pending = Math.max(totalAllocated - delivered - returned - defective, 0);
+
+      // Batches handed over on an earlier day are still open: they were carried
+      // forward instead of blocking today's allocation.
+      const allocatedDate = toIsoDateString(row.allocated_at);
+      const isCarryForward = Boolean(allocatedDate && allocatedDate < today);
 
       return {
         id: Number(row.allocation_sales_item_id),
@@ -3531,6 +3572,9 @@ export const getAllocatedCylinders = async (req, res) => {
         defective,
         pending,
 
+        allocatedDate,
+        isCarryForward,
+
         lastAllocatedAt: row.allocated_at,
         latestSaleId: Number(row.allocation_sale_id),
       };
@@ -3543,6 +3587,13 @@ export const getAllocatedCylinders = async (req, res) => {
         acc.returned += item.returned;
         acc.defective += item.defective;
         acc.pending += item.pending;
+
+        if (item.isCarryForward) {
+          acc.carriedForward += item.pending;
+        } else {
+          acc.allocatedToday += item.totalAllocated;
+        }
+
         return acc;
       },
       {
@@ -3551,6 +3602,8 @@ export const getAllocatedCylinders = async (req, res) => {
         returned: 0,
         defective: 0,
         pending: 0,
+        carriedForward: 0,
+        allocatedToday: 0,
       }
     );
 

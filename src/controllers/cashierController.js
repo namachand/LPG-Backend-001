@@ -5,11 +5,45 @@ const cashierDayLog = {
   closing: null,
 };
 
+// Petty cash the cashier keeps aside at Close Day. Stored on the closing row so
+// the next Start Day can read back how much was held over.
+const ensureCashierClosingPettyCashColumn = async (connection) => {
+  const [cols] = await connection.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cashier_closings' AND COLUMN_NAME = 'petty_cash'`
+  );
+
+  if (!cols.length) {
+    await connection.query(
+      `ALTER TABLE cashier_closings ADD COLUMN petty_cash DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER total_cash`
+    );
+  }
+};
+
 const getLatestClosingBalance = async (connection) => {
   const [rows] = await connection.query(
     `SELECT total_cash FROM cashier_closings ORDER BY id DESC LIMIT 1`
   );
   return rows.length ? Number(rows[0].total_cash || 0) : null;
+};
+
+// The most recent closing row, including the petty cash carried over from it.
+const getLatestClosing = async (connection) => {
+  await ensureCashierClosingPettyCashColumn(connection);
+
+  const [rows] = await connection.query(
+    `SELECT total_cash, petty_cash, created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`
+  );
+
+  if (!rows.length) {
+    return null;
+  }
+
+  return {
+    totalCash: Number(rows[0].total_cash || 0),
+    pettyCash: Number(rows[0].petty_cash || 0),
+    closedAt: rows[0].created_at,
+  };
 };
 
 // created_at of the most recent day-close. Null if the day was never closed.
@@ -1765,11 +1799,15 @@ export const getLastClosingBalance = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const latest = await getLatestClosingBalance(connection);
+    const latest = await getLatestClosing(connection);
 
     return res.status(200).json({
       success: true,
-      total_cash: latest ?? 0,
+      total_cash: latest?.totalCash ?? 0,
+      // Petty cash held back at the last Close Day, so Start Day can show/reuse
+      // it. Exposed in both shapes to match the existing snake_case payload.
+      petty_cash: latest?.pettyCash ?? 0,
+      pettyCash: latest?.pettyCash ?? 0,
       hasPrevious: latest !== null,
     });
   } catch (error) {
@@ -1876,7 +1914,7 @@ export const startCashierDay = async (req, res) => {
 };
 
 export const closeCashierDay = async (req, res) => {
-  const { closingAmount, denominations, differenceReason } = req.body;
+  const { closingAmount, denominations, differenceReason, pettyCash } = req.body;
 
   if (closingAmount === undefined || !denominations) {
     return res.status(400).json({
@@ -1885,16 +1923,31 @@ export const closeCashierDay = async (req, res) => {
     });
   }
 
+  // Petty cash is optional - an unsent or blank value closes the day with 0.
+  const pettyCashAmount =
+    pettyCash === undefined || pettyCash === null || pettyCash === ''
+      ? 0
+      : Number(pettyCash);
+
+  if (Number.isNaN(pettyCashAmount) || pettyCashAmount < 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'pettyCash must be a non-negative amount',
+    });
+  }
+
   const connection = await db.getConnection();
 
   try {
+    await ensureCashierClosingPettyCashColumn(connection);
+
     await connection.beginTransaction();
     const [result] = await connection.execute(
       `
-      INSERT INTO cashier_closings (total_cash)
-      VALUES (?)
+      INSERT INTO cashier_closings (total_cash, petty_cash)
+      VALUES (?, ?)
       `,
-      [closingAmount]
+      [closingAmount, pettyCashAmount]
     );
 
     await connection.commit();
@@ -1904,6 +1957,7 @@ export const closeCashierDay = async (req, res) => {
       closingAmount,
       denominations,
       differenceReason: differenceReason || null,
+      pettyCash: pettyCashAmount,
       closingId: result.insertId,
     };
 
@@ -2713,6 +2767,255 @@ export const recordCashierReceipt = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to record cashier receipt',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Cash In → "Other Receipts": advances, due collections and miscellaneous cash
+// the cashier takes in over the counter. These have no customer/sale attached,
+// so they live in their own table rather than being faked as a sale.
+// ---------------------------------------------------------------------------
+
+const RECEIPT_TYPES = ['ADVANCE', 'DUE_COLLECTION', 'OTHER'];
+const RECEIPT_PAYMENT_MODES = ['CASH', 'UPI', 'BANK_TRANSFER', 'CARD'];
+
+const RECEIPT_TYPE_LABELS = {
+  ADVANCE: 'ADVANCE',
+  DUE_COLLECTION: 'DUE COLLECTION',
+  OTHER: 'OTHER',
+};
+
+const RECEIPT_PAYMENT_MODE_LABELS = {
+  CASH: 'Cash',
+  UPI: 'UPI',
+  BANK_TRANSFER: 'Bank Transfer',
+  CARD: 'Card',
+};
+
+// Accepts what the UI sends in any casing/spacing - "Due Collection",
+// "due-collection", "DUE_COLLECTION" all normalise to DUE_COLLECTION.
+const normalizeReceiptEnum = (value) =>
+  String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+
+const ensureCashierReceiptsTable = async (connection) => {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS cashier_receipts (
+      id INT NOT NULL AUTO_INCREMENT,
+      cashier_id INT NULL,
+      receipt_type ENUM('ADVANCE','DUE_COLLECTION','OTHER') NOT NULL,
+      amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      description VARCHAR(255) NULL,
+      payment_mode ENUM('CASH','UPI','BANK_TRANSFER','CARD') NOT NULL DEFAULT 'CASH',
+      transfer_id VARCHAR(255) NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_cashier_receipts_created_at (created_at),
+      KEY idx_cashier_receipts_type (receipt_type),
+      KEY idx_cashier_receipts_cashier (cashier_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+};
+
+const mapReceiptRow = (row) => ({
+  id: Number(row.id),
+  type: row.receipt_type,
+  typeLabel: RECEIPT_TYPE_LABELS[row.receipt_type] || row.receipt_type,
+  amount: Number(row.amount || 0),
+  description: row.description || null,
+  paymentMode: row.payment_mode,
+  paymentModeLabel:
+    RECEIPT_PAYMENT_MODE_LABELS[row.payment_mode] || row.payment_mode,
+  transferId: row.transfer_id || null,
+  createdAt: row.created_at,
+  date: row.date,
+});
+
+// POST /api/cashier/receipts - "+ Add Receipt"
+export const createCashierReceipt = async (req, res) => {
+  const {
+    type,
+    receipt_type,
+    amount,
+    description,
+    payment_mode,
+    paymentMode,
+    transfer_id,
+    transferId,
+  } = req.body || {};
+
+  const normalizedType = normalizeReceiptEnum(type ?? receipt_type);
+
+  if (!RECEIPT_TYPES.includes(normalizedType)) {
+    return res.status(400).json({
+      success: false,
+      message: `type must be one of ${RECEIPT_TYPES.join(', ')}`,
+    });
+  }
+
+  const numericAmount = Number(amount);
+
+  if (amount === undefined || amount === null || amount === '' || Number.isNaN(numericAmount)) {
+    return res.status(400).json({
+      success: false,
+      message: 'amount is required and must be a valid number',
+    });
+  }
+
+  if (numericAmount <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'amount must be greater than 0',
+    });
+  }
+
+  // Payment mode defaults to Cash, matching the form's default selection.
+  const rawMode = payment_mode ?? paymentMode;
+  const normalizedMode = rawMode ? normalizeReceiptEnum(rawMode) : 'CASH';
+
+  if (!RECEIPT_PAYMENT_MODES.includes(normalizedMode)) {
+    return res.status(400).json({
+      success: false,
+      message: `payment_mode must be one of ${RECEIPT_PAYMENT_MODES.join(', ')}`,
+    });
+  }
+
+  const connection = await db.getConnection();
+
+  try {
+    await ensureCashierReceiptsTable(connection);
+
+    const cashierId = req.user?.id || null;
+    const trimmedDescription = String(description || '').trim() || null;
+    const trimmedTransferId = String(transfer_id ?? transferId ?? '').trim() || null;
+
+    const [result] = await connection.execute(
+      `
+      INSERT INTO cashier_receipts (
+        cashier_id,
+        receipt_type,
+        amount,
+        description,
+        payment_mode,
+        transfer_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+      `,
+      [
+        cashierId,
+        normalizedType,
+        numericAmount,
+        trimmedDescription,
+        normalizedMode,
+        trimmedTransferId,
+      ]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Receipt added successfully',
+      data: {
+        id: result.insertId,
+        type: normalizedType,
+        typeLabel: RECEIPT_TYPE_LABELS[normalizedType],
+        amount: numericAmount,
+        description: trimmedDescription,
+        paymentMode: normalizedMode,
+        paymentModeLabel: RECEIPT_PAYMENT_MODE_LABELS[normalizedMode],
+        transferId: trimmedTransferId,
+      },
+    });
+  } catch (error) {
+    console.error('createCashierReceipt error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add receipt',
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// GET /api/cashier/receipts/recent - the "Recent Receipts / Today" list.
+// Defaults to today; pass startDate/endDate (YYYY-MM-DD) for any other window
+// and limit (1-100) to change how many rows come back.
+export const getRecentCashierReceipts = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    await ensureCashierReceiptsTable(connection);
+
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ''))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ''))
+      ? String(req.query.endDate)
+      : null;
+
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+
+    // No explicit range => today, which is what the panel shows by default.
+    const whereClause = startDate
+      ? 'WHERE DATE(created_at) BETWEEN ? AND ?'
+      : 'WHERE DATE(created_at) = CURDATE()';
+    const whereParams = startDate ? [startDate, endDate] : [];
+
+    const requestedLimit = Number(req.query.limit);
+    const limit =
+      Number.isInteger(requestedLimit) && requestedLimit > 0
+        ? Math.min(requestedLimit, 100)
+        : 20;
+
+    const [rows] = await connection.query(
+      `
+      SELECT
+        id,
+        receipt_type,
+        amount,
+        description,
+        payment_mode,
+        transfer_id,
+        created_at,
+        DATE_FORMAT(created_at, '%Y-%m-%d') AS date
+      FROM cashier_receipts
+      ${whereClause}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${limit}
+      `,
+      whereParams
+    );
+
+    const receipts = rows.map(mapReceiptRow);
+
+    return res.status(200).json({
+      success: true,
+      data: receipts,
+      summary: {
+        count: receipts.length,
+        totalAmount: receipts.reduce((sum, item) => sum + item.amount, 0),
+      },
+    });
+  } catch (error) {
+    console.error('getRecentCashierReceipts error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch recent receipts',
       error: error.message,
     });
   } finally {
