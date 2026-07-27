@@ -217,7 +217,7 @@ export const fetchDashboardOverview = async () => {
       cards: {
         pendingComplaints: 0,
         leakageComplaints: 0,
-        totalConnections: 0,
+        newConnections: 0,
         transferRequests: 0,
         nameChangeRequests: 0,
         pendingManagerVerification: 0,
