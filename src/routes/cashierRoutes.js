@@ -17,9 +17,9 @@ import {
   createCashierReceipt,
   getRecentCashierReceipts,
   getTodaysCashFlow,
+  recordOtherPayment,
   getOtherPayments,
   getOtherPaymentsSummary,
-  recordOtherPayment,
   findCustomerForCashierApp,
   getCashierPenaltyRequests,
   collectCashierPenaltyRequest,
@@ -29,7 +29,6 @@ import {
   collectCashierTransferVoucherRequest,
   getCashierNewConnectionRequests,
   collectCashierNewConnectionRequest,
-  getCashFlowEntriesByDate,
 } from "../controllers/cashierController.js";
 
 const router = express.Router();
@@ -55,7 +54,6 @@ router.post("/receipt", recordCashierReceipt);
 router.post("/receipts", createCashierReceipt);
 router.get("/receipts/recent", getRecentCashierReceipts);
 router.get("/cash-flow/today", getTodaysCashFlow);
-router.get("/cash-flow/entries", getCashFlowEntriesByDate);
 router.get("/customers/find", findCustomerForCashierApp);
 router.get("/cashier-requests/pr-penalties", getCashierPenaltyRequests);
 router.patch("/cashier-requests/pr-penalties/:requestId/collect", collectCashierPenaltyRequest);
@@ -65,5 +63,6 @@ router.get("/cashier-requests/transfer-vouchers", getCashierTransferVoucherReque
 router.patch("/cashier-requests/transfer-vouchers/:requestId/collect", collectCashierTransferVoucherRequest);
 router.get("/cashier-requests/new-connections", getCashierNewConnectionRequests);
 router.patch("/cashier-requests/new-connections/:requestId/collect", collectCashierNewConnectionRequest);
+
 
 export default router;

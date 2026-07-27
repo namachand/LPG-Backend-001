@@ -44,11 +44,11 @@ export const getDashboardOverview = async (_req, res) => {
       `
     );
 
-    const [totalConnectionsRows] = await connection.query(
+    const [newConnectionsRows] = await connection.query(
       `
       SELECT COUNT(*) AS count
-      FROM users
-      WHERE UPPER(COALESCE(role, '')) = 'CUSTOMER'
+      FROM customer_new_connections
+      WHERE UPPER(COALESCE(payment_status, 'PENDING_PAYMENT')) IN ('PENDING_PAYMENT', 'PENDING')
       `
     );
 
@@ -99,7 +99,7 @@ export const getDashboardOverview = async (_req, res) => {
         cards: {
           pendingComplaints: Number(pendingComplaintsRows[0]?.count || 0),
           leakageComplaints: Number(leakageComplaintsRows[0]?.count || 0),
-          totalConnections: Number(totalConnectionsRows[0]?.count || 0),
+          newConnections: Number(newConnectionsRows[0]?.count || 0),
           transferRequests: Number(transferRequestsRows[0]?.count || 0),
           nameChangeRequests: Number(nameChangeRequestsRows[0]?.count || 0),
           pendingManagerVerification: Number(pendingManagerVerificationRows[0]?.count || 0),

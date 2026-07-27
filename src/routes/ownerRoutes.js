@@ -19,12 +19,9 @@ import {
 	approveOwnerOfficeExpense,
 	createOwnerJobAssignmentUser,
 	updateOwnerJobAssignmentUserStatus,
-	updateOwnerJobAssignmentUser,
-	deleteOwnerJobAssignmentUser,
 } from "../controllers/ownerController.js";
 
 const router = express.Router();
-
 
 router.get("/dashboard", getOwnerDashboard);
 router.get("/dashboard/insights", getOwnerDashboardInsights);
@@ -33,8 +30,6 @@ router.put("/expenses/:expenseId/approve", approveOwnerOfficeExpense);
 router.get("/job-assignment/users", getOwnerJobAssignmentUsers);
 router.post("/job-assignment/users", createOwnerJobAssignmentUser);
 router.patch("/job-assignment/users/:id/status", updateOwnerJobAssignmentUserStatus);
-router.patch("/job-assignment/users/:id", updateOwnerJobAssignmentUser);
-router.delete("/job-assignment/users/:id", deleteOwnerJobAssignmentUser);
 router.get("/sales/dashboard", getOwnerSalesDashboard);
 router.get("/drivers/dashboard", getOwnerDriversDashboard);
 router.get("/stocks/dashboard", getOwnerStocksDashboard);
