@@ -1,3 +1,4 @@
+import "dotenv/config";
 import app from "./app.js";
 
 // Railway (and most hosts) inject the port to bind to via PORT.

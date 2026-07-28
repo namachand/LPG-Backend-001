@@ -2462,13 +2462,19 @@ export const getDriverCollectionHistory = async (req, res) => {
           sh.method AS payment_mode,
           sh.status AS settlement_history_status,
           sh.created_at,
-          u.name AS customer_name
+          u.name AS customer_name,
+          COALESCE(SUM(CASE WHEN p.type = 'DOMESTIC' THEN si.quantity ELSE 0 END), 0) AS dom_qty,
+          COALESCE(SUM(CASE WHEN p.type = 'COMMERCIAL' THEN si.quantity ELSE 0 END), 0) AS com_qty,
+          COALESCE(SUM(CASE WHEN p.type != 'DOMESTIC' AND p.type != 'COMMERCIAL' THEN si.quantity ELSE 0 END), 0) AS items_qty
         FROM settlement_history sh
         LEFT JOIN sales s ON s.id = sh.sale_id
         LEFT JOIN users u ON u.id = s.customer_id
+        LEFT JOIN sales_items si ON s.id = si.sale_id
+        LEFT JOIN products p ON si.product_id = p.id
         WHERE sh.driver_id = ?
-          AND sh.status = 'SETTLED'
+          AND sh.status IN ('SETTLED', 'PENDING')
           AND DATE(sh.created_at) = ?
+        GROUP BY sh.id, sh.sale_id, sh.amount, sh.method, sh.status, sh.created_at, u.name
         ORDER BY sh.created_at DESC, sh.id DESC
         `,
         [numericDriverId, collectionDate]
@@ -2500,6 +2506,9 @@ export const getDriverCollectionHistory = async (req, res) => {
           customerName: row.customer_name || "Unknown Customer",
           amount: Number(row.amount || 0),
           paymentMode: row.payment_mode || "N/A",
+          domQty: Number(row.dom_qty || 0),
+          comQty: Number(row.com_qty || 0),
+          itemsQty: Number(row.items_qty || 0),
           deliveredAt: row.created_at,
           status: displayStatus,
         })),
@@ -3434,7 +3443,8 @@ export const searchProductsForDriverApp = async (req, res) => {
         p.name,
         p.type,
         p.price,
-        c.name AS category_name
+        c.name AS category_name,
+        COALESCE((SELECT SUM(s.quantity) FROM stock s WHERE s.product_id = p.id), 0) AS stock_quantity
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       WHERE p.name LIKE ?
@@ -3454,6 +3464,8 @@ export const searchProductsForDriverApp = async (req, res) => {
         type: item.type,
         price: Number(item.price || 0),
         categoryName: item.category_name || "",
+        stock: Number(item.stock_quantity || 0),
+        inStock: Number(item.stock_quantity || 0) > 0,
       })),
     });
   } catch (error) {
