@@ -124,7 +124,9 @@ const restoreEmptyStock = async (connection, productId, qty) => {
 
 // Ensures the tables backing the empty-cylinder-load flow exist. Follows the
 // same CREATE TABLE IF NOT EXISTS convention used elsewhere in the codebase.
-const ensureEmptyCylinderLoadTables = async (connection) => {
+// Exported because the purchase-trip flow reads these tables too and cannot
+// assume a godown dispatch has already created them.
+export const ensureEmptyCylinderLoadTables = async (connection) => {
   await connection.execute(
     `
     CREATE TABLE IF NOT EXISTS empty_cylinder_loads (
@@ -744,6 +746,43 @@ export const rejectEmptyCylinderLoad = async (req, res) => {
   }
 };
 
+// ACCEPTED → COMPLETED, inside a transaction the caller already owns. Shared
+// with the purchase-trip flow, where ending an empty-cylinder trip completes
+// the underlying load atomically with the trip close. Returns a result object
+// instead of an HTTP response so both callers can shape their own reply.
+export const completeEmptyLoadInTransaction = async (
+  connection,
+  loadId,
+  invoiceUrl = null
+) => {
+  const [rows] = await connection.execute(
+    `SELECT id, status FROM empty_cylinder_loads WHERE id = ? LIMIT 1 FOR UPDATE`,
+    [Number(loadId)]
+  );
+
+  if (!rows.length) {
+    return { ok: false, message: "Empty cylinder load not found" };
+  }
+
+  if (rows[0].status !== LOAD_STATUS.ACCEPTED) {
+    return {
+      ok: false,
+      message: `Only an accepted load can be completed (current: ${rows[0].status})`,
+    };
+  }
+
+  await connection.execute(
+    `
+    UPDATE empty_cylinder_loads
+    SET status = 'COMPLETED', completed_at = NOW(), invoice_url = COALESCE(?, invoice_url)
+    WHERE id = ?
+    `,
+    [invoiceUrl, Number(loadId)]
+  );
+
+  return { ok: true };
+};
+
 // PUT /:loadId/complete — ACCEPTED → COMPLETED. Records optional IOC invoice
 // and completion time. Stock is already deducted; the stock_transactions rows
 // stand as the inventory-history / audit trail.
@@ -763,35 +802,21 @@ export const completeEmptyCylinderLoad = async (req, res) => {
 
     await connection.beginTransaction();
 
-    const [rows] = await connection.execute(
-      `SELECT id, status FROM empty_cylinder_loads WHERE id = ? LIMIT 1 FOR UPDATE`,
-      [loadId]
+    const completion = await completeEmptyLoadInTransaction(
+      connection,
+      loadId,
+      invoiceUrl
     );
 
-    if (!rows.length) {
+    if (!completion.ok) {
       await connection.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Empty cylinder load not found",
-      });
+      return res
+        .status(completion.message.includes("not found") ? 404 : 400)
+        .json({
+          success: false,
+          message: completion.message,
+        });
     }
-
-    if (rows[0].status !== LOAD_STATUS.ACCEPTED) {
-      await connection.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Only an accepted load can be completed (current: ${rows[0].status})`,
-      });
-    }
-
-    await connection.execute(
-      `
-      UPDATE empty_cylinder_loads
-      SET status = 'COMPLETED', completed_at = NOW(), invoice_url = COALESCE(?, invoice_url)
-      WHERE id = ?
-      `,
-      [invoiceUrl, loadId]
-    );
 
     await connection.commit();
 
