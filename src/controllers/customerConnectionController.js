@@ -1,396 +1,372 @@
 import db from "../config/db.js";
 
-const ALLOWED_ISSUE_TYPES = [
-  "LEAKAGE",
-  "LATE_DELIVERY",
-  "BILLING",
-  "REGULATOR",
-  "OTHER",
-];
-
-const ALLOWED_COMPLAINT_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"];
-
-// Maps UI-facing values to valid DB enum values
-const ISSUE_TYPE_ALIASES = {
-  CYLINDER_NOT_RECEIVED: "LATE_DELIVERY",
-  BOOKING_DELAY: "LATE_DELIVERY",
-  METER_ISSUE: "REGULATOR",
+const toPositiveAmount = (value) => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return null;
+  }
+  return Number(amount.toFixed(2));
 };
 
-const normalizeIssueType = (raw) => {
-  const upper = String(raw || "").trim().toUpperCase().replace(/\s+/g, "_");
-  return ISSUE_TYPE_ALIASES[upper] ?? upper;
+const ensureNewConnectionProductTable = async (connection) => {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS customer_new_connection_products (
+      id INT NOT NULL AUTO_INCREMENT,
+      connection_id INT NOT NULL,
+      product_id INT NOT NULL,
+      product_name_snapshot VARCHAR(255) DEFAULT NULL,
+      product_type_snapshot VARCHAR(80) DEFAULT NULL,
+      product_price_snapshot DECIMAL(10,2) DEFAULT 0,
+      status ENUM('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING',
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_new_connection_products_connection (connection_id),
+      KEY idx_new_connection_products_product (product_id),
+      KEY idx_new_connection_products_status (status),
+      CONSTRAINT fk_new_connection_products_connection
+        FOREIGN KEY (connection_id) REFERENCES customer_new_connections(id) ON DELETE CASCADE,
+      CONSTRAINT fk_new_connection_products_product
+        FOREIGN KEY (product_id) REFERENCES products(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+
+  // customer_new_connections gains these columns lazily (also added by the
+  // cashier flow). Ensure they exist before inserting so the new-connection
+  // path works on databases where the cashier migration hasn't run yet.
+  const requiredColumns = {
+    product_id: "ALTER TABLE customer_new_connections ADD COLUMN product_id INT DEFAULT NULL AFTER product_details",
+    id_proof_url: "ALTER TABLE customer_new_connections ADD COLUMN id_proof_url VARCHAR(500) DEFAULT NULL AFTER id_proof_details",
+  };
+
+  const [columnRows] = await connection.query(
+    `
+    SELECT COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'customer_new_connections'
+      AND COLUMN_NAME IN ('product_id', 'id_proof_url')
+    `
+  );
+
+  const existingColumns = new Set(columnRows.map((row) => String(row.COLUMN_NAME)));
+  for (const [columnName, ddl] of Object.entries(requiredColumns)) {
+    if (existingColumns.has(columnName)) continue;
+
+    try {
+      await connection.query(ddl);
+    } catch (error) {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
+        throw error;
+      }
+    }
+  }
 };
 
-let hasAssignedToColumnCache = false;
+const normalizeConnectionProducts = (body) => {
+  const requestedProducts = Array.isArray(body?.products) ? body.products : [];
+  const products = requestedProducts
+    .map((item) => ({
+      productId: Number(item.productId ?? item.product_id ?? item.id),
+    }))
+    .filter((item) => Number.isInteger(item.productId) && item.productId > 0);
 
-const ensureAssignedToColumn = async (connection) => {
-  if (hasAssignedToColumnCache) return;
-
-  const [columnRows] = await connection.query("SHOW COLUMNS FROM customer_complaints LIKE 'assigned_to'");
-  if (!columnRows.length) {
-    await connection.query("ALTER TABLE customer_complaints ADD COLUMN assigned_to INT NULL AFTER status");
+  const fallbackProductId = Number(body?.productId);
+  if (!products.length && Number.isInteger(fallbackProductId) && fallbackProductId > 0) {
+    products.push({ productId: fallbackProductId });
   }
 
-  hasAssignedToColumnCache = true;
-};
-
-export const getComplaintIssueTypes = async (_req, res) => {
-  return res.status(200).json({
-    success: true,
-    data: ALLOWED_ISSUE_TYPES,
+  const uniqueIds = new Set();
+  return products.filter((item) => {
+    if (uniqueIds.has(item.productId)) return false;
+    uniqueIds.add(item.productId);
+    return true;
   });
 };
 
-export const getComplaintCustomers = async (req, res) => {
+export const createCustomerConnection = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const search = (req.query.search || "").trim();
-    const limit = Math.max(parseInt(req.query.limit, 10) || 4, 1);
+    const {
+      customerName,
+      mobileNumber,
+      address,
+      productDetails,
+      productId,
+      idProofDetails,
+      idProofUrl,
+      depositAmount,
+      gstAmount,
+      totalAmount,
+    } = req.body || {};
 
-    const params = ["CUSTOMER"];
-    let whereClause = "WHERE role = ?";
-
-    if (search) {
-      whereClause += " AND (name LIKE ? OR phone LIKE ? OR email LIKE ? OR CONCAT('LPG-', LPAD(u.id, 5, '0')) LIKE ?)";
-      const likeSearch = `%${search}%`;
-      params.push(likeSearch, likeSearch, likeSearch, likeSearch);
+    if (!String(customerName || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "customerName is required",
+      });
     }
 
-    params.push(limit);
+    if (!String(mobileNumber || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "mobileNumber is required",
+      });
+    }
+
+    if (!String(address || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "address is required",
+      });
+    }
+
+    const parsedDepositAmount = toPositiveAmount(depositAmount);
+    const parsedGstAmount = toPositiveAmount(gstAmount);
+    const parsedTotalAmount = toPositiveAmount(totalAmount);
+
+    if (parsedDepositAmount === null || parsedGstAmount === null || parsedTotalAmount === null) {
+      return res.status(400).json({
+        success: false,
+        message: "depositAmount, gstAmount and totalAmount must be valid amounts",
+      });
+    }
+
+    const selectedProducts = normalizeConnectionProducts(req.body || {});
+    let productRows = [];
+
+    if (selectedProducts.length) {
+      const productIds = selectedProducts.map((item) => item.productId);
+      const [rows] = await connection.query(
+        `
+        SELECT id, name, type, price
+        FROM products
+        WHERE id IN (?)
+        `,
+        [productIds]
+      );
+
+      if (rows.length !== productIds.length) {
+        return res.status(400).json({
+          success: false,
+          message: "One or more selected products are invalid",
+        });
+      }
+
+      const rowMap = new Map(rows.map((row) => [Number(row.id), row]));
+      productRows = productIds.map((id) => rowMap.get(Number(id))).filter(Boolean);
+    }
+
+    const [existingUserRows] = await connection.query(
+      "SELECT id FROM users WHERE phone = ? LIMIT 1",
+      [String(mobileNumber).trim()]
+    );
+
+    if (existingUserRows.length) {
+      return res.status(409).json({
+        success: false,
+        message: "A user with this mobile number already exists",
+      });
+    }
+
+    await connection.beginTransaction();
+    await ensureNewConnectionProductTable(connection);
+
+    const [userResult] = await connection.query(
+      `
+      INSERT INTO users (name, phone, role, status)
+      VALUES (?, ?, 'CUSTOMER', 'ACTIVE')
+      `,
+      [String(customerName).trim(), String(mobileNumber).trim()]
+    );
+
+    const userId = Number(userResult.insertId);
+
+    await connection.query(
+      `
+      INSERT INTO addresses (user_id, address, is_default)
+      VALUES (?, ?, 1)
+      `,
+      [userId, String(address).trim()]
+    );
+
+    const [connectionResult] = await connection.query(
+      `
+      INSERT INTO customer_new_connections (
+        user_id,
+        product_details,
+        product_id,
+        id_proof_details,
+        id_proof_url,
+        deposit_amount,
+        gst_amount,
+        total_amount,
+        payment_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_PAYMENT')
+      `,
+      [
+        userId,
+        productRows.length
+          ? productRows.map((item) => `${item.name} (${item.type})`).join(", ")
+          : String(productDetails || "").trim() || null,
+        productRows[0]?.id ? Number(productRows[0].id) : productId ? Number(productId) : null,
+        String(idProofDetails || "").trim() || null,
+        String(idProofUrl || "").trim() || null,
+        parsedDepositAmount,
+        parsedGstAmount,
+        parsedTotalAmount,
+      ]
+    );
+
+    if (productRows.length) {
+      await connection.query(
+        `
+        INSERT INTO customer_new_connection_products (
+          connection_id,
+          product_id,
+          product_name_snapshot,
+          product_type_snapshot,
+          product_price_snapshot,
+          status
+        ) VALUES ?
+        `,
+        [
+          productRows.map((item) => [
+            Number(connectionResult.insertId),
+            Number(item.id),
+            item.name || null,
+            item.type || null,
+            Number(item.price || 0),
+            "PENDING",
+          ]),
+        ]
+      );
+    }
+
+    await connection.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: "New connection sent to cashier successfully",
+      data: {
+        id: Number(connectionResult.insertId),
+        userId,
+        consumerNumber: `LPG-${String(userId).padStart(5, "0")}`,
+        paymentStatus: "PENDING_PAYMENT",
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("createCustomerConnection error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create new connection",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const getRecentCustomerConnections = async (_req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    await ensureNewConnectionProductTable(connection);
 
     const [rows] = await connection.query(
       `
       SELECT
-        u.id,
+        cnc.id,
+        cnc.user_id,
+        u.name AS customer_name,
+        u.phone AS phone,
+        CONCAT('LPG-', LPAD(cnc.user_id, 5, '0')) AS consumer_number,
+        cnc.product_details,
+        cnc.product_id,
+        COALESCE(p.name, '') AS product_name,
+        cnc.deposit_amount,
+        cnc.gst_amount,
+        cnc.total_amount,
+        cnc.payment_status,
+        GROUP_CONCAT(
+          DISTINCT COALESCE(ncp.product_name_snapshot, p2.name)
+          ORDER BY COALESCE(ncp.product_name_snapshot, p2.name)
+          SEPARATOR ', '
+        ) AS selected_products,
+        DATE_FORMAT(cnc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+      FROM customer_new_connections cnc
+      INNER JOIN users u ON u.id = cnc.user_id
+      LEFT JOIN products p ON p.id = cnc.product_id
+      LEFT JOIN customer_new_connection_products ncp ON ncp.connection_id = cnc.id
+      LEFT JOIN products p2 ON p2.id = ncp.product_id
+      GROUP BY
+        cnc.id,
+        cnc.user_id,
         u.name,
         u.phone,
-        u.email,
-        u.company_name,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
-        COALESCE(a.address, '') AS address
-      FROM users u
-      LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
+        cnc.product_details,
+        cnc.product_id,
+        p.name,
+        cnc.deposit_amount,
+        cnc.gst_amount,
+        cnc.total_amount,
+        cnc.payment_status,
+        cnc.created_at
+      ORDER BY cnc.created_at DESC, cnc.id DESC
+      LIMIT 8
+      `
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        ...row,
+        product_details: row.selected_products || row.product_details,
+      })),
+    });
+  } catch (error) {
+    console.error("getRecentCustomerConnections error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch recent new connections",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+export const searchConnectionProducts = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const search = (req.query.search || "").trim();
+    const params = [];
+    let whereClause = "";
+
+    if (search) {
+      whereClause = "WHERE (p.name LIKE ? OR p.type LIKE ?)";
+      const like = `%${search}%`;
+      params.push(like, like);
+    }
+
+    const [rows] = await connection.query(
+      `
+      SELECT id, name, type, price
+      FROM products p
       ${whereClause}
-      ORDER BY u.name ASC
-      LIMIT ?
+      ORDER BY p.name ASC
+      LIMIT 20
       `,
       params
     );
 
-    return res.status(200).json({
-      success: true,
-      data: rows,
-    });
+    return res.status(200).json({ success: true, data: rows });
   } catch (error) {
-    console.error("getComplaintCustomers error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch customers",
-      error: error.message,
-    });
-  } finally {
-    connection.release();
-  }
-};
-
-export const getCustomerComplaints = async (req, res) => {
-  const connection = await db.getConnection();
-
-  try {
-    await ensureAssignedToColumn(connection);
-
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
-    const offset = (page - 1) * limit;
-    const search = (req.query.search || "").trim();
-
-    const filters = [];
-    const params = [];
-
-    if (search) {
-      filters.push(
-        "(u.name LIKE ? OR cc.issue_type LIKE ? OR cc.description LIKE ? OR CONCAT('CMP-', LPAD(cc.id, 4, '0')) LIKE ?)"
-      );
-      const likeSearch = `%${search}%`;
-      params.push(likeSearch, likeSearch, likeSearch, likeSearch);
-    }
-
-    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-
-    const [countRows] = await connection.query(
-      `
-      SELECT COUNT(*) AS total
-      FROM customer_complaints cc
-      INNER JOIN users u ON u.id = cc.customer_id
-      ${whereClause}
-      `,
-      [...params]
-    );
-
-    const total = Number(countRows[0]?.total || 0);
-
-    const [rows] = await connection.query(
-      `
-      SELECT
-        cc.id,
-        CONCAT('CMP-', LPAD(cc.id, 4, '0')) AS complaint_code,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
-        u.name AS customer_name,
-        u.phone AS customer_phone,
-        u.email AS customer_email,
-        COALESCE(a.address, '') AS address,
-        cc.issue_type,
-        cc.description,
-        cc.priority,
-        cc.approval_status,
-        cc.status,
-        CASE
-          WHEN cc.assigned_to IS NOT NULL AND cc.status = 'OPEN' THEN 'ASSIGNED_TO_DELIVERY_BOY'
-          ELSE cc.status
-        END AS workflow_status,
-        cc.assigned_to,
-        ad.id AS driver_id,
-        COALESCE(au.name, '') AS assigned_to_name,
-        DATE_FORMAT(cc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-      FROM customer_complaints cc
-      INNER JOIN users u ON u.id = cc.customer_id
-      LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
-      LEFT JOIN users au ON au.id = cc.assigned_to
-      LEFT JOIN drivers ad ON ad.user_id = cc.assigned_to
-      ${whereClause}
-      ORDER BY cc.created_at DESC, cc.id DESC
-      LIMIT ?
-      OFFSET ?
-      `,
-      [...params, limit, offset]
-    );
-
-    return res.status(200).json({
-      success: true,
-      data: rows,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    });
-  } catch (error) {
-    console.error("getCustomerComplaints error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch complaints",
-      error: error.message,
-    });
-  } finally {
-    connection.release();
-  }
-};
-
-export const createCustomerComplaint = async (req, res) => {
-  const connection = await db.getConnection();
-
-  try {
-    const { customerId, issueType, description } = req.body;
-
-    if (!customerId || !issueType || !description?.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "customerId, issueType and description are required",
-      });
-    }
-
-    const normalizedIssueType = normalizeIssueType(issueType);
-
-    if (!ALLOWED_ISSUE_TYPES.includes(normalizedIssueType)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid issueType",
-      });
-    }
-
-    const [customerRows] = await connection.query(
-      "SELECT id FROM users WHERE id = ? AND role = 'CUSTOMER' LIMIT 1",
-      [customerId]
-    );
-
-    if (!customerRows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Customer not found",
-      });
-    }
-
-    const priority = normalizedIssueType === "LEAKAGE" ? "HIGH" : "MEDIUM";
-
-    const [result] = await connection.query(
-      `
-      INSERT INTO customer_complaints (
-        customer_id,
-        issue_type,
-        description,
-        priority,
-        approval_status,
-        status
-      ) VALUES (?, ?, ?, ?, 'PENDING', 'OPEN')
-      `,
-      [customerId, normalizedIssueType, description.trim(), priority]
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Complaint registered successfully",
-      data: {
-        id: result.insertId,
-        complaintCode: `CMP-${String(result.insertId).padStart(4, "0")}`,
-        approvalStatus: "PENDING",
-      },
-    });
-  } catch (error) {
-    console.error("createCustomerComplaint error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create complaint",
-      error: error.message,
-    });
-  } finally {
-    connection.release();
-  }
-};
-
-export const assignComplaintToDeliveryBoy = async (req, res) => {
-  const connection = await db.getConnection();
-
-  try {
-    await ensureAssignedToColumn(connection);
-
-    const complaintId = Number(req.params.id);
-    if (!Number.isInteger(complaintId) || complaintId <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid complaint id",
-      });
-    }
-
-    const driverId = Number(req.body?.driverId);
-    if (!Number.isInteger(driverId) || driverId <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Please select a valid driver",
-      });
-    }
-
-    const [complaintRows] = await connection.query(
-      "SELECT id FROM customer_complaints WHERE id = ? LIMIT 1",
-      [complaintId]
-    );
-
-    if (!complaintRows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Complaint not found",
-      });
-    }
-
-    const [driverRows] = await connection.query(
-      `
-      SELECT d.id AS driver_id, d.user_id, u.name
-      FROM drivers d
-      INNER JOIN users u ON u.id = d.user_id
-      WHERE d.id = ? AND u.role = 'DRIVER' AND u.status = 'ACTIVE'
-      LIMIT 1
-      `,
-      [driverId]
-    );
-
-    if (!driverRows.length) {
-      return res.status(400).json({
-        success: false,
-        message: "Selected driver is not active or does not exist",
-      });
-    }
-
-    const assignedDriverId = Number(driverRows[0].user_id);
-    const assignedDriverName = driverRows[0].name || "Delivery Boy";
-
-    // Keep assignment in pre-resolution stage; completion is handled separately.
-    await connection.query(
-      "UPDATE customer_complaints SET assigned_to = ?, status = 'OPEN' WHERE id = ?",
-      [assignedDriverId, complaintId]
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Complaint assigned to delivery boy",
-      data: {
-        complaintId,
-        assignedTo: assignedDriverId,
-        assignedToName: assignedDriverName,
-        status: "ASSIGNED_TO_DELIVERY_BOY",
-      },
-    });
-  } catch (error) {
-    console.error("assignComplaintToDeliveryBoy error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to assign complaint",
-      error: error.message,
-    });
-  } finally {
-    connection.release();
-  }
-};
-
-export const updateComplaintStatus = async (req, res) => {
-  const connection = await db.getConnection();
-
-  try {
-    const complaintId = Number(req.params.id);
-    const nextStatus = String(req.body?.status || "").trim().toUpperCase();
-
-    if (!Number.isInteger(complaintId) || complaintId <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid complaint id",
-      });
-    }
-
-    if (!ALLOWED_COMPLAINT_STATUSES.includes(nextStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid status",
-      });
-    }
-
-    const [result] = await connection.query(
-      "UPDATE customer_complaints SET status = ? WHERE id = ?",
-      [nextStatus, complaintId]
-    );
-
-    if (!result.affectedRows) {
-      return res.status(404).json({
-        success: false,
-        message: "Complaint not found",
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Complaint status updated successfully",
-      data: {
-        complaintId,
-        status: nextStatus,
-      },
-    });
-  } catch (error) {
-    console.error("updateComplaintStatus error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update complaint status",
-      error: error.message,
-    });
+    console.error("searchConnectionProducts error:", error);
+    return res.status(500).json({ success: false, message: "Failed to search products", error: error.message });
   } finally {
     connection.release();
   }
