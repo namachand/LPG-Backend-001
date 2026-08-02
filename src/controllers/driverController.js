@@ -1903,10 +1903,18 @@ export const getDriverCollectionSummary = async (req, res) => {
         0
       );
 
+      let displayMessage = "";
+      if (status === "ASSIGNED") {
+        displayMessage = amount > 0 ? "Ready to Settle" : "No pending collection";
+      } else if (status === "PENDING") {
+        displayMessage = amount > 0 ? "Pending for approval" : "No collections pending approval";
+      }
+
       return {
         amount,
         count: items.length,
         status: amount > 0 ? status : null,
+        displayMessage,
         transactions: items.map((item) => ({
           id: Number(item.id),
           saleId: Number(item.sale_id),
@@ -1928,6 +1936,20 @@ export const getDriverCollectionSummary = async (req, res) => {
     const cashTotal = cashAssigned.amount + cashPending.amount;
     const upiTotal = upiAssigned.amount + upiPending.amount;
 
+    const [deliveredRows] = await db.execute(
+      `
+      SELECT COALESCE(SUM(si.delivered_qty), 0) AS delivered
+      FROM sales s
+      INNER JOIN sales_items si ON si.sale_id = s.id
+      WHERE s.driver_id = ?
+        AND s.status = 'DELIVERED'
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      `,
+      [driverId, startDate, endDate]
+    );
+
+    const totalDeliveries = Number(deliveredRows[0].delivered);
+
     return res.status(200).json({
       success: true,
       message: "Collection summary fetched successfully",
@@ -1936,6 +1958,7 @@ export const getDriverCollectionSummary = async (req, res) => {
           cashCollected: cashTotal,
           upiCollected: upiTotal,
           totalCollected: cashTotal + upiTotal,
+          totalDeliveries,
         },
         settlements: {
           cashAssigned,
@@ -2010,20 +2033,22 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
     );
 
     if (method === "CASH") {
-      const enteredCashTotal =
-        Number(denominations?.["500"] || 0) * 500 +
-        Number(denominations?.["100"] || 0) * 100 +
-        Number(denominations?.["50"] || 0) * 50 +
-        Number(denominations?.["20"] || 0) * 20 +
-        Number(denominations?.["10"] || 0) * 10 +
-        Number(denominations?.coins || 0);
+      if (denominations && Object.keys(denominations).length > 0) {
+        const enteredCashTotal =
+          Number(denominations?.["500"] || 0) * 500 +
+          Number(denominations?.["100"] || 0) * 100 +
+          Number(denominations?.["50"] || 0) * 50 +
+          Number(denominations?.["20"] || 0) * 20 +
+          Number(denominations?.["10"] || 0) * 10 +
+          Number(denominations?.coins || 0);
 
-      if (enteredCashTotal !== totalAmount) {
-        await connection.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Expected ₹${totalAmount} but got ₹${enteredCashTotal}`,
-        });
+        if (enteredCashTotal !== totalAmount) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Expected ₹${totalAmount} but got ₹${enteredCashTotal}`,
+          });
+        }
       }
     }
 
