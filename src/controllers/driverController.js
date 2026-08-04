@@ -1984,7 +1984,7 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
 
   try {
     const driverId = await resolveDriverId(req.params.driverId);
-    const { method, denominations } = req.body || {};
+    const { method, denominations, amount } = req.body || {};
 
     if (!driverId) {
       return res.status(400).json({
@@ -2032,6 +2032,16 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
       0
     );
 
+    const requestedAmount = amount !== undefined ? Number(amount) : totalAmount;
+
+    if (requestedAmount > totalAmount) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Requested amount (₹${requestedAmount}) cannot exceed total assigned amount (₹${totalAmount})`,
+      });
+    }
+
     if (method === "CASH") {
       if (denominations && Object.keys(denominations).length > 0) {
         const enteredCashTotal =
@@ -2042,26 +2052,41 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
           Number(denominations?.["10"] || 0) * 10 +
           Number(denominations?.coins || 0);
 
-        if (enteredCashTotal !== totalAmount) {
+        if (enteredCashTotal !== requestedAmount) {
           await connection.rollback();
           return res.status(400).json({
             success: false,
-            message: `Expected ₹${totalAmount} but got ₹${enteredCashTotal}`,
+            message: `Expected ₹${requestedAmount} but got ₹${enteredCashTotal}`,
           });
         }
       }
     }
 
-    await connection.execute(
-      `
-      UPDATE settlement_history
-      SET status = 'PENDING'
-      WHERE driver_id = ?
-        AND status = 'ASSIGNED'
-        ${methodFilter}
-      `,
-      [driverId]
-    );
+    let remainingToSettle = requestedAmount;
+    
+    for (const row of rows) {
+      if (remainingToSettle <= 0) break;
+      const rowAmount = Number(row.amount);
+      if (rowAmount <= remainingToSettle) {
+        await connection.execute(
+          `UPDATE settlement_history SET status = 'PENDING' WHERE id = ?`,
+          [row.id]
+        );
+        remainingToSettle -= rowAmount;
+      } else {
+        await connection.execute(
+          `UPDATE settlement_history SET amount = ? WHERE id = ?`,
+          [rowAmount - remainingToSettle, row.id]
+        );
+        await connection.execute(
+          `INSERT INTO settlement_history (driver_id, sale_id, payment_id, method, amount, status, created_at)
+           SELECT driver_id, sale_id, payment_id, method, ?, 'PENDING', NOW()
+           FROM settlement_history WHERE id = ?`,
+          [remainingToSettle, row.id]
+        );
+        remainingToSettle = 0;
+      }
+    }
 
     await connection.commit();
 
@@ -2069,7 +2094,7 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
       success: true,
       message: "Collection moved to pending cashier approval",
       data: {
-        amount: totalAmount,
+        amount: requestedAmount,
         method,
       },
     });
