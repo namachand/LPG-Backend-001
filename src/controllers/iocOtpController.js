@@ -51,9 +51,9 @@ export const getIocOtpSummary = async (_req, res) => {
   try {
     const [rows] = await connection.query(`
       SELECT
-        COUNT(CASE WHEN DATE(dso.created_at) = CURDATE() THEN 1 END) AS today_received,
-        COUNT(CASE WHEN DATE(dso.created_at) = CURDATE() AND dso.status = 'PENDING' THEN 1 END) AS today_pending,
-        COUNT(CASE WHEN DATE(dso.created_at) = CURDATE() AND dso.status = 'SENT' THEN 1 END) AS today_sent,
+        COUNT(CASE WHEN DATE(dso.created_at) = CURRENT_DATE THEN 1 END) AS today_received,
+        COUNT(CASE WHEN DATE(dso.created_at) = CURRENT_DATE AND dso.status = 'PENDING' THEN 1 END) AS today_pending,
+        COUNT(CASE WHEN DATE(dso.created_at) = CURRENT_DATE AND dso.status = 'SENT' THEN 1 END) AS today_sent,
         COUNT(CASE WHEN dso.status = 'PENDING' THEN 1 END) AS all_pending
       FROM driver_sale_otps dso
     `);
@@ -116,7 +116,7 @@ export const listIocOtps = async (req, res) => {
         dso.sale_id,
         dso.otp,
         dso.status,
-        DATE_FORMAT(dso.created_at, '%d/%m/%Y, %H:%i:%s') AS created_at_formatted,
+        TO_CHAR(dso.created_at, 'DD/MM/YYYY, HH24:MI:SS') AS created_at_formatted,
         cu.name AS customer_name,
         cu.phone AS customer_phone,
         CONCAT('LPG-', LPAD(cu.id, 5, '0')) AS consumer_number,

@@ -11,7 +11,7 @@ const hasPurchaseTripColumn = async (connection, columnName) => {
     `
     SELECT 1 AS has_column
     FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
+    WHERE TABLE_SCHEMA = current_schema()
       AND TABLE_NAME = 'purchase_trips'
       AND COLUMN_NAME = ?
     LIMIT 1
@@ -314,8 +314,8 @@ export const getPurchaseDashboard = async (req, res) => {
           FROM purchase_trips pt
           WHERE pt.purchase_manager_id = ?
             AND pt.status IN ('APPROVED', 'COMPLETED')
-            AND YEAR(pt.started_at) = YEAR(CURDATE())
-            AND MONTH(pt.started_at) = MONTH(CURDATE())
+            AND EXTRACT(YEAR FROM pt.started_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+            AND EXTRACT(MONTH FROM pt.started_at) = EXTRACT(MONTH FROM CURRENT_DATE)
         ) AS completedTrips
       `,
       [userId, userId, userId]
@@ -880,7 +880,7 @@ export const createPurchaseLoad = async (req, res) => {
           `
           INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity)
           VALUES (?, ?, 0, 0, 0, 0)
-          ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
+          ON CONFLICT (product_id, stock_area_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
           `,
           [item.productId, effectiveStockAreaId]
         );
@@ -1089,7 +1089,7 @@ export const updatePurchaseLoad = async (req, res) => {
           `
           INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity)
           VALUES (?, ?, 0, 0, 0, 0)
-          ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
+          ON CONFLICT (product_id, stock_area_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
           `,
           [item.productId, effectiveStockAreaId]
         );

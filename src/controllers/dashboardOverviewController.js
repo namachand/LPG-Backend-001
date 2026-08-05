@@ -85,7 +85,7 @@ export const getDashboardOverview = async (_req, res) => {
         cc.issue_type,
         cc.description,
         cc.status,
-        DATE_FORMAT(cc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+        TO_CHAR(cc.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
       FROM customer_complaints cc
       INNER JOIN users u ON u.id = cc.customer_id
       ORDER BY cc.created_at DESC, cc.id DESC

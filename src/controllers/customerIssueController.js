@@ -7,7 +7,7 @@ const ensureAssignedToColumn = async (connection) => {
 
   const [columnRows] = await connection.query("SHOW COLUMNS FROM customer_complaints LIKE 'assigned_to'");
   if (!columnRows.length) {
-    await connection.query("ALTER TABLE customer_complaints ADD COLUMN assigned_to INT NULL AFTER status");
+    await connection.query("ALTER TABLE customer_complaints ADD COLUMN assigned_to INT NULL ");
   }
 
   hasAssignedToColumnCache = true;
@@ -64,7 +64,7 @@ export const getCustomerIssuesDashboard = async (req, res) => {
         COALESCE(SUM(
           CASE
             WHEN cc.status = 'RESOLVED'
-             AND YEARWEEK(COALESCE(cc.updated_at, cc.created_at), 1) = YEARWEEK(CURDATE(), 1)
+             AND YEARWEEK(COALESCE(cc.updated_at, cc.created_at), 1) = YEARWEEK(CURRENT_DATE, 1)
             THEN 1 ELSE 0
           END
         ), 0) AS resolvedThisWeek
@@ -100,7 +100,7 @@ export const getCustomerIssuesDashboard = async (req, res) => {
         cu.name AS customer,
         COALESCE(cc.description, cc.issue_type) AS issue,
         COALESCE(cc.priority, 'MEDIUM') AS priority,
-        DATE_FORMAT(cc.created_at, '%Y-%m-%d') AS date,
+        TO_CHAR(cc.created_at, 'YYYY-MM-DD') AS date,
         COALESCE(au.name, 'Unassigned') AS assignedTo,
         cc.status
       FROM customer_complaints cc

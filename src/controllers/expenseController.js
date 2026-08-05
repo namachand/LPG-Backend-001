@@ -102,8 +102,8 @@ export const getExpensesDashboard = async (req, res) => {
     const [summaryRows] = await connection.query(
       `
       SELECT
-        COALESCE(SUM(CASE WHEN DATE(e.created_at) = CURDATE() THEN e.amount ELSE 0 END), 0) AS todaysExpenses,
-        COALESCE(SUM(CASE WHEN YEAR(e.created_at) = YEAR(CURDATE()) AND MONTH(e.created_at) = MONTH(CURDATE()) THEN e.amount ELSE 0 END), 0) AS monthlyTotal,
+        COALESCE(SUM(CASE WHEN DATE(e.created_at) = CURRENT_DATE THEN e.amount ELSE 0 END), 0) AS todaysExpenses,
+        COALESCE(SUM(CASE WHEN EXTRACT(YEAR FROM e.created_at) = EXTRACT(YEAR FROM CURRENT_DATE) AND EXTRACT(MONTH FROM e.created_at) = EXTRACT(MONTH FROM CURRENT_DATE) THEN e.amount ELSE 0 END), 0) AS monthlyTotal,
         COALESCE(SUM(CASE WHEN e.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingApproval
       FROM expenses e
       LEFT JOIN users u ON u.id = e.created_by
@@ -133,7 +133,7 @@ export const getExpensesDashboard = async (req, res) => {
         e.category,
         e.description,
         e.amount,
-        DATE_FORMAT(e.created_at, '%Y-%m-%d') AS date,
+        TO_CHAR(e.created_at, 'YYYY-MM-DD') AS date,
         COALESCE(u.name, 'Unknown') AS createdBy,
         e.status
       FROM expenses e

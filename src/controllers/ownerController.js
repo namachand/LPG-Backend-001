@@ -751,7 +751,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
         e.category,
         e.description,
         e.amount,
-        DATE_FORMAT(e.created_at, '%Y-%m-%d') AS date,
+        TO_CHAR(e.created_at, 'YYYY-MM-DD') AS date,
         e.created_at,
         COALESCE(u.name, 'Unknown') AS created_by,
         COALESCE(u.role, 'PURCHASE_MANAGER') AS created_by_role,
@@ -769,7 +769,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
         o.category,
         o.description,
         o.amount,
-        DATE_FORMAT(o.created_at, '%Y-%m-%d') AS date,
+        TO_CHAR(o.created_at, 'YYYY-MM-DD') AS date,
         o.created_at,
         COALESCE(u.name, 'Cashier Office') AS created_by,
         COALESCE(u.role, 'CASHIER') AS created_by_role,
@@ -928,7 +928,7 @@ export const approveOwnerOfficeExpense = async (req, res) => {
     if (!officeStatusColumns.length) {
       // Column missing — add it automatically and default all existing rows to PENDING
       await connection.query(
-        `ALTER TABLE office_expenses ADD COLUMN status ENUM('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING' AFTER description`
+        `ALTER TABLE office_expenses ADD COLUMN status VARCHAR(100) CHECK (status IN ('PENDING','APPROVED')) NOT NULL DEFAULT 'PENDING' `
       );
     }
 
@@ -1007,7 +1007,7 @@ export const getOwnerJobAssignmentUsers = async (req, res) => {
         u.status,
         ${hasProfileTable ? "up.display_role" : "NULL"} AS display_role,
         ${hasProfileTable ? "up.age" : "NULL"} AS age,
-        ${hasProfileTable ? "DATE_FORMAT(up.date_of_birth, '%Y-%m-%d')" : "NULL"} AS date_of_birth,
+        ${hasProfileTable ? "TO_CHAR(up.date_of_birth, 'YYYY-MM-DD')" : "NULL"} AS date_of_birth,
         ${hasProfileTable ? "up.gender" : "NULL"} AS gender,
         ${hasProfileTable ? "up.address" : "NULL"} AS address,
         ${hasProfileTable ? "up.vehicle_number" : "NULL"} AS vehicle_number,
@@ -1018,7 +1018,7 @@ export const getOwnerJobAssignmentUsers = async (req, res) => {
         ${hasExtendedUserColumns ? "u.bank_name" : "NULL"} AS bank_name,
         ${hasExtendedUserColumns ? "u.bank_account_number" : "NULL"} AS bank_account_number,
         ${hasExtendedUserColumns ? "u.bank_ifsc_code" : "NULL"} AS bank_ifsc_code,
-        DATE_FORMAT(u.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+        TO_CHAR(u.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
       FROM users u
       ${hasProfileTable ? "LEFT JOIN user_job_profiles up ON up.user_id = u.id" : ""}
       WHERE u.role IN ('GODOWN_MANAGER', 'PURCHASE_MANAGER', 'DRIVER', 'CASHIER', 'SUPPORT')

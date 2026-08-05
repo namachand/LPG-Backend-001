@@ -1741,29 +1741,29 @@ export const getDeliveryDrivers = async (req, res) => {
   try {
     const { filter = "today" } = req.query;
 
-    let dateSalesCondition = "DATE(s.created_at) = CURDATE()";
-    let dateReturnCondition = "DATE(st.created_at) = CURDATE()";
+    let dateSalesCondition = "DATE(s.created_at) = CURRENT_DATE";
+    let dateReturnCondition = "DATE(st.created_at) = CURRENT_DATE";
     // Allocations are dated by assigned_at (an approved booking is only handed
     // to the driver on the day it is approved), deliveries by created_at.
     let dateAllocationCondition =
-      "DATE(COALESCE(s.assigned_at, s.created_at)) = CURDATE()";
+      "DATE(COALESCE(s.assigned_at, s.created_at)) = CURRENT_DATE";
     // Start of the reported period - everything still in hand before it is
     // carried forward into the period.
     let carryForwardBoundary = CARRY_FORWARD_DATE_EXPR.TODAY;
 
     if (filter === "yesterday") {
-      dateSalesCondition = "DATE(s.created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)";
-      dateReturnCondition = "DATE(st.created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)";
+      dateSalesCondition = "DATE(s.created_at) = (CURRENT_DATE - INTERVAL '1 day')";
+      dateReturnCondition = "DATE(st.created_at) = (CURRENT_DATE - INTERVAL '1 day')";
       dateAllocationCondition =
-        "DATE(COALESCE(s.assigned_at, s.created_at)) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)";
+        "DATE(COALESCE(s.assigned_at, s.created_at)) = (CURRENT_DATE - INTERVAL '1 day')";
       carryForwardBoundary = CARRY_FORWARD_DATE_EXPR.YESTERDAY;
     }
 
     if (filter === "week") {
-      dateSalesCondition = "YEARWEEK(s.created_at, 1) = YEARWEEK(CURDATE(), 1)";
-      dateReturnCondition = "YEARWEEK(st.created_at, 1) = YEARWEEK(CURDATE(), 1)";
+      dateSalesCondition = "(EXTRACT(YEAR FROM s.created_at) = EXTRACT(YEAR FROM CURRENT_DATE) AND EXTRACT(WEEK FROM s.created_at) = EXTRACT(WEEK FROM CURRENT_DATE))";
+      dateReturnCondition = "(EXTRACT(YEAR FROM st.created_at) = EXTRACT(YEAR FROM CURRENT_DATE) AND EXTRACT(WEEK FROM st.created_at) = EXTRACT(WEEK FROM CURRENT_DATE))";
       dateAllocationCondition =
-        "YEARWEEK(COALESCE(s.assigned_at, s.created_at), 1) = YEARWEEK(CURDATE(), 1)";
+        "YEARWEEK(COALESCE(s.assigned_at, s.created_at), 1) = YEARWEEK(CURRENT_DATE, 1)";
       carryForwardBoundary = CARRY_FORWARD_DATE_EXPR.WEEK_START;
     }
 

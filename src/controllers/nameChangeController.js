@@ -208,7 +208,7 @@ export const getRecentNameChangeRequests = async (_req, res) => {
         r.service_fee,
         r.document_url,
         r.status,
-        DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+        TO_CHAR(r.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
       FROM customer_name_change_requests r
       INNER JOIN users u ON u.id = r.customer_id
       ORDER BY r.created_at DESC, r.id DESC

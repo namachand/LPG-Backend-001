@@ -199,7 +199,7 @@ export const getRecentCustomerPenalties = async (_req, res) => {
         p.penalty_reason,
         p.penalty_amount,
         p.payment_status,
-        DATE_FORMAT(p.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+        TO_CHAR(p.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
       FROM customer_pr_penalties p
       ORDER BY p.created_at DESC, p.id DESC
       LIMIT 8

@@ -29,7 +29,7 @@ const ensureAssignedToColumn = async (connection) => {
 
   const [columnRows] = await connection.query("SHOW COLUMNS FROM customer_complaints LIKE 'assigned_to'");
   if (!columnRows.length) {
-    await connection.query("ALTER TABLE customer_complaints ADD COLUMN assigned_to INT NULL AFTER status");
+    await connection.query("ALTER TABLE customer_complaints ADD COLUMN assigned_to INT NULL ");
   }
 
   hasAssignedToColumnCache = true;
@@ -153,7 +153,7 @@ export const getCustomerComplaints = async (req, res) => {
         cc.assigned_to,
         ad.id AS driver_id,
         COALESCE(au.name, '') AS assigned_to_name,
-        DATE_FORMAT(cc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+        TO_CHAR(cc.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
       FROM customer_complaints cc
       INNER JOIN users u ON u.id = cc.customer_id
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1

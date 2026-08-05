@@ -220,9 +220,9 @@ export const upsertSettlement = async (req, res) => {
         settlement_date
       )
       VALUES (?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        amount = VALUES(amount),
-        status = VALUES(status)
+      ON CONFLICT (driver_id, settlement_date) DO UPDATE SET
+        amount = EXCLUDED.amount,
+        status = EXCLUDED.status
       `,
       [driver_id, amount, status, settlement_date]
     );
