@@ -2002,18 +2002,12 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
 
     await connection.beginTransaction();
 
-    let methodFilter = "";
-
-    if (method === "CASH") methodFilter = "AND method = 'CASH'";
-    if (method === "UPI") methodFilter = "AND method = 'UPI'";
-
     const [rows] = await connection.execute(
       `
       SELECT id, amount
       FROM settlement_history
       WHERE driver_id = ?
         AND status = 'ASSIGNED'
-        ${methodFilter}
       FOR UPDATE
       `,
       [driverId]
@@ -2069,8 +2063,8 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
       const rowAmount = Number(row.amount);
       if (rowAmount <= remainingToSettle) {
         await connection.execute(
-          `UPDATE settlement_history SET status = 'PENDING' WHERE id = ?`,
-          [row.id]
+          `UPDATE settlement_history SET status = 'PENDING', method = ? WHERE id = ?`,
+          [method, row.id]
         );
         remainingToSettle -= rowAmount;
       } else {
@@ -2080,9 +2074,9 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
         );
         await connection.execute(
           `INSERT INTO settlement_history (driver_id, sale_id, payment_id, method, amount, status, created_at)
-           SELECT driver_id, sale_id, payment_id, method, ?, 'PENDING', NOW()
+           SELECT driver_id, sale_id, payment_id, ?, ?, 'PENDING', NOW()
            FROM settlement_history WHERE id = ?`,
-          [remainingToSettle, row.id]
+          [method, remainingToSettle, row.id]
         );
         remainingToSettle = 0;
       }
