@@ -6,11 +6,11 @@ import routes from "./routes/authRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import salesRoutes from "./routes/salesRoutes.js";
 import driverRoutes from "./routes/driverRoutes.js";
-import stockRoutes from "./routes/stockRoutes.js"
-import settlementRoutes from "./routes/settlementRoutes.js"
-import customerIssueRoutes from "./routes/customerIssueRoutes.js"
-import getUserSettingRoutes from "./routes/userRoutes.js"
-import getExpenseRoutes from "./routes/expenseRoutes.js"
+import stockRoutes from "./routes/stockRoutes.js";
+import settlementRoutes from "./routes/settlementRoutes.js";
+import customerIssueRoutes from "./routes/customerIssueRoutes.js";
+import getUserSettingRoutes from "./routes/userRoutes.js";
+import getExpenseRoutes from "./routes/expenseRoutes.js";
 import godownRoutes from "./routes/godownRoutes.js";
 import cashierRoutes from "./routes/cashierRoutes.js";
 import purchaseRoutes from "./routes/purchaseRoutes.js";
@@ -25,16 +25,19 @@ import nameChangeRoutes from "./routes/nameChangeRoutes.js";
 import iocOtpRoutes from "./routes/iocOtpRoutes.js";
 import emptyCylinderLoadRoutes from "./routes/emptyCylinderLoadRoutes.js";
 import razorpayRoutes from "./routes/razorpayRoutes.js";
+import manualPaymentRoutes from "./routes/manualPaymentRoutes.js";
 
 const app = express();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  }),
+);
 app.use(express.json());
 
 // Backwards-compat + resilience for client base-URL quirks.
@@ -47,10 +50,9 @@ app.use(express.json());
 app.use((req, res, next) => {
   const queryIndex = req.url.indexOf("?");
   const query = queryIndex === -1 ? "" : req.url.slice(queryIndex);
-  let path = (queryIndex === -1 ? req.url : req.url.slice(0, queryIndex)).replace(
-    /\/{2,}/g,
-    "/"
-  );
+  let path = (
+    queryIndex === -1 ? req.url : req.url.slice(0, queryIndex)
+  ).replace(/\/{2,}/g, "/");
 
   if (
     path !== "/" &&
@@ -90,6 +92,6 @@ app.use("/api/name-changes", nameChangeRoutes);
 app.use("/api/ioc-otps", iocOtpRoutes);
 app.use("/api/empty-cylinder-loads", emptyCylinderLoadRoutes);
 app.use("/api", razorpayRoutes);
-
+app.use("/api", manualPaymentRoutes);
 
 export default app;
