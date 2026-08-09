@@ -365,3 +365,7 @@ CREATE TABLE IF NOT EXISTS `cashier_receipts` (
   KEY `idx_cashier_receipts_type` (`receipt_type`),
   KEY `idx_cashier_receipts_cashier` (`cashier_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Add consumer_id and consumer_number for bulk upload imports
+ALTER TABLE `users` ADD COLUMN `consumer_id` varchar(50) DEFAULT NULL;
+ALTER TABLE `users` ADD COLUMN `consumer_number` varchar(50) DEFAULT NULL;
