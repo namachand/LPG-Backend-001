@@ -8,15 +8,11 @@ export const bulkUploadCustomers = async (req, res) => {
   }
 
   const filePath = req.file.path;
-  const connection = await db.getConnection();
 
   try {
-    // 1. Read the Excel file
     const workbook = xlsx.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
-    
-    // Parse to JSON array
     const data = xlsx.utils.sheet_to_json(sheet);
 
     if (!data || data.length === 0) {
@@ -27,71 +23,89 @@ export const bulkUploadCustomers = async (req, res) => {
     let failCount = 0;
     const errors = [];
 
-    await connection.beginTransaction();
-
-    for (const [index, row] of data.entries()) {
-      try {
+    // Process in batches of 500 using TRUE bulk inserts for extreme performance
+    const batchSize = 500;
+    for (let i = 0; i < data.length; i += batchSize) {
+      const batch = data.slice(i, i + batchSize);
+      
+      const userValues = [];
+      const consumerNumbers = [];
+      const rowDataMap = {}; // map consumerNumber -> row details
+      
+      for (const row of batch) {
         const consumerId = row["Consumer ID"] || row["Consumer_ID"] || null;
-        const consumerNumber = row["Consumer Number"] || row["Consumer_Number"] || null;
+        let consumerNumber = row["Consumer Number"] || row["Consumer_Number"] || null;
+        
+        if (!consumerNumber) {
+           // Fallback to a unique random string if the Excel cell is empty, so we can map it back
+           consumerNumber = "TEMP_" + Math.random().toString(36).substring(2, 10);
+        }
+        
         const consumerName = row["Consumer Name"] || row["Consumer_Name"] || "Unknown Customer";
         
-        const rawAddress = row["Address"] || "";
-        const areaName = row["Area Name"] || row["Area_Name"] || "";
-        const fullAddress = [rawAddress, areaName].filter(Boolean).join(", ");
+        userValues.push([consumerName, 'CUSTOMER', 'ACTIVE', consumerId, consumerNumber]);
+        consumerNumbers.push(consumerNumber);
         
-        const productStr = row["Product"] || "";
-
-        // 2. Insert into users table
-        const [userResult] = await connection.execute(
-          `
-          INSERT INTO users (
-            name, 
-            role, 
-            status, 
-            consumer_id, 
-            consumer_number
-          ) VALUES (?, 'CUSTOMER', 'ACTIVE', ?, ?)
-          `,
-          [consumerName, consumerId, consumerNumber]
-        );
-
-        const newUserId = userResult.insertId;
-
-        // 3. Insert into addresses table
-        if (fullAddress) {
-          await connection.execute(
-            `
-            INSERT INTO addresses (user_id, address, is_default)
-            VALUES (?, ?, 1)
-            `,
-            [newUserId, fullAddress]
+        rowDataMap[consumerNumber] = {
+           rawAddress: row["Address"] || "",
+           areaName: row["Area Name"] || row["Area_Name"] || "",
+           productStr: row["Product"] || ""
+        };
+      }
+      
+      if (userValues.length > 0) {
+        try {
+          // 1. Bulk insert users
+          await db.query(
+            `INSERT INTO users (name, role, status, consumer_id, consumer_number) VALUES ?`,
+            [userValues]
           );
-        }
-
-        // 4. (Optional) Check product and create connection record if we want to store product
-        if (productStr) {
-          await connection.execute(
-            `
-            INSERT INTO customer_new_connections (
-              user_id, 
-              product_details, 
-              deposit_amount, 
-              gst_amount, 
-              status
-            ) VALUES (?, ?, 0, 0, 'APPROVED')
-            `,
-            [newUserId, productStr]
+          
+          // 2. Fetch inserted user IDs to map to addresses and connections
+          const [users] = await db.query(
+            `SELECT id, consumer_number FROM users WHERE consumer_number IN (?)`,
+            [consumerNumbers]
           );
+          
+          const addressValues = [];
+          const connectionValues = [];
+          
+          for (const user of users) {
+             const rowDetails = rowDataMap[user.consumer_number];
+             if (rowDetails) {
+                const fullAddress = [rowDetails.rawAddress, rowDetails.areaName].filter(Boolean).join(", ");
+                if (fullAddress) {
+                   addressValues.push([user.id, fullAddress, 1]);
+                }
+                if (rowDetails.productStr) {
+                   connectionValues.push([user.id, rowDetails.productStr, 0, 0, 'APPROVED']);
+                }
+             }
+          }
+          
+          // 3. Bulk insert addresses
+          if (addressValues.length > 0) {
+             await db.query(
+               `INSERT INTO addresses (user_id, address, is_default) VALUES ?`,
+               [addressValues]
+             );
+          }
+          
+          // 4. Bulk insert connections
+          if (connectionValues.length > 0) {
+             await db.query(
+               `INSERT INTO customer_new_connections (user_id, product_details, deposit_amount, gst_amount, status) VALUES ?`,
+               [connectionValues]
+             );
+          }
+          
+          successCount += batch.length;
+        } catch (error) {
+          failCount += batch.length;
+          errors.push(`Batch starting at row ${i + 2} failed: ${error.message}`);
         }
-
-        successCount++;
-      } catch (rowError) {
-        failCount++;
-        errors.push(`Row ${index + 2}: ${rowError.message}`);
       }
     }
-
-    await connection.commit();
 
     res.status(200).json({
       message: "Bulk upload completed",
@@ -101,12 +115,9 @@ export const bulkUploadCustomers = async (req, res) => {
     });
 
   } catch (error) {
-    await connection.rollback();
     console.error("bulkUploadCustomers error:", error);
     res.status(500).json({ message: "Internal server error during bulk upload", error: error.message, stack: error.stack });
   } finally {
-    connection.release();
-    // Clean up uploaded file
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
