@@ -485,12 +485,13 @@ export const findCustomerForDriverApp = async (req, res) => {
       WHERE u.role = 'CUSTOMER'
         AND (
           u.phone = ?
-          OR u.id = ?
+          OR u.consumer_number = ?
+          OR u.consumer_number REGEXP CONCAT('^[^0-9]*', ?, '$')
         )
       ORDER BY a.is_default DESC, a.id DESC
       LIMIT 1
       `,
-      [searchValue, Number(searchValue) || 0]
+      [searchValue, searchValue, searchValue]
     );
 
     if (!rows.length) {
