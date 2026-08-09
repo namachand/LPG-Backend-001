@@ -3,6 +3,8 @@ import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import os from "os";
+import { bulkUploadCustomers } from "../controllers/customerBulkUploadController.js";
 
 const router = express.Router();
 
@@ -75,5 +77,22 @@ router.post("/supporting-document", supportingDocumentUpload.single("file"), (re
   const url = `/uploads/supporting-documents/${req.file.filename}`;
   res.json({ url });
 });
+
+const excelUpload = multer({
+  dest: os.tmpdir(),
+  fileFilter: (_req, file, cb) => {
+    if (
+      !file.mimetype.includes("excel") &&
+      !file.mimetype.includes("spreadsheetml") &&
+      !file.originalname.match(/\.(xlsx|xls|csv)$/)
+    ) {
+      return cb(new Error("Only Excel files are allowed"));
+    }
+    cb(null, true);
+  },
+});
+
+// POST /api/upload/bulk-customers → parses Excel and inserts into DB
+router.post("/bulk-customers", excelUpload.single("file"), bulkUploadCustomers);
 
 export default router;

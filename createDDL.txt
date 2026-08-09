@@ -1,4 +1,6 @@
-CREATE TABLE `users` (
+SET FOREIGN_KEY_CHECKS=0;
+
+CREATE TABLE IF NOT EXISTS `users` (
   `id` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL,
   `company_name` varchar(150) DEFAULT NULL,
@@ -18,7 +20,7 @@ CREATE TABLE `users` (
   UNIQUE KEY `phone` (`phone`)
 ) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `user_job_profiles` (
+CREATE TABLE IF NOT EXISTS `user_job_profiles` (
   `id` int NOT NULL AUTO_INCREMENT,
   `user_id` int NOT NULL,
   `display_role` enum('GODOWN_MANAGER','PURCHASE_DRIVER','DELIVERY_AGENT','CASHIER','CUSTOMER_SERVICE','MANAGER') NOT NULL,
@@ -36,7 +38,7 @@ CREATE TABLE `user_job_profiles` (
   CONSTRAINT `user_job_profiles_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `categories` (
+CREATE TABLE IF NOT EXISTS `categories` (
   `id` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
@@ -45,7 +47,7 @@ CREATE TABLE `categories` (
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `stock_areas` (
+CREATE TABLE IF NOT EXISTS `stock_areas` (
   `id` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL,
   `address` varchar(255) NOT NULL,
@@ -58,7 +60,7 @@ CREATE TABLE `stock_areas` (
   CONSTRAINT `fk_stock_areas_manager` FOREIGN KEY (`manager_id`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `drivers` (
+CREATE TABLE IF NOT EXISTS `drivers` (
   `id` int NOT NULL AUTO_INCREMENT,
   `user_id` int DEFAULT NULL,
   `vehicle_number` varchar(50) DEFAULT NULL,
@@ -71,7 +73,7 @@ CREATE TABLE `drivers` (
   CONSTRAINT `drivers_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `addresses` (
+CREATE TABLE IF NOT EXISTS `addresses` (
   `id` int NOT NULL AUTO_INCREMENT,
   `user_id` int DEFAULT NULL,
   `address` text,
@@ -82,7 +84,7 @@ CREATE TABLE `addresses` (
   CONSTRAINT `addresses_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=34 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `expenses` (
+CREATE TABLE IF NOT EXISTS `expenses` (
   `id` int NOT NULL AUTO_INCREMENT,
   `category` varchar(100) DEFAULT NULL,
   `description` text,
@@ -96,7 +98,7 @@ CREATE TABLE `expenses` (
   CONSTRAINT `expenses_ibfk_1` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `purchase_trips` (
+CREATE TABLE IF NOT EXISTS `purchase_trips` (
   `id` int NOT NULL AUTO_INCREMENT,
   `purchase_manager_id` int NOT NULL,
   `stock_area_id` int DEFAULT NULL,
@@ -116,7 +118,7 @@ CREATE TABLE `purchase_trips` (
   CONSTRAINT `purchase_trips_ibfk_2` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `purchase_loads` (
+CREATE TABLE IF NOT EXISTS `purchase_loads` (
   `id` int NOT NULL AUTO_INCREMENT,
   `trip_id` int NOT NULL,
   `created_by` int NOT NULL,
@@ -137,7 +139,7 @@ CREATE TABLE `purchase_loads` (
   CONSTRAINT `purchase_loads_ibfk_3` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `purchase_load_items` (
+CREATE TABLE IF NOT EXISTS `purchase_load_items` (
   `id` int NOT NULL AUTO_INCREMENT,
   `load_id` int NOT NULL,
   `product_id` int NOT NULL,
@@ -150,7 +152,7 @@ CREATE TABLE `purchase_load_items` (
   CONSTRAINT `purchase_load_items_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `reports` (
+CREATE TABLE IF NOT EXISTS `reports` (
   `id` int NOT NULL AUTO_INCREMENT,
   `report_type` varchar(100) DEFAULT NULL,
   `generated_by` int DEFAULT NULL,
@@ -161,7 +163,7 @@ CREATE TABLE `reports` (
   CONSTRAINT `reports_ibfk_1` FOREIGN KEY (`generated_by`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `issues` (
+CREATE TABLE IF NOT EXISTS `issues` (
   `id` int NOT NULL AUTO_INCREMENT,
   `customer_id` int DEFAULT NULL,
   `title` varchar(255) DEFAULT NULL,
@@ -177,7 +179,7 @@ CREATE TABLE `issues` (
   CONSTRAINT `issues_ibfk_2` FOREIGN KEY (`assigned_to`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `products` (
+CREATE TABLE IF NOT EXISTS `products` (
   `id` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) DEFAULT NULL,
   `type` enum('DOMESTIC','COMMERCIAL') DEFAULT NULL,
@@ -189,7 +191,7 @@ CREATE TABLE `products` (
   CONSTRAINT `fk_products_category` FOREIGN KEY (`category_id`) REFERENCES `categories` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `cash_collections` (
+CREATE TABLE IF NOT EXISTS `cash_collections` (
   `id` int NOT NULL AUTO_INCREMENT,
   `driver_id` int DEFAULT NULL,
   `total_collected` decimal(10,2) DEFAULT NULL,
@@ -200,7 +202,7 @@ CREATE TABLE `cash_collections` (
   CONSTRAINT `cash_collections_ibfk_1` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `settlements` (
+CREATE TABLE IF NOT EXISTS `settlements` (
   `id` int NOT NULL AUTO_INCREMENT,
   `driver_id` int DEFAULT NULL,
   `amount` decimal(10,2) DEFAULT NULL,
@@ -212,7 +214,7 @@ CREATE TABLE `settlements` (
   CONSTRAINT `settlements_ibfk_1` FOREIGN KEY (`driver_id`) REFERENCES `drivers` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `stock` (
+CREATE TABLE IF NOT EXISTS `stock` (
   `id` int NOT NULL AUTO_INCREMENT,
   `product_id` int DEFAULT NULL,
   `stock_area_id` int DEFAULT NULL,
@@ -229,7 +231,7 @@ CREATE TABLE `stock` (
   CONSTRAINT `fk_stock_stock_area` FOREIGN KEY (`stock_area_id`) REFERENCES `stock_areas` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `stock_transactions` (
+CREATE TABLE IF NOT EXISTS `stock_transactions` (
   `id` int NOT NULL AUTO_INCREMENT,
   `product_id` int DEFAULT NULL,
   `stock_area_id` int DEFAULT NULL,
@@ -256,7 +258,7 @@ CREATE TABLE `stock_transactions` (
   CONSTRAINT `stock_transactions_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=40 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `sales` (
+CREATE TABLE IF NOT EXISTS `sales` (
   `id` int NOT NULL AUTO_INCREMENT,
   `customer_id` int DEFAULT NULL,
   `driver_id` int DEFAULT NULL,
@@ -282,7 +284,7 @@ CREATE TABLE `sales` (
   CONSTRAINT `sales_ibfk_3` FOREIGN KEY (`address_id`) REFERENCES `addresses` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=40 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `sales_items` (
+CREATE TABLE IF NOT EXISTS `sales_items` (
   `id` int NOT NULL AUTO_INCREMENT,
   `sale_id` int DEFAULT NULL,
   `product_id` int DEFAULT NULL,
@@ -303,7 +305,7 @@ CREATE TABLE `sales_items` (
   CONSTRAINT `sales_items_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=44 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `payments` (
+CREATE TABLE IF NOT EXISTS `payments` (
   `id` int NOT NULL AUTO_INCREMENT,
   `sale_id` int DEFAULT NULL,
   `amount` decimal(10,2) DEFAULT NULL,
@@ -317,7 +319,7 @@ CREATE TABLE `payments` (
 ) ENGINE=InnoDB AUTO_INCREMENT=36 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
-CREATE TABLE `settlement_history` (
+CREATE TABLE IF NOT EXISTS `settlement_history` (
   `id` int NOT NULL AUTO_INCREMENT,
   `driver_id` int NOT NULL,
   `sale_id` int NOT NULL,
@@ -337,7 +339,7 @@ CREATE TABLE `settlement_history` (
   CONSTRAINT `fk_settlement_sale` FOREIGN KEY (`sale_id`) REFERENCES `sales` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=35 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `cashier_closings` (
+CREATE TABLE IF NOT EXISTS `cashier_closings` (
   `id` int NOT NULL AUTO_INCREMENT,
   `total_cash` decimal(12,2) NOT NULL DEFAULT '0.00',
   `petty_cash` decimal(12,2) NOT NULL DEFAULT '0.00',
@@ -346,7 +348,7 @@ CREATE TABLE `cashier_closings` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `auth_otp_logs` (
+CREATE TABLE IF NOT EXISTS `auth_otp_logs` (
   `id` int NOT NULL AUTO_INCREMENT,
   `user_id` int DEFAULT NULL,
   `identifier` varchar(120) NOT NULL,
@@ -365,6 +367,8 @@ VALUES
   ('Meena Godown', 'LPG Digi', 'godown1@lpgdigi.com', '9000000002', '$2b$10$1fzRcUx.txHRSoNPPqH7ceJl/o5rGCsepjsir1YH9Vm54.dPVb4p2', 'GODOWN_MANAGER', 'ACTIVE'),
   ('Arun Purchase', 'LPG Digi', 'purchase1@lpgdigi.com', '9000000003', '$2b$10$1fzRcUx.txHRSoNPPqH7ceJl/o5rGCsepjsir1YH9Vm54.dPVb4p2', 'PURCHASE_MANAGER', 'ACTIVE'),
   ('Kiran Cashier', 'LPG Digi', 'cashier1@lpgdigi.com', '9000000004', '$2b$10$1fzRcUx.txHRSoNPPqH7ceJl/o5rGCsepjsir1YH9Vm54.dPVb4p2', 'CASHIER', 'ACTIVE');
+
+SET FOREIGN_KEY_CHECKS=1;
 
 
 
