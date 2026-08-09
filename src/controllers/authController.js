@@ -9,6 +9,7 @@ const ALLOWED_ROLES = [
   "GODOWN_MANAGER",
   "PURCHASE_MANAGER",
   "CASHIER",
+  "SUPPORT",
 ];
 
 
