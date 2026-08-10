@@ -1147,9 +1147,15 @@ export const createPurchaseLoad = async (req, res) => {
       });
     }
 
-    const effectiveStockAreaId =
-      parsedStockAreaId ??
-      (tripRows[0].stock_area_id ? Number(tripRows[0].stock_area_id) : DEFAULT_PURCHASE_STOCK_AREA_ID);
+    let effectiveStockAreaId = parsedStockAreaId;
+    if (effectiveStockAreaId === null || effectiveStockAreaId === undefined) {
+      if (tripRows[0].stock_area_id) {
+        effectiveStockAreaId = Number(tripRows[0].stock_area_id);
+      } else {
+        const defaultArea = await getDefaultStockArea(connection);
+        effectiveStockAreaId = defaultArea ? defaultArea.id : null;
+      }
+    }
 
     if (effectiveStockAreaId !== null) {
       const [stockAreaRows] = await connection.query(
@@ -1332,13 +1338,17 @@ export const updatePurchaseLoad = async (req, res) => {
       });
     }
 
-    const effectiveStockAreaId =
-      parsedStockAreaId ??
-      (loadRows[0].trip_stock_area_id
-        ? Number(loadRows[0].trip_stock_area_id)
-        : loadRows[0].stock_area_id
-          ? Number(loadRows[0].stock_area_id)
-          : DEFAULT_PURCHASE_STOCK_AREA_ID);
+    let effectiveStockAreaId = parsedStockAreaId;
+    if (effectiveStockAreaId === null || effectiveStockAreaId === undefined) {
+      if (loadRows[0].trip_stock_area_id) {
+        effectiveStockAreaId = Number(loadRows[0].trip_stock_area_id);
+      } else if (loadRows[0].stock_area_id) {
+        effectiveStockAreaId = Number(loadRows[0].stock_area_id);
+      } else {
+        const defaultArea = await getDefaultStockArea(connection);
+        effectiveStockAreaId = defaultArea ? defaultArea.id : null;
+      }
+    }
 
     if (effectiveStockAreaId !== null) {
       const [stockAreaRows] = await connection.query(
