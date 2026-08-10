@@ -407,7 +407,16 @@ export const startPurchaseTrip = async (req, res) => {
 
     const parsedUserId = Number(userId);
     const parsedOdometer = Number(odometerReading);
-    const parsedStockAreaId = stockAreaId ? Number(stockAreaId) : DEFAULT_PURCHASE_STOCK_AREA_ID;
+    
+    let parsedStockAreaId = null;
+    if (stockAreaId) {
+      parsedStockAreaId = Number(stockAreaId);
+    } else {
+      const defaultArea = await getDefaultStockArea(connection);
+      if (defaultArea) {
+        parsedStockAreaId = defaultArea.id;
+      }
+    }
 
     if (!parsedUserId || !Number.isFinite(parsedOdometer) || parsedOdometer <= 0) {
       return res.status(400).json({
