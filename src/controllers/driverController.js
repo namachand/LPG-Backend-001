@@ -1233,15 +1233,19 @@ export const createDriverSale = async (req, res) => {
 
     let customerId = null;
 
-    const [existingCustomers] = await connection.execute(
-      `
-      SELECT id
-      FROM users
-      WHERE phone = ?
-      LIMIT 1
-      `,
-      [phone]
-    );
+    let existingCustomers = [];
+
+    if (phone && String(phone).trim() !== "") {
+      [existingCustomers] = await connection.execute(
+        `
+        SELECT id
+        FROM users
+        WHERE phone = ?
+        LIMIT 1
+        `,
+        [phone]
+      );
+    }
 
     if (existingCustomers.length) {
       customerId = existingCustomers[0].id;
@@ -1703,10 +1707,14 @@ export const createDriverReturn = async (req, res) => {
     // Resolve or create the customer + address (same upsert pattern as sales).
     let customerId = null;
 
-    const [existingCustomers] = await connection.execute(
-      `SELECT id FROM users WHERE phone = ? LIMIT 1`,
-      [phone]
-    );
+    let existingCustomers = [];
+
+    if (phone && String(phone).trim() !== "") {
+      [existingCustomers] = await connection.execute(
+        `SELECT id FROM users WHERE phone = ? LIMIT 1`,
+        [phone]
+      );
+    }
 
     if (existingCustomers.length) {
       customerId = existingCustomers[0].id;
