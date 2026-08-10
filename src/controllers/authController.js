@@ -10,6 +10,7 @@ const ALLOWED_ROLES = [
   "PURCHASE_MANAGER",
   "CASHIER",
   "SUPPORT",
+  "CUSTOMER",
 ];
 
 
@@ -56,20 +57,29 @@ const saveOtpLog = async ({ userId, identifier, otp, stage }) => {
 const getUserByIdentifier = async (identifier) => {
   const value = normalizeIdentifier(identifier);
   const digits = normalizePhoneDigits(value);
-  const lastTenDigits = digits.length >= 10 ? digits.slice(-10) : digits;
+  
+  if (!value) return null;
 
-  const [rows] = await db.execute(
-    `
-      SELECT id, name, email, phone, password, role, status
-      FROM users
-      WHERE LOWER(email) = LOWER(?)
-        OR phone = ?
-        OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), '.', '') = ?
-        OR RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), '.', ''), 10) = ?
-      LIMIT 1
-    `,
-    [value, value, digits, lastTenDigits]
-  );
+  let query = `
+    SELECT id, name, email, phone, password, role, status
+    FROM users
+    WHERE LOWER(email) = LOWER(?)
+  `;
+  let params = [value];
+
+  if (digits) {
+    const lastTenDigits = digits.length >= 10 ? digits.slice(-10) : digits;
+    query += `
+      OR phone = ?
+      OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), '.', '') = ?
+      OR RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), '.', ''), 10) = ?
+    `;
+    params.push(value, digits, lastTenDigits);
+  }
+
+  query += ` LIMIT 1`;
+
+  const [rows] = await db.execute(query, params);
 
   return rows[0] || null;
 };

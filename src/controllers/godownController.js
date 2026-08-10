@@ -426,7 +426,7 @@ export const getGodownDashboardData = async (req, res) => {
         };
       }
 
-      if (activityType === "ADJUSTMENT_ADD") {
+      if (activityType === "ADJUSTMENT_ADD" || activityType === "PURCHASE") {
         return {
           id: row.id,
           title: `${qty} ${productName} received from Depot`,
