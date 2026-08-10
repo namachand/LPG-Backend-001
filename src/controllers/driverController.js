@@ -1100,10 +1100,10 @@ export const createDriverSale = async (req, res) => {
       });
     }
 
-    if (!customer_name || !phone || !address) {
+    if (!customer_name || !address) {
       return res.status(400).json({
         success: false,
-        message: "customer_name, phone and address are required",
+        message: "customer_name and address are required",
       });
     }
 
@@ -1613,10 +1613,10 @@ export const createDriverReturn = async (req, res) => {
       });
     }
 
-    if (!customer_name || !phone || !address) {
+    if (!customer_name || !address) {
       return res.status(400).json({
         success: false,
-        message: "customer_name, phone and address are required",
+        message: "customer_name and address are required",
       });
     }
 
@@ -2312,7 +2312,7 @@ export const returnInHandToGodown = async (req, res) => {
         quantity
       FROM stock_transactions
       WHERE created_by = ?
-        AND type = 'ADJUSTMENT_ADD'
+        AND type = 'PURCHASE_RETURN'
         AND isApproved = 0
       FOR UPDATE
       `,
@@ -2382,7 +2382,7 @@ export const returnInHandToGodown = async (req, res) => {
       UPDATE stock_transactions
       SET isApproved = 1
       WHERE created_by = ?
-        AND type = 'ADJUSTMENT_ADD'
+        AND type = 'PURCHASE_RETURN'
         AND isApproved = 0
       `,
       [numericDriverId]
