@@ -1271,7 +1271,7 @@ export const createDriverSale = async (req, res) => {
         )
         VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
         `,
-        [customer_name, phone]
+        [customer_name, phone || null]
       );
 
       customerId = customerResult.insertId;
@@ -1729,7 +1729,7 @@ export const createDriverReturn = async (req, res) => {
         INSERT INTO users (name, phone, role, created_at, updated_at)
         VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
         `,
-        [customer_name, phone]
+        [customer_name, phone || null]
       );
 
       customerId = customerResult.insertId;
