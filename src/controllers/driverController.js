@@ -624,6 +624,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
       SELECT
         s.id AS sale_id,
         u.name AS customer_name,
+        u.consumer_number,
         a.address,
         COALESCE(
           GROUP_CONCAT(DISTINCT pr.name ORDER BY pr.name SEPARATOR ', '),
@@ -658,6 +659,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
       GROUP BY
         s.id,
         u.name,
+        u.consumer_number,
         a.address,
         s.status,
         s.total_amount,
@@ -805,6 +807,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
     const deliveries = deliveryRows.map((item) => ({
       saleId: Number(item.sale_id),
       customerName: item.customer_name || "Unknown Customer",
+      consumerNumber: item.consumer_number || null,
       address: item.address || "No address available",
       product: item.product_name || "N/A",
       quantity: Number(item.quantity || 0),
@@ -1348,24 +1351,18 @@ export const createDriverSale = async (req, res) => {
       `createDriverSale: saleId=${saleId} otpReceived=${normalizedOtp ? "yes" : "no"} otpLength=${normalizedOtp.length}`
     );
 
-    if (normalizedOtp) {
-      await connection.execute(
-        `
-        INSERT INTO driver_sale_otps
-        (
-          sale_id,
-          otp,
-          status
-        )
-        VALUES (?, ?, 'PENDING')
-        `,
-        [saleId, normalizedOtp]
-      );
-    } else {
-      console.warn(
-        `createDriverSale: no OTP stored for saleId=${saleId} — client did not send a non-empty 'otp' field.`
-      );
-    }
+    await connection.execute(
+      `
+      INSERT INTO driver_sale_otps
+      (
+        sale_id,
+        otp,
+        status
+      )
+      VALUES (?, ?, 'PENDING')
+      `,
+      [saleId, normalizedOtp]
+    );
 
     const finalEmptyCylinderStatus =
       empty_cylinder_status ||

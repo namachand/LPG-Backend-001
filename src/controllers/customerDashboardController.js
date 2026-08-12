@@ -25,7 +25,7 @@ export const searchCustomersDashboard = async (req, res) => {
         AND (
           u.name LIKE ?
           OR u.phone LIKE ?
-          OR CONCAT('LPG-', LPAD(u.id, 5, '0')) LIKE ?
+          OR u.consumer_number LIKE ?
           ${digits ? "OR u.id = ?" : ""}
         )
       `;
@@ -39,7 +39,7 @@ export const searchCustomersDashboard = async (req, res) => {
         u.id,
         u.name,
         u.phone,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number
+        u.consumer_number AS consumer_number
       FROM users u
       ${whereClause}
       ORDER BY u.created_at DESC, u.id DESC
@@ -83,7 +83,7 @@ export const getCustomerDashboardDetails = async (req, res) => {
         u.id,
         u.name,
         u.phone,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         COALESCE(a.address, '') AS address
       FROM users u
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1

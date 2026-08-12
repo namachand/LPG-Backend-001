@@ -773,6 +773,7 @@ export const getCashierDriverCollections = async (req, res) => {
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS assignedCount,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingCount,
         COALESCE(SUM(CASE WHEN sh.status = 'SETTLED' THEN 1 ELSE 0 END), 0) AS settledCount,
+        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') THEN 1 ELSE 0 END), 0) AS iocOnlineCount,
         CASE
           WHEN COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) > 0 THEN 'Pending'
           WHEN COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) > 0 THEN 'Assigned'
@@ -832,6 +833,7 @@ export const getCashierDriverCollections = async (req, res) => {
           pendingCount: Number(driver.pendingCount || 0),
           assignedCount: Number(driver.assignedCount || 0),
           settledCount: Number(driver.settledCount || 0),
+          iocOnlineCount: Number(driver.iocOnlineCount || 0),
         };
       }),
       pagination: {
@@ -1006,7 +1008,7 @@ export const getCashierNameChangeRequests = async (req, res) => {
       SELECT
         r.id,
         r.customer_id,
-        CONCAT('LPG-', LPAD(r.customer_id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         r.old_name_snapshot,
         r.new_name_requested,
         r.service_fee,
@@ -1208,7 +1210,7 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
         DATE_FORMAT(t.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
         DATE_FORMAT(t.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
         old_u.name AS old_customer_name,
-        CONCAT('LPG-', LPAD(t.existing_customer_id, 5, '0')) AS consumer_number,
+        old_u.consumer_number AS consumer_number,
         COALESCE(cta.agency_name, new_u.name) AS new_customer_name,
         COALESCE(cta.agency_phone, new_u.phone, '') AS new_customer_phone,
         COALESCE(cta.agency_address, a.address, '') AS new_customer_address
@@ -1374,7 +1376,7 @@ export const getCashierNewConnectionRequests = async (req, res) => {
       SELECT
         cnc.id,
         cnc.user_id,
-        CONCAT('LPG-', LPAD(cnc.user_id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         cnc.product_details,
         cnc.deposit_amount,
         cnc.gst_amount,

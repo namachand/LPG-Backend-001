@@ -119,7 +119,7 @@ export const listIocOtps = async (req, res) => {
         DATE_FORMAT(dso.created_at, '%d/%m/%Y, %H:%i:%s') AS created_at_formatted,
         cu.name AS customer_name,
         cu.phone AS customer_phone,
-        CONCAT('LPG-', LPAD(cu.id, 5, '0')) AS consumer_number,
+        cu.consumer_number AS consumer_number,
         s.driver_id,
         du.name AS driver_name
       FROM driver_sale_otps dso
@@ -134,9 +134,14 @@ export const listIocOtps = async (req, res) => {
       params
     );
 
+    const processedRows = rows.map((row) => ({
+      ...row,
+      otp: row.otp === "" ? "OTP Skipped" : row.otp,
+    }));
+
     return res.status(200).json({
       success: true,
-      data: rows,
+      data: processedRows,
     });
   } catch (error) {
     console.error("listIocOtps error:", error);

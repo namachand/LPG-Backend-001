@@ -18,7 +18,7 @@ const lookupCustomer = async (connection, { consumerNumber, customerName }) => {
         u.id,
         u.name,
         u.phone,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number
+        u.consumer_number AS consumer_number
       FROM users u
       WHERE u.id = ? AND u.role = 'CUSTOMER'
       LIMIT 1
@@ -39,7 +39,7 @@ const lookupCustomer = async (connection, { consumerNumber, customerName }) => {
       u.id,
       u.name,
       u.phone,
-      CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number
+      u.consumer_number AS consumer_number
     FROM users u
     WHERE u.role = 'CUSTOMER' AND u.name LIKE ?
     ORDER BY u.created_at DESC, u.id DESC
@@ -128,7 +128,7 @@ export const createCustomerPenalty = async (req, res) => {
       SELECT
         id,
         name,
-        CONCAT('LPG-', LPAD(id, 5, '0')) AS consumer_number
+        consumer_number AS consumer_number
       FROM users
       WHERE id = ? AND role = 'CUSTOMER'
       LIMIT 1

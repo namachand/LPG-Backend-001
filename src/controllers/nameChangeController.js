@@ -18,7 +18,7 @@ const lookupCustomer = async (connection, { consumerNumber, existingName }) => {
         u.id,
         u.name,
         u.phone,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         COALESCE(a.address, '') AS address
       FROM users u
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
@@ -41,7 +41,7 @@ const lookupCustomer = async (connection, { consumerNumber, existingName }) => {
       u.id,
       u.name,
       u.phone,
-      CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+      u.consumer_number AS consumer_number,
       COALESCE(a.address, '') AS address
     FROM users u
     LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
@@ -202,7 +202,7 @@ export const getRecentNameChangeRequests = async (_req, res) => {
         r.id,
         r.customer_id,
         u.name AS existing_name,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         r.old_name_snapshot,
         r.new_name_requested,
         r.service_fee,
