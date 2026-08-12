@@ -132,12 +132,13 @@ export const getOwnerDashboard = async (req, res) => {
 
     const cashPendingWithDrivers = Number(pendingCollectionRows[0]?.pending_amount || 0);
 
-    // Total Stock Available (Domestic and Commercial only)
+    // Total Stock Available & Empty Stock (Domestic and Commercial only)
     const [stockRows] = await db.execute(
       `
       SELECT
         p.type AS product_type,
-        COALESCE(SUM(s.quantity), 0) AS total_quantity
+        COALESCE(SUM(s.quantity), 0) AS total_quantity,
+        COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity
       FROM stock s
       INNER JOIN products p ON p.id = s.product_id
       WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
@@ -147,16 +148,21 @@ export const getOwnerDashboard = async (req, res) => {
 
     let domesticStock = 0;
     let commercialStock = 0;
+    let emptyDomestic = 0;
+    let emptyCommercial = 0;
 
     stockRows.forEach((row) => {
       if (row.product_type === 'DOMESTIC') {
         domesticStock = Number(row.total_quantity || 0);
+        emptyDomestic = Number(row.empty_quantity || 0);
       } else if (row.product_type === 'COMMERCIAL') {
         commercialStock = Number(row.total_quantity || 0);
+        emptyCommercial = Number(row.empty_quantity || 0);
       }
     });
 
     const totalStock = domesticStock + commercialStock;
+    const totalEmpty = emptyDomestic + emptyCommercial;
 
     // Total Expenses (Driver Expense from expenses table + Office Expense from office_expenses table)
     const [driverExpenseRows] = await db.execute(
@@ -331,6 +337,11 @@ export const getOwnerDashboard = async (req, res) => {
           domestic: domesticStock,
           commercial: commercialStock,
           total: totalStock,
+        },
+        empty: {
+          domestic: emptyDomestic,
+          commercial: emptyCommercial,
+          total: totalEmpty,
         },
         totalExpenses,
         paymentSummary,
