@@ -68,7 +68,7 @@ export const getComplaintCustomers = async (req, res) => {
         u.phone,
         u.email,
         u.company_name,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         COALESCE(a.address, '') AS address
       FROM users u
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
@@ -136,7 +136,7 @@ export const getCustomerComplaints = async (req, res) => {
       SELECT
         cc.id,
         CONCAT('CMP-', LPAD(cc.id, 4, '0')) AS complaint_code,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         u.name AS customer_name,
         u.phone AS customer_phone,
         u.email AS customer_email,

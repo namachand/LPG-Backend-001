@@ -81,7 +81,7 @@ export const getDashboardOverview = async (_req, res) => {
       SELECT
         cc.id,
         u.name AS customer_name,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         cc.issue_type,
         cc.description,
         cc.status,

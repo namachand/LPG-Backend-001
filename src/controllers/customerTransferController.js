@@ -18,7 +18,7 @@ const getCustomerByLookup = async (connection, { consumerNumber, existingName })
         u.id,
         u.name,
         u.phone,
-        CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         COALESCE(a.address, '') AS address
       FROM users u
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
@@ -41,7 +41,7 @@ const getCustomerByLookup = async (connection, { consumerNumber, existingName })
       u.id,
       u.name,
       u.phone,
-      CONCAT('LPG-', LPAD(u.id, 5, '0')) AS consumer_number,
+      u.consumer_number AS consumer_number,
       COALESCE(a.address, '') AS address
     FROM users u
     LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1

@@ -252,7 +252,7 @@ export const createCustomerConnection = async (req, res) => {
       data: {
         id: Number(connectionResult.insertId),
         userId,
-        consumerNumber: `LPG-${String(userId).padStart(5, "0")}`,
+        consumerNumber: null,
         paymentStatus: "PENDING_PAYMENT",
       },
     });
@@ -282,7 +282,7 @@ export const getRecentCustomerConnections = async (_req, res) => {
         cnc.user_id,
         u.name AS customer_name,
         u.phone AS phone,
-        CONCAT('LPG-', LPAD(cnc.user_id, 5, '0')) AS consumer_number,
+        u.consumer_number AS consumer_number,
         cnc.product_details,
         cnc.product_id,
         COALESCE(p.name, '') AS product_name,

@@ -1198,10 +1198,10 @@ const _markLoadStockWaiting = async (connection, loadId) => {
   await connection.query(
     `
     UPDATE stock_transactions
-    SET isApproved = 2
+    SET isApproved = 2, created_at = CURRENT_TIMESTAMP
     WHERE type = 'PURCHASE'
       AND reference_id = ?
-      AND isApproved = 0
+      AND isApproved IN (0, 2)
     `,
     [loadId]
   );
