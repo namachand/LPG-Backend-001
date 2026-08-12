@@ -1072,6 +1072,7 @@ export const createDriverSale = async (req, res) => {
       allocation_sales_item_id = null,
       batch_no = null,
       otp = null,
+      customer_id = null,
     } = req.body;
 
     const numericDriverId = await resolveDriverId(driver_id);
@@ -1234,11 +1235,21 @@ export const createDriverSale = async (req, res) => {
       }
     }
 
-    let customerId = null;
+    let customerId = customer_id ? Number(customer_id) : null;
+
+    if (!customerId && allocation_sale_id) {
+      const [origSaleRows] = await connection.execute(
+        `SELECT customer_id FROM sales WHERE id = ? LIMIT 1`,
+        [Number(allocation_sale_id)]
+      );
+      if (origSaleRows.length && origSaleRows[0].customer_id) {
+        customerId = origSaleRows[0].customer_id;
+      }
+    }
 
     let existingCustomers = [];
 
-    if (phone && String(phone).trim() !== "") {
+    if (!customerId && phone && String(phone).trim() !== "") {
       [existingCustomers] = await connection.execute(
         `
         SELECT id
@@ -1250,34 +1261,36 @@ export const createDriverSale = async (req, res) => {
       );
     }
 
-    if (existingCustomers.length) {
-      customerId = existingCustomers[0].id;
+    if (!customerId) {
+      if (existingCustomers.length) {
+        customerId = existingCustomers[0].id;
 
-      await connection.execute(
-        `
-        UPDATE users
-        SET name = ?, role = 'CUSTOMER'
-        WHERE id = ?
-        `,
-        [customer_name, customerId]
-      );
-    } else {
-      const [customerResult] = await connection.execute(
-        `
-        INSERT INTO users
-        (
-          name,
-          phone,
-          role,
-          created_at,
-          updated_at
-        )
-        VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
-        `,
-        [customer_name, phone || null]
-      );
+        await connection.execute(
+          `
+          UPDATE users
+          SET name = ?, role = 'CUSTOMER'
+          WHERE id = ?
+          `,
+          [customer_name, customerId]
+        );
+      } else {
+        const [customerResult] = await connection.execute(
+          `
+          INSERT INTO users
+          (
+            name,
+            phone,
+            role,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
+          `,
+          [customer_name, phone || null]
+        );
 
-      customerId = customerResult.insertId;
+        customerId = customerResult.insertId;
+      }
     }
 
     let addressId = null;
