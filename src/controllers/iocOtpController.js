@@ -116,7 +116,7 @@ export const listIocOtps = async (req, res) => {
         dso.sale_id,
         dso.otp,
         dso.status,
-        DATE_FORMAT(dso.created_at, '%d/%m/%Y, %H:%i:%s') AS created_at_formatted,
+        DATE_FORMAT(CONVERT_TZ(dso.created_at, '+00:00', '+05:30'), '%d/%m/%Y, %H:%i:%s') AS created_at_formatted,
         cu.name AS customer_name,
         cu.phone AS customer_phone,
         cu.consumer_number AS consumer_number,
