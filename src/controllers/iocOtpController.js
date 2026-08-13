@@ -121,7 +121,19 @@ export const listIocOtps = async (req, res) => {
         cu.phone AS customer_phone,
         cu.consumer_number AS consumer_number,
         s.driver_id,
-        du.name AS driver_name
+        du.name AS driver_name,
+        (
+          SELECT COALESCE(
+            CASE
+              WHEN COUNT(DISTINCT pr.type) > 1 THEN 'Mixed'
+              ELSE MAX(CASE WHEN pr.type = 'COMMERCIAL' THEN 'Commercial' ELSE 'Domestic' END)
+            END,
+            'Domestic'
+          )
+          FROM sales_items si
+          INNER JOIN products pr ON pr.id = si.product_id
+          WHERE si.sale_id = dso.sale_id
+        ) AS category
       FROM driver_sale_otps dso
       INNER JOIN sales s ON s.id = dso.sale_id
       LEFT JOIN users cu ON cu.id = s.customer_id

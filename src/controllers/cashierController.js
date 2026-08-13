@@ -230,7 +230,9 @@ const makeSinceCloseDateCond = (anchorAt) => (dateExpr) => {
 //                  customer), so it lowers the drawer when paid in cash.
 const getCashLedger = async (connection, makeDateCond) => {
   await ensureNewConnectionCashierTables(connection);
+    await ensureSplitPaymentsColumns(connection);
   await ensureTransferVoucherPaymentColumns(connection);
+    await ensureSplitPaymentsColumns(connection);
   await ensureSettlementSettledAtColumn(connection);
   await ensureExpensePaymentColumns(connection);
   await ensureOfficeExpensePaymentColumns(connection);
@@ -476,7 +478,7 @@ const validateCashierRequestPayment = (paymentMode, paymentId) => {
     return "Invalid payment mode";
   }
 
-  if (paymentMode !== "CASH" && !paymentId) {
+  if (paymentMode !== "CASH" && paymentMode !== "SPLIT" && !paymentId) {
     return "Payment ID is required for non-cash modes";
   }
 
@@ -589,7 +591,7 @@ export const getCashierDashboard = async (req, res) => {
         e.status
       FROM expenses e
       LEFT JOIN users u ON u.id = e.created_by
-      WHERE e.status = 'PENDING'
+      WHERE e.status = 'PENDING' ${dateClause} ${dateClause}
       ${pendingExpenseDateClause}
       ORDER BY e.created_at DESC
       LIMIT 2
@@ -617,7 +619,7 @@ export const getCashierDashboard = async (req, res) => {
         END AS status
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
-      LEFT JOIN settlement_history sh ON sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') ${settlementDateClause}
+      LEFT JOIN settlement_history sh ON ${joinCondition} ${settlementDateClause}
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
       LIMIT 4
@@ -756,7 +758,27 @@ export const getCashierDriverCollections = async (req, res) => {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
     const offset = (page - 1) * limit;
-    const [rows] = await connection.query(
+
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+
+    let joinCondition = "sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')";
+    const queryParams = [];
+    if (hasRange) {
+      joinCondition += " AND DATE(sh.created_at) BETWEEN ? AND ?";
+      queryParams.push(startDate, endDate);
+    }
+    queryParams.push(limit, offset);
+const [rows] = await connection.query(
       `
       SELECT
         d.id AS driver_id,
@@ -782,13 +804,13 @@ export const getCashierDriverCollections = async (req, res) => {
         END AS status
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
-      LEFT JOIN settlement_history sh ON sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')
+      LEFT JOIN settlement_history sh ON ${joinCondition}
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
       LIMIT ?
       OFFSET ?
       `,
-      [limit, offset]
+      queryParams
     );
 
     return res.status(200).json({
@@ -858,6 +880,23 @@ export const getCashierPenaltyRequests = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+    const dateClause = hasRange ? 'AND DATE(p.created_at) BETWEEN ? AND ?' : '';
+    const queryParams = hasRange ? [startDate, endDate] : [];
+
+
+
+
     const status = String(req.query.status || "ALL").toUpperCase();
     const whereClause =
       status === "PENDING"
@@ -887,10 +926,11 @@ export const getCashierPenaltyRequests = async (req, res) => {
       LEFT JOIN users u ON u.id = p.customer_id
       LEFT JOIN addresses a ON a.user_id = p.customer_id AND a.is_default = 1
       ${whereClause}
+      ${dateClause}
       ORDER BY p.created_at DESC, p.id DESC
       LIMIT 100
       `
-    );
+    , queryParams);
 
     return res.status(200).json({
       success: true,
@@ -927,9 +967,18 @@ export const collectCashierPenaltyRequest = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    await ensureSplitPaymentsColumns(connection);
     const requestId = Number(req.params.requestId);
-    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
-    const paymentId = String(req.body?.paymentId || "").trim();
+    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    let paymentId = String(req.body?.paymentId || "").trim();
+    let splitPaymentsJson = null;
+
+    if (payments && payments.length > 0) {
+      paymentMode = "SPLIT";
+      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      splitPaymentsJson = JSON.stringify(payments);
+    }
     const remarks = String(req.body?.remarks || "").trim();
 
     if (!requestId) {
@@ -939,7 +988,7 @@ export const collectCashierPenaltyRequest = async (req, res) => {
       });
     }
 
-    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER", "SPLIT"];
     if (!allowedModes.includes(paymentMode)) {
       return res.status(400).json({
         success: false,
@@ -947,7 +996,7 @@ export const collectCashierPenaltyRequest = async (req, res) => {
       });
     }
 
-    if (paymentMode !== "CASH" && !paymentId) {
+    if (paymentMode !== "CASH" && paymentMode !== "SPLIT" && !paymentId) {
       return res.status(400).json({
         success: false,
         message: "Payment ID is required for non-cash modes",
@@ -960,12 +1009,13 @@ export const collectCashierPenaltyRequest = async (req, res) => {
       SET
         payment_mode = ?,
         payment_reference_id = ?,
+        split_payments = ?,
         cashier_remarks = ?,
         payment_status = 'PAID',
         paid_at = NOW()
       WHERE id = ? AND payment_status = 'UNPAID'
       `,
-      [paymentMode, paymentId || null, remarks || null, requestId]
+      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
     );
 
     if (!result.affectedRows) {
@@ -995,6 +1045,23 @@ export const getCashierNameChangeRequests = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+    const dateClause = hasRange ? 'AND DATE(r.created_at) BETWEEN ? AND ?' : '';
+    const queryParams = hasRange ? [startDate, endDate] : [];
+
+
+
+
     const status = String(req.query.status || "ALL").toUpperCase();
     const whereClause =
       status === "PENDING"
@@ -1024,10 +1091,11 @@ export const getCashierNameChangeRequests = async (req, res) => {
       LEFT JOIN users u ON u.id = r.customer_id
       LEFT JOIN addresses a ON a.user_id = r.customer_id AND a.is_default = 1
       ${whereClause}
+      ${dateClause}
       ORDER BY r.created_at DESC, r.id DESC
       LIMIT 100
       `
-    );
+    , queryParams);
 
     return res.status(200).json({
       success: true,
@@ -1065,9 +1133,18 @@ export const collectCashierNameChangeRequest = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    await ensureSplitPaymentsColumns(connection);
     const requestId = Number(req.params.requestId);
-    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
-    const paymentId = String(req.body?.paymentId || "").trim();
+    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    let paymentId = String(req.body?.paymentId || "").trim();
+    let splitPaymentsJson = null;
+
+    if (payments && payments.length > 0) {
+      paymentMode = "SPLIT";
+      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      splitPaymentsJson = JSON.stringify(payments);
+    }
     const remarks = String(req.body?.remarks || "").trim();
 
     if (!requestId) {
@@ -1077,7 +1154,7 @@ export const collectCashierNameChangeRequest = async (req, res) => {
       });
     }
 
-    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER", "SPLIT"];
     if (!allowedModes.includes(paymentMode)) {
       return res.status(400).json({
         success: false,
@@ -1085,7 +1162,7 @@ export const collectCashierNameChangeRequest = async (req, res) => {
       });
     }
 
-    if (paymentMode !== "CASH" && !paymentId) {
+    if (paymentMode !== "CASH" && paymentMode !== "SPLIT" && !paymentId) {
       return res.status(400).json({
         success: false,
         message: "Payment ID is required for non-cash modes",
@@ -1115,12 +1192,13 @@ export const collectCashierNameChangeRequest = async (req, res) => {
       SET
         payment_mode = ?,
         payment_reference_id = ?,
+        split_payments = ?,
         cashier_remarks = ?,
         status = 'APPROVED',
         approved_at = NOW()
       WHERE id = ?
       `,
-      [paymentMode, paymentId || null, remarks || null, requestId]
+      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
     );
 
     await connection.query(
@@ -1144,6 +1222,46 @@ export const collectCashierNameChangeRequest = async (req, res) => {
     });
   } finally {
     connection.release();
+  }
+};
+
+const ensureSplitPaymentsColumns = async (connection) => {
+  const tables = [
+    "customer_pr_penalties",
+    "customer_name_change_requests",
+    "customer_connection_transfers",
+    "customer_new_connections",
+    "cashier_receipts",
+  ];
+
+  for (const table of tables) {
+    try {
+      const [rows] = await connection.query(
+        `SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'payment_mode'`,
+        [table],
+      );
+      if (rows.length && rows[0].COLUMN_TYPE.includes("enum")) {
+        await connection.query(
+          `ALTER TABLE ${table} MODIFY COLUMN payment_mode VARCHAR(50) DEFAULT NULL`,
+        );
+      }
+    } catch (err) {
+      console.error(`Error modifying payment_mode for ${table}:`, err.message);
+    }
+
+    try {
+      const [rows] = await connection.query(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'split_payments'`,
+        [table],
+      );
+      if (!rows.length) {
+        await connection.query(
+          `ALTER TABLE ${table} ADD COLUMN split_payments JSON DEFAULT NULL`,
+        );
+      }
+    } catch (err) {
+      console.error(`Error adding split_payments for ${table}:`, err.message);
+    }
   }
 };
 
@@ -1185,6 +1303,23 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+    const dateClause = hasRange ? 'AND DATE(t.created_at) BETWEEN ? AND ?' : '';
+    const queryParams = hasRange ? [startDate, endDate] : [];
+
+
+
+
     await ensureTransferVoucherPaymentColumns(connection);
 
     const status = String(req.query.status || "ALL").toUpperCase();
@@ -1220,10 +1355,11 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
       LEFT JOIN addresses a ON a.user_id = t.new_customer_id AND a.is_default = 1
       LEFT JOIN customer_transfer_agencies cta ON cta.transfer_id = t.id
       ${whereClause}
+      ${dateClause}
       ORDER BY t.created_at DESC, t.id DESC
       LIMIT 100
       `
-    );
+    , queryParams);
 
     return res.status(200).json({
       success: true,
@@ -1267,8 +1403,16 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
     await ensureTransferVoucherPaymentColumns(connection);
 
     const requestId = Number(req.params.requestId);
-    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
-    const paymentId = String(req.body?.paymentId || "").trim();
+    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    let paymentId = String(req.body?.paymentId || "").trim();
+    let splitPaymentsJson = null;
+
+    if (payments && payments.length > 0) {
+      paymentMode = "SPLIT";
+      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      splitPaymentsJson = JSON.stringify(payments);
+    }
     const remarks = String(req.body?.remarks || "").trim();
 
     if (!requestId) {
@@ -1278,7 +1422,7 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
       });
     }
 
-    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    const allowedModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER", "SPLIT"];
     if (!allowedModes.includes(paymentMode)) {
       return res.status(400).json({
         success: false,
@@ -1286,7 +1430,7 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
       });
     }
 
-    if (paymentMode !== "CASH" && !paymentId) {
+    if (paymentMode !== "CASH" && paymentMode !== "SPLIT" && !paymentId) {
       return res.status(400).json({
         success: false,
         message: "Payment ID is required for non-cash modes",
@@ -1326,12 +1470,13 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
       SET
         payment_mode = ?,
         payment_reference_id = ?,
+        split_payments = ?,
         cashier_remarks = ?,
         status = 'APPROVED',
         updated_at = NOW()
       WHERE id = ? AND status = 'PENDING_MANAGER'
       `,
-      [paymentMode, paymentId || null, remarks || null, requestId]
+      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
     );
 
     if (!result.affectedRows) {
@@ -1361,6 +1506,20 @@ export const getCashierNewConnectionRequests = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+    const dateClause = hasRange ? 'AND DATE(cnc.created_at) BETWEEN ? AND ?' : '';
+    const queryParams = hasRange ? [startDate, endDate] : [];
+
     await ensureNewConnectionCashierTables(connection);
 
     const status = String(req.query.status || "ALL").toUpperCase();
@@ -1415,6 +1574,7 @@ export const getCashierNewConnectionRequests = async (req, res) => {
       LEFT JOIN customer_new_connection_products ncp ON ncp.connection_id = cnc.id
       LEFT JOIN products p ON p.id = ncp.product_id
       ${whereClause}
+      ${dateClause}
       GROUP BY
         cnc.id,
         cnc.user_id,
@@ -1434,7 +1594,7 @@ export const getCashierNewConnectionRequests = async (req, res) => {
       ORDER BY cnc.created_at DESC, cnc.id DESC
       LIMIT 100
       `
-    );
+    , queryParams);
 
     return res.status(200).json({
       success: true,
@@ -1493,8 +1653,16 @@ export const collectCashierNewConnectionRequest = async (req, res) => {
     await ensureNewConnectionCashierTables(connection);
 
     const requestId = Number(req.params.requestId);
-    const paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
-    const paymentId = String(req.body?.paymentId || "").trim();
+    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
+    let paymentId = String(req.body?.paymentId || "").trim();
+    let splitPaymentsJson = null;
+
+    if (payments && payments.length > 0) {
+      paymentMode = "SPLIT";
+      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      splitPaymentsJson = JSON.stringify(payments);
+    }
     const remarks = String(req.body?.remarks || "").trim();
 
     if (!requestId) {
@@ -1520,13 +1688,14 @@ export const collectCashierNewConnectionRequest = async (req, res) => {
       SET
         payment_mode = ?,
         payment_reference_id = ?,
+        split_payments = ?,
         cashier_remarks = ?,
         payment_status = 'PAID',
         paid_at = NOW(),
         updated_at = NOW()
       WHERE id = ? AND payment_status = 'PENDING_PAYMENT'
       `,
-      [paymentMode, paymentId || null, remarks || null, requestId]
+      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
     );
 
     if (!result.affectedRows) {
@@ -2029,8 +2198,10 @@ export const recordOfficeSale = async (req, res) => {
       phone,
       address,
       items = [],
-      payment_method = 'CASH',
+      payment_method: originalPaymentMethod = 'CASH',
+      payments = null,
     } = req.body;
+    const payment_method = payments && payments.length > 0 ? 'SPLIT' : originalPaymentMethod;
 
     if (!customer_name || !phone || !address || !items.length) {
       return res.status(400).json({
@@ -2232,7 +2403,32 @@ export const recordOfficeSale = async (req, res) => {
       );
     }
 
-    if (payment_method === 'PART_PAYMENT') {
+    if (payments && payments.length > 0) {
+      let sum = 0;
+      for (const p of payments) {
+        sum += Number(p.amount);
+      }
+      if (Math.abs(sum - totalAmount) > 0.01) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Sum of split payments must equal the total amount',
+        });
+      }
+
+      for (const p of payments) {
+        if (Number(p.amount) > 0) {
+          await connection.execute(
+            `
+            INSERT INTO payments
+              (sale_id, amount, method, status, type, created_at)
+            VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW())
+            `,
+            [saleId, Number(p.amount), p.method || 'CASH']
+          );
+        }
+      }
+    } else if (payment_method === 'PART_PAYMENT') {
       // Split a part payment into two payment rows: cash portion + bank/UTR portion.
       const rawCash = Number(req.body.cash_amount);
       const cashPart = Math.min(Math.max(Number.isFinite(rawCash) ? rawCash : 0, 0), totalAmount);
@@ -2315,6 +2511,23 @@ export const getTodayOfficeSales = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+    const dateClause = hasRange ? 'AND DATE(s.created_at) BETWEEN ? AND ?' : 'AND DATE(s.created_at) = CURDATE()';
+    const queryParams = hasRange ? [startDate, endDate] : [];
+
+
+
+
     const [rows] = await connection.query(
       `
       SELECT
@@ -2328,11 +2541,11 @@ export const getTodayOfficeSales = async (req, res) => {
       LEFT JOIN sales_items si ON si.sale_id = s.id
       LEFT JOIN products p ON p.id = si.product_id
       WHERE s.sales_from = 'CASHIER'
-        AND DATE(s.created_at) = CURDATE()
+        ${dateClause}
       GROUP BY s.id, u.name, s.total_amount
       ORDER BY s.created_at DESC
       `
-    );
+    , queryParams);
 
     return res.status(200).json({
       success: true,
@@ -2527,6 +2740,23 @@ export const getCashOutExpenseRequests = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    if (startDate && !endDate) endDate = startDate;
+    if (endDate && !startDate) startDate = endDate;
+    if (startDate && endDate && startDate > endDate) {
+      const tmp = startDate;
+      startDate = endDate;
+      endDate = tmp;
+    }
+    const hasRange = Boolean(startDate && endDate);
+    const dateClause = hasRange ? 'AND DATE(e.created_at) BETWEEN ? AND ?' : '';
+    const queryParams = hasRange ? [startDate, endDate] : [];
+
+
+
+
     const [summaryRows] = await connection.query(
       `
       SELECT
@@ -2536,7 +2766,7 @@ export const getCashOutExpenseRequests = async (req, res) => {
       INNER JOIN users u ON u.id = e.created_by
       WHERE u.role = 'PURCHASE_MANAGER'
       `
-    );
+    , queryParams);
 
     const [rows] = await connection.query(
       `
@@ -2890,6 +3120,7 @@ export const createCashierReceipt = async (req, res) => {
     paymentMode,
     transfer_id,
     transferId,
+    payments = null,
   } = req.body || {};
 
   const normalizedType = normalizeReceiptEnum(type ?? receipt_type);
@@ -2918,10 +3149,27 @@ export const createCashierReceipt = async (req, res) => {
   }
 
   // Payment mode defaults to Cash, matching the form's default selection.
-  const rawMode = payment_mode ?? paymentMode;
-  const normalizedMode = rawMode ? normalizeReceiptEnum(rawMode) : 'CASH';
+  let rawMode = payment_mode ?? paymentMode;
+  let splitPaymentsJson = null;
 
-  if (!RECEIPT_PAYMENT_MODES.includes(normalizedMode)) {
+  if (payments && payments.length > 0) {
+    let sum = 0;
+    for (const p of payments) {
+      sum += Number(p.amount);
+    }
+    if (Math.abs(sum - Number(amount)) > 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: 'Sum of split payments must equal the total amount',
+      });
+    }
+    rawMode = 'SPLIT';
+    splitPaymentsJson = JSON.stringify(payments);
+  }
+
+  const normalizedMode = rawMode === 'SPLIT' ? 'SPLIT' : (rawMode ? normalizeReceiptEnum(rawMode) : 'CASH');
+
+  if (normalizedMode !== 'SPLIT' && !RECEIPT_PAYMENT_MODES.includes(normalizedMode)) {
     return res.status(400).json({
       success: false,
       message: `payment_mode must be one of ${RECEIPT_PAYMENT_MODES.join(', ')}`,
@@ -2932,6 +3180,7 @@ export const createCashierReceipt = async (req, res) => {
 
   try {
     await ensureCashierReceiptsTable(connection);
+    await ensureSplitPaymentsColumns(connection);
 
     const cashierId = req.user?.id || null;
     const trimmedDescription = String(description || '').trim() || null;
@@ -2945,10 +3194,22 @@ export const createCashierReceipt = async (req, res) => {
         amount,
         description,
         payment_mode,
+        split_payments,
         transfer_id,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+      )
+      VALUES (
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        NOW(),
+        NOW()
+      )
       `,
       [
         cashierId,
@@ -2956,6 +3217,7 @@ export const createCashierReceipt = async (req, res) => {
         numericAmount,
         trimmedDescription,
         normalizedMode,
+        splitPaymentsJson,
         trimmedTransferId,
       ]
     );
@@ -3014,7 +3276,7 @@ export const getRecentCashierReceipts = async (req, res) => {
     // No explicit range => today, which is what the panel shows by default.
     const whereClause = startDate
       ? 'WHERE DATE(created_at) BETWEEN ? AND ?'
-      : 'WHERE DATE(created_at) = CURDATE()';
+      : 'WHERE ${dateClause}';
     const whereParams = startDate ? [startDate, endDate] : [];
 
     const requestedLimit = Number(req.query.limit);
