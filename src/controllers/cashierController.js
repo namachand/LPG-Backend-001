@@ -591,7 +591,7 @@ export const getCashierDashboard = async (req, res) => {
         e.status
       FROM expenses e
       LEFT JOIN users u ON u.id = e.created_by
-      WHERE e.status = 'PENDING' ${dateClause} ${dateClause}
+      WHERE e.status = 'PENDING'
       ${pendingExpenseDateClause}
       ORDER BY e.created_at DESC
       LIMIT 2
@@ -619,7 +619,7 @@ export const getCashierDashboard = async (req, res) => {
         END AS status
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
-      LEFT JOIN settlement_history sh ON ${joinCondition} ${settlementDateClause}
+      LEFT JOIN settlement_history sh ON sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') ${settlementDateClause}
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
       LIMIT 4

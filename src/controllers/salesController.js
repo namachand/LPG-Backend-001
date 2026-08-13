@@ -9,6 +9,8 @@ export const getSalesDashboard = async (req, res) => {
       startDate,
       endDate,
     } = req.query;
+    
+    const agencyId = req.user.agency_id;
 
     const offset = (page - 1) * limit;
 
@@ -20,6 +22,9 @@ export const getSalesDashboard = async (req, res) => {
       dateFilter = `AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?`;
       dateFilterValues.push(startDate, endDate);
     }
+    
+    // Default to agencyId in queries
+    const agencyValues = [agencyId];
 
     // Search Filter
     let searchFilter = "";
@@ -39,10 +44,10 @@ export const getSalesDashboard = async (req, res) => {
         COALESCE(SUM(CASE WHEN p.type = 'COMPANY' THEN p.amount ELSE 0 END), 0) AS online
         FROM payments p
         JOIN sales s ON p.sale_id = s.id
-        WHERE s.status = 'DELIVERED'
+        WHERE s.status = 'DELIVERED' AND s.agency_id = ?
       ${dateFilter}
       `,
-      dateFilterValues
+      [...agencyValues, ...dateFilterValues]
     );
 
     // =========================
@@ -61,14 +66,14 @@ export const getSalesDashboard = async (req, res) => {
       JOIN users u ON d.user_id = u.id
       LEFT JOIN sales s ON s.driver_id = d.id AND s.status = 'DELIVERED'
       LEFT JOIN payments p ON p.sale_id = s.id
-      WHERE 1=1
+      WHERE d.agency_id = ?
       ${dateFilter}
       ${searchFilter}
       GROUP BY d.id
       ORDER BY total DESC
       LIMIT ? OFFSET ?
       `,
-      [...dateFilterValues, ...searchFilterValues, Number(limit), Number(offset)]
+      [...agencyValues, ...dateFilterValues, ...searchFilterValues, Number(limit), Number(offset)]
     );
 
     // =========================
@@ -80,11 +85,11 @@ export const getSalesDashboard = async (req, res) => {
       FROM drivers d
       JOIN users u ON d.user_id = u.id
       LEFT JOIN sales s ON s.driver_id = d.id AND s.status = 'DELIVERED'
-      WHERE 1=1
+      WHERE d.agency_id = ?
       ${dateFilter}
       ${searchFilter}
       `,
-      [...dateFilterValues, ...searchFilterValues]
+      [...agencyValues, ...dateFilterValues, ...searchFilterValues]
     );
 
     // =========================
@@ -116,13 +121,13 @@ export const getSalesDashboard = async (req, res) => {
       LEFT JOIN sales_items si ON si.sale_id = s.id
       LEFT JOIN products pr ON pr.id = si.product_id
       LEFT JOIN payments p ON p.sale_id = s.id
-      WHERE 1=1
+      WHERE s.agency_id = ?
       ${dateFilter}
       GROUP BY s.id, c.name, du.name, s.status, s.total_amount
       ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
       LIMIT 8
       `,
-      dateFilterValues
+      [...agencyValues, ...dateFilterValues]
     );
 
     const recentSales = recentSalesRows.map((row) => {
@@ -190,6 +195,8 @@ export const createSale = async (req, res) => {
       items = [],
       payments = []
     } = req.body;
+    
+    const agencyId = req.user.agency_id;
 
     if (!customer_id || !items.length) {
       return res.status(400).json({
@@ -214,8 +221,8 @@ export const createSale = async (req, res) => {
     const [saleResult] = await connection.execute(
       `
       INSERT INTO sales 
-      (customer_id, driver_id, total_amount, payment_method, status, address_id, created_at, assigned_at)
-      VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+      (customer_id, driver_id, total_amount, payment_method, status, address_id, agency_id, created_at, assigned_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
       `,
       [
         customer_id,
@@ -223,7 +230,8 @@ export const createSale = async (req, res) => {
         total_amount,
         payment_method,
         status,
-        address_id || null
+        address_id || null,
+        agencyId
       ]
     );
 
@@ -236,10 +244,10 @@ export const createSale = async (req, res) => {
       await connection.execute(
         `
         INSERT INTO sales_items 
-        (sale_id, product_id, quantity, price)
-        VALUES (?, ?, ?, ?)
+        (sale_id, product_id, quantity, price, agency_id)
+        VALUES (?, ?, ?, ?, ?)
         `,
-        [saleId, item.product_id, item.quantity, item.price]
+        [saleId, item.product_id, item.quantity, item.price, agencyId]
       );
     }
 
@@ -252,15 +260,16 @@ export const createSale = async (req, res) => {
       await connection.execute(
         `
         INSERT INTO payments
-        (sale_id, amount, method, status, type, created_at)
-        VALUES (?, ?, ?, ?, ?, NOW())
+        (sale_id, amount, method, status, type, agency_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, NOW())
         `,
         [
           saleId,
           p.amount,
           p.method,
           p.status,
-          p.type
+          p.type,
+          agencyId
         ]
       );
 
