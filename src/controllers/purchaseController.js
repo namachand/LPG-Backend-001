@@ -138,6 +138,7 @@ const getTripOverview = async (connection, tripId) => {
       pl.product_type,
       pl.invoice_url,
       pl.invoice_source,
+      pl.invoice_number,
       pl.total_quantity,
       pl.status,
       pl.created_at,
@@ -145,7 +146,7 @@ const getTripOverview = async (connection, tripId) => {
     FROM purchase_loads pl
     LEFT JOIN purchase_load_items pli ON pli.load_id = pl.id
     WHERE pl.trip_id = ?
-    GROUP BY pl.id, pl.product_type, pl.invoice_url, pl.invoice_source, pl.total_quantity, pl.status, pl.created_at
+    GROUP BY pl.id, pl.product_type, pl.invoice_url, pl.invoice_source, pl.invoice_number, pl.total_quantity, pl.status, pl.created_at
     ORDER BY pl.created_at DESC, pl.id DESC
     `,
     [tripId]
@@ -190,6 +191,7 @@ const getTripOverview = async (connection, tripId) => {
       productType: row.product_type,
       invoiceUrl: row.invoice_url,
       invoiceSource: row.invoice_source,
+      invoiceNumber: row.invoice_number,
       totalQuantity: Number(row.total_quantity || 0),
       itemsCount: Number(row.items_count || 0),
       status: row.status,
@@ -612,6 +614,7 @@ export const getPurchaseLoads = async (req, res) => {
         pl.product_type,
         pl.invoice_url,
         pl.invoice_source,
+        pl.invoice_number,
         pl.total_quantity,
         pl.status,
         pl.created_at,
@@ -621,7 +624,7 @@ export const getPurchaseLoads = async (req, res) => {
       JOIN purchase_trips pt ON pt.id = pl.trip_id
       LEFT JOIN purchase_load_items pli ON pli.load_id = pl.id
       WHERE pt.purchase_manager_id = ?
-      GROUP BY pl.id, pl.trip_id, pl.product_type, pl.invoice_url, pl.invoice_source, pl.total_quantity, pl.status, pl.created_at, pt.status
+      GROUP BY pl.id, pl.trip_id, pl.product_type, pl.invoice_url, pl.invoice_source, pl.invoice_number, pl.total_quantity, pl.status, pl.created_at, pt.status
       ORDER BY pl.created_at DESC, pl.id DESC
       `,
       [userId]
@@ -635,6 +638,7 @@ export const getPurchaseLoads = async (req, res) => {
         productType: row.product_type,
         invoiceUrl: row.invoice_url,
         invoiceSource: row.invoice_source,
+        invoiceNumber: row.invoice_number,
         totalQuantity: Number(row.total_quantity || 0),
         itemsCount: Number(row.items_count || 0),
         status: row.status,
@@ -675,6 +679,7 @@ export const getPurchaseLoadDetail = async (req, res) => {
         pl.product_type,
         pl.invoice_url,
         pl.invoice_source,
+        pl.invoice_number,
         pl.total_quantity,
         pl.status,
         pl.created_at,
@@ -710,6 +715,7 @@ export const getPurchaseLoadDetail = async (req, res) => {
         productType: rows[0].product_type,
         invoiceUrl: rows[0].invoice_url,
         invoiceSource: rows[0].invoice_source,
+        invoiceNumber: rows[0].invoice_number,
         totalQuantity: Number(rows[0].total_quantity || 0),
         status: rows[0].status,
         tripStatus: formatTripStatus(rows[0].trip_status),
@@ -1144,6 +1150,7 @@ const getPurchaseLoadDetailData = async (connection, loadId) => {
       pl.product_type,
       pl.invoice_url,
       pl.invoice_source,
+      pl.invoice_number,
       pl.total_quantity,
       pl.status,
       pl.created_at,
@@ -1174,6 +1181,7 @@ const getPurchaseLoadDetailData = async (connection, loadId) => {
     productType: rows[0].product_type,
     invoiceUrl: rows[0].invoice_url,
     invoiceSource: rows[0].invoice_source,
+    invoiceNumber: rows[0].invoice_number,
     totalQuantity: Number(rows[0].total_quantity || 0),
     status: rows[0].status,
     tripStatus: formatTripStatus(rows[0].trip_status),
@@ -1268,12 +1276,25 @@ const _approveLoadStock = async (connection, loadId) => {
   }
 };
 
+const ensurePurchaseLoadInvoiceNumberColumn = async (connection) => {
+  const [cols] = await connection.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'purchase_loads' AND COLUMN_NAME = 'invoice_number'`
+  );
+  if (!cols.length) {
+    await connection.query(
+      `ALTER TABLE purchase_loads ADD COLUMN invoice_number VARCHAR(100) DEFAULT NULL AFTER product_type`
+    );
+  }
+};
+
 export const attachPurchaseLoadInvoice = async (req, res) => {
   const connection = await db.getConnection();
+  await ensurePurchaseLoadInvoiceNumberColumn(connection);
 
   try {
     const loadId = Number(req.params.loadId);
-    const { invoiceUrl = null, invoiceSource = null } = req.body || {};
+    const { invoiceUrl = null, invoiceSource = null, invoiceNumber = null } = req.body || {};
 
     if (!loadId) {
       return res.status(400).json({
@@ -1319,10 +1340,10 @@ export const attachPurchaseLoadInvoice = async (req, res) => {
     await connection.query(
       `
       UPDATE purchase_loads
-      SET invoice_url = ?, invoice_source = ?, status = 'PENDING'
+      SET invoice_url = ?, invoice_source = ?, invoice_number = ?, status = 'PENDING'
       WHERE id = ?
       `,
-      [invoiceUrl, invoiceSource, loadId]
+      [invoiceUrl, invoiceSource, invoiceNumber, loadId]
     );
 
     // 2. Move stock_transactions to waiting approval for this load

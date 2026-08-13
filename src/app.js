@@ -2,7 +2,9 @@ import express from "express";
 import cors from "cors";
 import { fileURLToPath } from "url";
 import path from "path";
+import { verifyToken } from "./middleware/authMiddleware.js";
 import routes from "./routes/authRoutes.js";
+import agencyRoutes from "./routes/agencyRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import salesRoutes from "./routes/salesRoutes.js";
 import driverRoutes from "./routes/driverRoutes.js";
@@ -69,7 +71,14 @@ app.use((req, res, next) => {
 // Serve uploaded files as static assets
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
+// Auth routes (unprotected)
 app.use("/api/auth", routes);
+app.use("/api/agencies", agencyRoutes);
+
+// Apply auth middleware to all other API routes
+app.use("/api", verifyToken);
+
+// Protected routes
 app.use("/api/sales", salesRoutes);
 app.use("/api/drivers", driverRoutes);
 app.use("/api/stocks", stockRoutes);

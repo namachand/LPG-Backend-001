@@ -726,6 +726,7 @@ export const getStockInLoads = async (req, res) => {
         MAX(st.created_at) AS created_at,
         SUM(st.quantity) AS total_quantity,
         MIN(st.isApproved) AS isApproved,
+        MAX(pl.invoice_number) AS invoice_number,
 
         d.id AS driver_id,
         d.vehicle_number,
@@ -756,7 +757,7 @@ export const getStockInLoads = async (req, res) => {
         date: row.load_date,
         driver_id: row.driver_id,
         driver: row.purchase_manager_name || row.driver_name || "Unknown Driver",
-        invoice: `INV-${row.load_id}`,
+        invoice: row.invoice_number || `INV-${row.load_id}`,
         vehicle: row.vehicle_number || "N/A",
         qty: Number(row.total_quantity || 0),
         status:
@@ -799,7 +800,8 @@ export const getStockInLoadDetail = async (req, res) => {
         d.vehicle_number,
         u.name AS driver_name,
         pu.name AS purchase_manager_name,
-        pl.invoice_url
+        pl.invoice_url,
+        pl.invoice_number
       FROM stock_transactions st
       JOIN products p ON p.id = st.product_id
       LEFT JOIN categories c ON c.id = p.category_id
@@ -836,7 +838,7 @@ export const getStockInLoadDetail = async (req, res) => {
         driver: rows[0].purchase_manager_name || rows[0].driver_name || "Unknown Driver",
         vehicle: rows[0].vehicle_number || "N/A",
         depot: "HP Gas Depot - Sector 12",
-        invoice: `INV-${loadId}`,
+        invoice: rows[0].invoice_number || `INV-${loadId}`,
         invoiceImageUrl: rows[0].invoice_url || null,
         qty: totalQty,
         status:

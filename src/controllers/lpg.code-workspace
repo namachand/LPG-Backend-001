@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../lpg-godown-react-app-main"
+		},
+		{
+			"path": "../../../cashier-dashboard-LPG"
+		},
+		{
+			"path": "../../../customer-issues-dashboard-lpg"
+		},
+		{
+			"path": "../../../LPG-Frontend-001-main"
+		}
+	],
+	"settings": {}
+}

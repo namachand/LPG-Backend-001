@@ -42,6 +42,7 @@ const normalizeUser = (user) => ({
   phone: user.phone || "",
   role: user.role,
   status: user.status,
+  agency_id: user.agency_id ? Number(user.agency_id) : null,
 });
 
 const saveOtpLog = async ({ userId, identifier, otp, stage }) => {
@@ -61,7 +62,7 @@ const getUserByIdentifier = async (identifier) => {
   if (!value) return null;
 
   let query = `
-    SELECT id, name, email, phone, password, role, status
+    SELECT id, name, email, phone, password, role, status, agency_id
     FROM users
     WHERE LOWER(email) = LOWER(?)
   `;
