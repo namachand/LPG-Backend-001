@@ -322,11 +322,12 @@ export const getGodownDashboardData = async (req, res) => {
         st.created_at,
         COALESCE(st.is_defective, 0) AS is_defective,
         p.name AS product_name,
-        u.name AS driver_name
+        COALESCE(u.name, cu.name) AS driver_name
       FROM stock_transactions st
       LEFT JOIN products p ON p.id = st.product_id
       LEFT JOIN drivers d ON d.id = st.driver_id
       LEFT JOIN users u ON u.id = d.user_id
+      LEFT JOIN users cu ON cu.id = st.created_by
       WHERE DATE(st.created_at) BETWEEN ? AND ?
       ORDER BY st.created_at DESC
       LIMIT 10

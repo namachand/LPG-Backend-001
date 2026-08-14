@@ -139,6 +139,7 @@ export const getOwnerDashboard = async (req, res) => {
         p.type AS product_type,
         COALESCE(SUM(s.quantity), 0) AS total_quantity,
         COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity,
+        COALESCE(SUM(s.system_quantity), 0) AS otp_sent_quantity,
         (COALESCE(SUM(s.quantity), 0) - COALESCE(SUM(s.system_quantity), 0)) AS system_quantity
       FROM stock s
       INNER JOIN products p ON p.id = s.product_id
@@ -153,22 +154,27 @@ export const getOwnerDashboard = async (req, res) => {
     let emptyCommercial = 0;
     let systemDomestic = 0;
     let systemCommercial = 0;
+    let otpSentDomestic = 0;
+    let otpSentCommercial = 0;
 
     stockRows.forEach((row) => {
       if (row.product_type === 'DOMESTIC') {
         domesticStock = Number(row.total_quantity || 0);
         emptyDomestic = Number(row.empty_quantity || 0);
         systemDomestic = Number(row.system_quantity || 0);
+        otpSentDomestic = Number(row.otp_sent_quantity || 0);
       } else if (row.product_type === 'COMMERCIAL') {
         commercialStock = Number(row.total_quantity || 0);
         emptyCommercial = Number(row.empty_quantity || 0);
         systemCommercial = Number(row.system_quantity || 0);
+        otpSentCommercial = Number(row.otp_sent_quantity || 0);
       }
     });
 
     const totalStock = domesticStock + commercialStock;
     const totalEmpty = emptyDomestic + emptyCommercial;
     const totalSystem = systemDomestic + systemCommercial;
+    const totalOtpSent = otpSentDomestic + otpSentCommercial;
 
     // Total Expenses (Driver Expense from expenses table + Office Expense from office_expenses table)
     const [driverExpenseRows] = await db.execute(
@@ -353,6 +359,16 @@ export const getOwnerDashboard = async (req, res) => {
           domestic: systemDomestic,
           commercial: systemCommercial,
           total: totalSystem,
+          godownStock: {
+            domestic: domesticStock,
+            commercial: commercialStock,
+            total: totalStock,
+          },
+          otpSent: {
+            domestic: otpSentDomestic,
+            commercial: otpSentCommercial,
+            total: totalOtpSent,
+          }
         },
         totalExpenses,
         paymentSummary,
