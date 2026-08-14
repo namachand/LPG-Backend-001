@@ -430,7 +430,7 @@ export const getGodownDashboardData = async (req, res) => {
       if (activityType === "ADJUSTMENT_ADD" || activityType === "PURCHASE") {
         return {
           id: row.id,
-          title: `${qty} ${productName} received from Depot`,
+          title: `${qty} ${productName} received from Depot by ${driverName}`,
           icon: "arrow-down-circle-outline",
           color: "green",
           createdAt: row.created_at,
