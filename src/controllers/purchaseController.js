@@ -1,6 +1,20 @@
 import db from "../config/db.js";
+import {
+  completeEmptyLoadInTransaction,
+  ensureEmptyCylinderLoadTables,
+} from "./emptyCylinderLoadController.js";
+
 const DEFAULT_PURCHASE_STOCK_AREA_ID = 2;
 const purchaseTripColumnCache = new Map();
+
+// A trip is either the standard cylinder purchase run or the empty-cylinder
+// return run created from a godown dispatch. Both live in purchase_trips so the
+// trips list, the expense→trip time-window linkage and the cashier approval
+// queue work identically for each.
+const TRIP_TYPE = {
+  CYLINDER: "CYLINDER",
+  EMPTY: "EMPTY",
+};
 
 const hasPurchaseTripColumn = async (connection, columnName) => {
   if (purchaseTripColumnCache.has(columnName)) {
@@ -22,6 +36,38 @@ const hasPurchaseTripColumn = async (connection, columnName) => {
   const exists = rows.length > 0;
   purchaseTripColumnCache.set(columnName, exists);
   return exists;
+};
+
+// Older databases predate the two columns the empty-cylinder trip needs. MySQL
+// has no ADD COLUMN IF NOT EXISTS, so add them defensively and swallow the
+// duplicate-column error, matching ensureEmptyCylinderLoadTables' convention.
+const ensurePurchaseTripEmptyColumns = async (connection) => {
+  const additions = [
+    [
+      "trip_type",
+      `ALTER TABLE purchase_trips ADD COLUMN trip_type VARCHAR(20) NOT NULL DEFAULT 'CYLINDER'`,
+    ],
+    [
+      "empty_load_id",
+      `ALTER TABLE purchase_trips ADD COLUMN empty_load_id BIGINT NULL`,
+    ],
+  ];
+
+  for (const [columnName, statement] of additions) {
+    if (await hasPurchaseTripColumn(connection, columnName)) {
+      continue;
+    }
+
+    try {
+      await connection.query(statement);
+    } catch (error) {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
+        throw error;
+      }
+    }
+
+    purchaseTripColumnCache.set(columnName, true);
+  }
 };
 
 const formatTripStatus = (status) => {
@@ -101,6 +147,11 @@ const getTripOverview = async (connection, tripId) => {
     connection,
     "end_odometer_image_url",
   );
+  const hasTripType = await hasPurchaseTripColumn(connection, "trip_type");
+  const hasEmptyLoadId = await hasPurchaseTripColumn(
+    connection,
+    "empty_load_id"
+  );
 
   const [tripRows] = await connection.query(
     `
@@ -112,6 +163,8 @@ const getTripOverview = async (connection, tripId) => {
       ${hasEndOdometerReading ? "pt.end_odometer_reading" : "NULL"} AS end_odometer_reading,
       pt.odometer_image_url,
       ${hasEndOdometerImage ? "pt.end_odometer_image_url" : "NULL"} AS end_odometer_image_url,
+      ${hasTripType ? "pt.trip_type" : "'CYLINDER'"} AS trip_type,
+      ${hasEmptyLoadId ? "pt.empty_load_id" : "NULL"} AS empty_load_id,
       pt.status,
       pt.started_at,
       pt.ended_at,
@@ -171,8 +224,67 @@ const getTripOverview = async (connection, tripId) => {
     [trip.purchase_manager_id, trip.started_at, trip.ended_at, trip.ended_at],
   );
 
+  const tripType =
+    String(trip.trip_type || TRIP_TYPE.CYLINDER).toUpperCase() ===
+    TRIP_TYPE.EMPTY
+      ? TRIP_TYPE.EMPTY
+      : TRIP_TYPE.CYLINDER;
+
+  // An empty trip carries no purchase_loads — the cylinders it moves are the
+  // godown dispatch it was started from, so surface that instead.
+  let emptyLoad = null;
+
+  if (tripType === TRIP_TYPE.EMPTY && trip.empty_load_id) {
+    const [emptyRows] = await connection.query(
+      `
+      SELECT
+        ecl.id,
+        ecl.vehicle_number,
+        ecl.erv_number,
+        ecl.status,
+        ecl.invoice_url,
+        ecl.dispatched_at,
+        ecl.accepted_at,
+        ecl.completed_at,
+        assigner.name AS assigned_by_name,
+        COALESCE(SUM(ecli.quantity), 0) AS total_qty,
+        COALESCE(SUM(CASE WHEN ecli.category = 'DOMESTIC' THEN ecli.quantity ELSE 0 END), 0) AS domestic_qty,
+        COALESCE(SUM(CASE WHEN ecli.category = 'COMMERCIAL' THEN ecli.quantity ELSE 0 END), 0) AS commercial_qty
+      FROM empty_cylinder_loads ecl
+      LEFT JOIN users assigner ON assigner.id = ecl.assigned_by
+      LEFT JOIN empty_cylinder_load_items ecli ON ecli.load_id = ecl.id
+      WHERE ecl.id = ?
+      GROUP BY ecl.id, ecl.vehicle_number, ecl.erv_number, ecl.status,
+        ecl.invoice_url, ecl.dispatched_at, ecl.accepted_at, ecl.completed_at,
+        assigner.name
+      `,
+      [trip.empty_load_id]
+    );
+
+    if (emptyRows.length) {
+      const row = emptyRows[0];
+      emptyLoad = {
+        id: Number(row.id),
+        vehicleNumber: row.vehicle_number || "N/A",
+        ervNumber: row.erv_number || null,
+        assignedBy: row.assigned_by_name || "Godown",
+        status: row.status,
+        invoiceUrl: row.invoice_url || null,
+        dispatchedAt: row.dispatched_at,
+        acceptedAt: row.accepted_at,
+        completedAt: row.completed_at,
+        totalQuantity: Number(row.total_qty || 0),
+        domesticQuantity: Number(row.domestic_qty || 0),
+        commercialQuantity: Number(row.commercial_qty || 0),
+      };
+    }
+  }
+
   return {
     id: trip.id,
+    tripType,
+    emptyLoadId: trip.empty_load_id ? Number(trip.empty_load_id) : null,
+    emptyLoad,
     purchaseManagerId: trip.purchase_manager_id,
     purchaseManagerName: trip.purchase_manager_name,
     stockAreaId: trip.stock_area_id,
@@ -476,6 +588,161 @@ export const startPurchaseTrip = async (req, res) => {
   }
 };
 
+// POST /trips/start-empty — the purchase manager has accepted a godown empty
+// dispatch and is now driving it out. Same odometer-in / odometer-out shape as a
+// cylinder trip, but no load creation and no approval gate: the trip runs, takes
+// expenses (which the cashier approves), and closes directly.
+export const startEmptyCylinderTrip = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const {
+      userId,
+      emptyLoadId,
+      odometerReading,
+      odometerImageUrl = null,
+    } = req.body || {};
+
+    const parsedUserId = Number(userId);
+    const parsedLoadId = Number(emptyLoadId);
+    const parsedOdometer = Number(odometerReading);
+
+    if (!parsedUserId || !parsedLoadId) {
+      return res.status(400).json({
+        success: false,
+        message: "userId and emptyLoadId are required",
+      });
+    }
+
+    if (!Number.isFinite(parsedOdometer) || parsedOdometer <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid odometerReading is required",
+      });
+    }
+
+    await ensureEmptyCylinderLoadTables(connection);
+    await ensurePurchaseTripEmptyColumns(connection);
+
+    await connection.beginTransaction();
+
+    // One active trip per manager whatever its type: the driver and vehicle can
+    // only be on one run, and the expense→trip window would otherwise be
+    // ambiguous across two open trips.
+    const [existingRows] = await connection.query(
+      `
+      SELECT id
+      FROM purchase_trips
+      WHERE purchase_manager_id = ?
+        AND status = 'IN_PROGRESS'
+      ORDER BY started_at DESC, id DESC
+      LIMIT 1
+      `,
+      [parsedUserId]
+    );
+
+    if (existingRows.length) {
+      const overview = await getTripOverview(connection, existingRows[0].id);
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: "An active trip already exists",
+        data: overview,
+      });
+    }
+
+    const [loadRows] = await connection.query(
+      `
+      SELECT id, purchase_manager_id, status
+      FROM empty_cylinder_loads
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [parsedLoadId]
+    );
+
+    if (!loadRows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Empty cylinder load not found",
+      });
+    }
+
+    if (Number(loadRows[0].purchase_manager_id) !== parsedUserId) {
+      await connection.rollback();
+      return res.status(403).json({
+        success: false,
+        message: "This load is assigned to a different purchase manager",
+      });
+    }
+
+    if (loadRows[0].status !== "ACCEPTED") {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Accept the load before starting its trip (current: ${loadRows[0].status})`,
+      });
+    }
+
+    const [duplicateRows] = await connection.query(
+      `
+      SELECT id
+      FROM purchase_trips
+      WHERE empty_load_id = ?
+        AND status <> 'CANCELLED'
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [parsedLoadId]
+    );
+
+    if (duplicateRows.length) {
+      const overview = await getTripOverview(connection, duplicateRows[0].id);
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: "A trip has already been started for this load",
+        data: overview,
+      });
+    }
+
+    const [result] = await connection.query(
+      `
+      INSERT INTO purchase_trips
+        (purchase_manager_id, stock_area_id, odometer_reading, odometer_image_url, status, trip_type, empty_load_id)
+      VALUES (?, ?, ?, ?, 'IN_PROGRESS', 'EMPTY', ?)
+      `,
+      [
+        parsedUserId,
+        DEFAULT_PURCHASE_STOCK_AREA_ID,
+        parsedOdometer,
+        odometerImageUrl,
+        parsedLoadId,
+      ]
+    );
+
+    await connection.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: "Empty cylinder trip started successfully",
+      data: await getTripOverview(connection, result.insertId),
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("startEmptyCylinderTrip error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to start empty cylinder trip",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
 export const getActivePurchaseTrip = async (req, res) => {
   const connection = await db.getConnection();
 
@@ -517,6 +784,52 @@ export const getActivePurchaseTrip = async (req, res) => {
   }
 };
 
+// GET /trips/empty/:loadId — the trip started for a given godown empty
+// dispatch, or null if the driver has not started one yet. Lets the load screen
+// show the running (or finished) trip without scanning the whole trip list.
+export const getEmptyCylinderLoadTrip = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const loadId = Number(req.params.loadId);
+
+    if (!loadId) {
+      return res.status(400).json({
+        success: false,
+        message: "loadId is required",
+      });
+    }
+
+    await ensurePurchaseTripEmptyColumns(connection);
+
+    const [rows] = await connection.query(
+      `
+      SELECT id
+      FROM purchase_trips
+      WHERE empty_load_id = ?
+        AND status <> 'CANCELLED'
+      ORDER BY started_at DESC, id DESC
+      LIMIT 1
+      `,
+      [loadId]
+    );
+
+    return res.json({
+      success: true,
+      data: rows.length ? await getTripOverview(connection, rows[0].id) : null,
+    });
+  } catch (error) {
+    console.error("getEmptyCylinderLoadTrip error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch the trip for this load",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
 export const getPurchaseTrips = async (req, res) => {
   const connection = await db.getConnection();
 
@@ -530,20 +843,32 @@ export const getPurchaseTrips = async (req, res) => {
       });
     }
 
+    await ensureEmptyCylinderLoadTables(connection);
+    await ensurePurchaseTripEmptyColumns(connection);
+
+    // An empty trip has no purchase_loads: it counts as the single godown
+    // dispatch it was started from, and its cylinders come from that load's
+    // items. Everything else (expense counts/totals) is type-agnostic.
     const [rows] = await connection.query(
       `
       SELECT
         pt.id,
         pt.status,
+        pt.trip_type,
+        pt.empty_load_id,
         pt.odometer_reading,
         pt.started_at,
         pt.ended_at,
-        (
-          SELECT COUNT(*)
-          FROM purchase_loads pl
-          WHERE pl.trip_id = pt.id
-            AND pl.status <> 'CANCELLED'
-        ) AS loads_count,
+        CASE
+          WHEN pt.trip_type = 'EMPTY'
+            THEN (CASE WHEN pt.empty_load_id IS NULL THEN 0 ELSE 1 END)
+          ELSE (
+            SELECT COUNT(*)
+            FROM purchase_loads pl
+            WHERE pl.trip_id = pt.id
+              AND pl.status <> 'CANCELLED'
+          )
+        END AS loads_count,
         (
           SELECT COUNT(*)
           FROM expenses e
@@ -551,12 +876,20 @@ export const getPurchaseTrips = async (req, res) => {
             AND e.created_at >= pt.started_at
             AND (pt.ended_at IS NULL OR e.created_at <= pt.ended_at)
         ) AS expenses_count,
-        (
-          SELECT COALESCE(SUM(pl.total_quantity), 0)
-          FROM purchase_loads pl
-          WHERE pl.trip_id = pt.id
-            AND pl.status <> 'CANCELLED'
-        ) AS total_cylinders,
+        CASE
+          WHEN pt.trip_type = 'EMPTY'
+            THEN (
+              SELECT COALESCE(SUM(ecli.quantity), 0)
+              FROM empty_cylinder_load_items ecli
+              WHERE ecli.load_id = pt.empty_load_id
+            )
+          ELSE (
+            SELECT COALESCE(SUM(pl.total_quantity), 0)
+            FROM purchase_loads pl
+            WHERE pl.trip_id = pt.id
+              AND pl.status <> 'CANCELLED'
+          )
+        END AS total_cylinders,
         (
           SELECT COALESCE(SUM(e.amount), 0)
           FROM expenses e
@@ -575,6 +908,12 @@ export const getPurchaseTrips = async (req, res) => {
       success: true,
       data: rows.map((row) => ({
         id: row.id,
+        tripType:
+          String(row.trip_type || TRIP_TYPE.CYLINDER).toUpperCase() ===
+          TRIP_TYPE.EMPTY
+            ? TRIP_TYPE.EMPTY
+            : TRIP_TYPE.CYLINDER,
+        emptyLoadId: row.empty_load_id ? Number(row.empty_load_id) : null,
         status: formatTripStatus(row.status),
         startKm: Number(row.odometer_reading || 0),
         startedAt: row.started_at,
@@ -789,9 +1128,11 @@ export const createPurchaseLoad = async (req, res) => {
       });
     }
 
+    await ensurePurchaseTripEmptyColumns(connection);
+
     const [tripRows] = await connection.query(
       `
-      SELECT id, status, stock_area_id
+      SELECT id, status, stock_area_id, trip_type
       FROM purchase_trips
       WHERE id = ?
       `,
@@ -802,6 +1143,13 @@ export const createPurchaseLoad = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Trip not found",
+      });
+    }
+
+    if (String(tripRows[0].trip_type || "").toUpperCase() === TRIP_TYPE.EMPTY) {
+      return res.status(400).json({
+        success: false,
+        message: "Purchase loads cannot be added to an empty cylinder trip",
       });
     }
 
@@ -1517,11 +1865,15 @@ export const submitPurchaseTrip = async (req, res) => {
       });
     }
 
+    // Runs before beginTransaction: the defensive ALTERs are DDL, which would
+    // implicitly commit an open transaction.
+    await ensurePurchaseTripEmptyColumns(connection);
+
     await connection.beginTransaction();
 
     const [tripRows] = await connection.query(
       `
-      SELECT id, status
+      SELECT id, status, trip_type
       FROM purchase_trips
       WHERE id = ?
       `,
@@ -1671,6 +2023,160 @@ export const submitPurchaseTrip = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to submit purchase trip",
+      error: error.message,
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// PUT /trips/:tripId/submit-empty — closes an empty-cylinder trip. Unlike the
+// cylinder flow there is no approval gate: the end odometer (plus the optional
+// IOC invoice) completes the trip and its underlying godown load in one
+// transaction, so the godown manager sees COMPLETED immediately. Expenses raised
+// during the trip keep their own PENDING → cashier-review lifecycle.
+export const submitEmptyCylinderTrip = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    const tripId = Number(req.params.tripId);
+    const {
+      endOdometerImageUrl = null,
+      endOdometerReading,
+      invoiceUrl = null,
+    } = req.body || {};
+    const parsedEndOdometer = Number(endOdometerReading);
+
+    if (!tripId) {
+      return res.status(400).json({
+        success: false,
+        message: "tripId is required",
+      });
+    }
+
+    if (!endOdometerImageUrl) {
+      return res.status(400).json({
+        success: false,
+        message: "endOdometerImageUrl is required",
+      });
+    }
+
+    if (!Number.isFinite(parsedEndOdometer) || parsedEndOdometer <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid endOdometerReading is required",
+      });
+    }
+
+    await ensureEmptyCylinderLoadTables(connection);
+    await ensurePurchaseTripEmptyColumns(connection);
+
+    await connection.beginTransaction();
+
+    const [tripRows] = await connection.query(
+      `
+      SELECT id, status, trip_type, empty_load_id, odometer_reading
+      FROM purchase_trips
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [tripId]
+    );
+
+    if (!tripRows.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Trip not found",
+      });
+    }
+
+    const trip = tripRows[0];
+
+    if (String(trip.trip_type || "").toUpperCase() !== TRIP_TYPE.EMPTY) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message:
+          "Not an empty cylinder trip — use the standard trip submission instead",
+      });
+    }
+
+    if (trip.status !== "IN_PROGRESS") {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `This trip is already closed (current: ${trip.status})`,
+      });
+    }
+
+    if (parsedEndOdometer < Number(trip.odometer_reading || 0)) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `End reading cannot be lower than the start reading (${Number(
+          trip.odometer_reading || 0
+        )} km)`,
+      });
+    }
+
+    const hasEndOdometerReading = await hasPurchaseTripColumn(
+      connection,
+      "end_odometer_reading"
+    );
+    const hasEndOdometerImage = await hasPurchaseTripColumn(
+      connection,
+      "end_odometer_image_url"
+    );
+
+    if (hasEndOdometerReading && hasEndOdometerImage) {
+      await connection.query(
+        `
+        UPDATE purchase_trips
+        SET status = 'COMPLETED', ended_at = CURRENT_TIMESTAMP, end_odometer_image_url = ?, end_odometer_reading = ?
+        WHERE id = ?
+        `,
+        [endOdometerImageUrl, parsedEndOdometer, tripId]
+      );
+    } else {
+      await connection.query(
+        `
+        UPDATE purchase_trips
+        SET status = 'COMPLETED', ended_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        `,
+        [tripId]
+      );
+    }
+
+    const completion = await completeEmptyLoadInTransaction(
+      connection,
+      trip.empty_load_id,
+      invoiceUrl
+    );
+
+    if (!completion.ok) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: completion.message,
+      });
+    }
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: "Empty cylinder trip completed successfully",
+      data: await getTripOverview(connection, tripId),
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("submitEmptyCylinderTrip error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to complete empty cylinder trip",
       error: error.message,
     });
   } finally {
