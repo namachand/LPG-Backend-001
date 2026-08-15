@@ -99,7 +99,7 @@ export const getOwnerDashboard = async (req, res) => {
       WHERE status = 'DELIVERED'
         AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const totalSales = Number(salesRows[0]?.total_sales || 0);
@@ -114,7 +114,7 @@ export const getOwnerDashboard = async (req, res) => {
         AND s.driver_id IS NOT NULL
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const cylindersDelivered = Number(deliveredRows[0]?.delivered_qty || 0);
@@ -127,10 +127,12 @@ export const getOwnerDashboard = async (req, res) => {
       WHERE status IN ('ASSIGNED', 'PENDING')
         AND DATE(created_at) BETWEEN ? AND ?
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
-    const cashPendingWithDrivers = Number(pendingCollectionRows[0]?.pending_amount || 0);
+    const cashPendingWithDrivers = Number(
+      pendingCollectionRows[0]?.pending_amount || 0,
+    );
 
     // Total Stock Available & Empty Stock (Domestic and Commercial only)
     const [stockRows] = await db.execute(
@@ -145,7 +147,7 @@ export const getOwnerDashboard = async (req, res) => {
       INNER JOIN products p ON p.id = s.product_id
       WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
       GROUP BY p.type
-      `
+      `,
     );
 
     let domesticStock = 0;
@@ -158,12 +160,12 @@ export const getOwnerDashboard = async (req, res) => {
     let otpSentCommercial = 0;
 
     stockRows.forEach((row) => {
-      if (row.product_type === 'DOMESTIC') {
+      if (row.product_type === "DOMESTIC") {
         domesticStock = Number(row.total_quantity || 0);
         emptyDomestic = Number(row.empty_quantity || 0);
         systemDomestic = Number(row.system_quantity || 0);
         otpSentDomestic = Number(row.otp_sent_quantity || 0);
-      } else if (row.product_type === 'COMMERCIAL') {
+      } else if (row.product_type === "COMMERCIAL") {
         commercialStock = Number(row.total_quantity || 0);
         emptyCommercial = Number(row.empty_quantity || 0);
         systemCommercial = Number(row.system_quantity || 0);
@@ -186,7 +188,7 @@ export const getOwnerDashboard = async (req, res) => {
         AND e.status = 'APPROVED'
         AND DATE(e.created_at) BETWEEN ? AND ?
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const [officeExpenseRows] = await db.execute(
@@ -195,7 +197,7 @@ export const getOwnerDashboard = async (req, res) => {
       FROM office_expenses
       WHERE DATE(created_at) BETWEEN ? AND ?
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const driverExpense = Number(driverExpenseRows[0]?.driver_expense || 0);
@@ -214,7 +216,7 @@ export const getOwnerDashboard = async (req, res) => {
       WHERE s.status = 'DELIVERED'
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const paymentSummary = {
@@ -244,7 +246,7 @@ export const getOwnerDashboard = async (req, res) => {
       HAVING deliveries > 0 OR total_sales > 0
       ORDER BY total_sales DESC
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const driverCollectionBreakdown = driverBreakdownRows.map((row) => ({
@@ -296,7 +298,7 @@ export const getOwnerDashboard = async (req, res) => {
       ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
       LIMIT 8
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const recentSales = recentSalesRows.map((row) => {
@@ -368,7 +370,7 @@ export const getOwnerDashboard = async (req, res) => {
             domestic: otpSentDomestic,
             commercial: otpSentCommercial,
             total: totalOtpSent,
-          }
+          },
         },
         totalExpenses,
         paymentSummary,
@@ -418,7 +420,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
       GROUP BY day
       `,
-      [trendStart, trendEnd]
+      [trendStart, trendEnd],
     );
 
     const [deliveredTrendRows] = await db.execute(
@@ -432,7 +434,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       GROUP BY day
       `,
-      [trendStart, trendEnd]
+      [trendStart, trendEnd],
     );
 
     const salesByDay = {};
@@ -452,7 +454,10 @@ export const getOwnerDashboardInsights = async (req, res) => {
       const key = toKey(d);
       trendPoints.push({
         date: key,
-        label: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        label: d.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+        }),
         sales: salesByDay[key] || 0,
         delivered: deliveredByDay[key] || 0,
       });
@@ -470,7 +475,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
       FROM stock s
       INNER JOIN products p ON p.id = s.product_id
       WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
-      `
+      `,
     );
 
     const sr = stockRows[0] || {};
@@ -539,7 +544,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
       HAVING cylinders > 0 OR collected > 0 OR settled > 0
       ORDER BY collected DESC
       `,
-      [startDate, endDate, startDate, endDate, startDate, endDate]
+      [startDate, endDate, startDate, endDate, startDate, endDate],
     );
 
     const driverCashTracking = driverCashRows.map((row) => {
@@ -610,7 +615,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
       )
       ORDER BY ts DESC
       LIMIT 10
-      `
+      `,
     );
 
     const formatInr = (value) => Number(value || 0).toLocaleString("en-IN");
@@ -660,14 +665,17 @@ export const getOwnerDashboardInsights = async (req, res) => {
       GROUP BY COALESCE(NULLIF(TRIM(category), ''), 'Other')
       ORDER BY amount DESC
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const expenseItems = expenseRows.map((row) => ({
       category: row.category,
       amount: Number(row.amount || 0),
     }));
-    const expenseTotal = expenseItems.reduce((sum, item) => sum + item.amount, 0);
+    const expenseTotal = expenseItems.reduce(
+      (sum, item) => sum + item.amount,
+      0,
+    );
 
     // ---- Top Drivers Today (by deliveries completed) ----
     const [topDriverRows] = await db.execute(
@@ -687,7 +695,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
       ORDER BY deliveries DESC, u.name ASC
       LIMIT 5
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const topDrivers = topDriverRows.map((row) => ({
@@ -778,7 +786,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
     const { startDate, endDate } = resolveExpenseDateRange(req.query);
 
     const [officeStatusColumns] = await connection.query(
-      `SHOW COLUMNS FROM office_expenses LIKE 'status'`
+      `SHOW COLUMNS FROM office_expenses LIKE 'status'`,
     );
     const officeExpenseHasStatus = officeStatusColumns.length > 0;
 
@@ -831,7 +839,15 @@ export const getOwnerExpensesDashboard = async (req, res) => {
         OR status LIKE ?
       )`);
       const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+      params.push(
+        searchTerm,
+        searchTerm,
+        searchTerm,
+        searchTerm,
+        searchTerm,
+        searchTerm,
+        searchTerm,
+      );
     }
 
     filters.push(`created_at >= ?`);
@@ -839,7 +855,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
     filters.push(`created_at <= ?`);
     params.push(`${endDate} 23:59:59`);
 
-    const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
 
     const [summaryRows] = await connection.query(
       `
@@ -851,7 +867,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
       ) expense_items
       ${whereClause}
       `,
-      [...params]
+      [...params],
     );
 
     const [salesRows] = await connection.query(
@@ -861,7 +877,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
       WHERE status = 'DELIVERED'
         AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate]
+      [startDate, endDate],
     );
 
     const [countRows] = await connection.query(
@@ -872,7 +888,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
       ) expense_items
       ${whereClause}
       `,
-      [...params]
+      [...params],
     );
 
     const [rows] = await connection.query(
@@ -897,7 +913,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
       LIMIT ?
       OFFSET ?
       `,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     const total = Number(countRows[0]?.total || 0);
@@ -925,7 +941,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
         byRole: row.created_by_role,
         status: row.status,
         source: row.source,
-        canApprove: row.source === 'CASHIER_OFFICE' && row.status === 'PENDING',
+        canApprove: row.source === "CASHIER_OFFICE" && row.status === "PENDING",
       })),
       pagination: {
         total,
@@ -935,10 +951,10 @@ export const getOwnerExpensesDashboard = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('getOwnerExpensesDashboard error:', error);
+    console.error("getOwnerExpensesDashboard error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch owner expenses dashboard',
+      message: "Failed to fetch owner expenses dashboard",
       error: error.message,
     });
   } finally {
@@ -955,18 +971,18 @@ export const approveOwnerOfficeExpense = async (req, res) => {
     if (!expenseId) {
       return res.status(400).json({
         success: false,
-        message: 'expenseId is required',
+        message: "expenseId is required",
       });
     }
 
     const [officeStatusColumns] = await connection.query(
-      `SHOW COLUMNS FROM office_expenses LIKE 'status'`
+      `SHOW COLUMNS FROM office_expenses LIKE 'status'`,
     );
 
     if (!officeStatusColumns.length) {
       // Column missing — add it automatically and default all existing rows to PENDING
       await connection.query(
-        `ALTER TABLE office_expenses ADD COLUMN status ENUM('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING' AFTER description`
+        `ALTER TABLE office_expenses ADD COLUMN status ENUM('PENDING','APPROVED') NOT NULL DEFAULT 'PENDING' AFTER description`,
       );
     }
 
@@ -977,20 +993,20 @@ export const approveOwnerOfficeExpense = async (req, res) => {
       WHERE id = ?
       LIMIT 1
       `,
-      [expenseId]
+      [expenseId],
     );
 
     if (!rows.length) {
       return res.status(404).json({
         success: false,
-        message: 'Office expense not found',
+        message: "Office expense not found",
       });
     }
 
-    if (rows[0].status !== 'PENDING') {
+    if (rows[0].status !== "PENDING") {
       return res.status(400).json({
         success: false,
-        message: 'Only pending office expenses can be approved',
+        message: "Only pending office expenses can be approved",
       });
     }
 
@@ -1001,18 +1017,18 @@ export const approveOwnerOfficeExpense = async (req, res) => {
           updated_at = NOW()
       WHERE id = ?
       `,
-      [expenseId]
+      [expenseId],
     );
 
     return res.status(200).json({
       success: true,
-      message: 'Office expense approved successfully',
+      message: "Office expense approved successfully",
     });
   } catch (error) {
-    console.error('approveOwnerOfficeExpense error:', error);
+    console.error("approveOwnerOfficeExpense error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to approve office expense',
+      message: "Failed to approve office expense",
       error: error.message,
     });
   } finally {
@@ -1025,12 +1041,12 @@ export const getOwnerJobAssignmentUsers = async (req, res) => {
 
   try {
     const [profileTableRows] = await connection.query(
-      `SHOW TABLES LIKE 'user_job_profiles'`
+      `SHOW TABLES LIKE 'user_job_profiles'`,
     );
     const hasProfileTable = profileTableRows.length > 0;
 
     const [aadhaarColumnRows] = await connection.query(
-      `SHOW COLUMNS FROM users LIKE 'aadhaar_number'`
+      `SHOW COLUMNS FROM users LIKE 'aadhaar_number'`,
     );
     const hasExtendedUserColumns = aadhaarColumnRows.length > 0;
 
@@ -1061,7 +1077,7 @@ export const getOwnerJobAssignmentUsers = async (req, res) => {
       ${hasProfileTable ? "LEFT JOIN user_job_profiles up ON up.user_id = u.id" : ""}
       WHERE u.role IN ('GODOWN_MANAGER', 'PURCHASE_MANAGER', 'DRIVER', 'CASHIER', 'SUPPORT')
       ORDER BY u.created_at DESC, u.id DESC
-      `
+      `,
     );
 
     return res.status(200).json({
@@ -1126,7 +1142,9 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
       drivingLicenseNumber,
     } = req.body || {};
 
-    const normalizedRole = String(role || "").trim().toUpperCase();
+    const normalizedRole = String(role || "")
+      .trim()
+      .toUpperCase();
     const systemRole = JOB_ROLE_TO_SYSTEM_ROLE[normalizedRole];
 
     if (!systemRole) {
@@ -1155,12 +1173,12 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
 
     const hashedDefaultPassword = await bcrypt.hash(
       DEFAULT_JOB_ASSIGNMENT_PASSWORD,
-      10
+      10,
     );
 
     const [existingPhone] = await connection.query(
       `SELECT id FROM users WHERE phone = ? LIMIT 1`,
-      [normalizedPhone]
+      [normalizedPhone],
     );
 
     if (existingPhone.length) {
@@ -1172,7 +1190,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
 
     const [existingEmail] = await connection.query(
       `SELECT id FROM users WHERE email = ? LIMIT 1`,
-      [normalizedEmail]
+      [normalizedEmail],
     );
 
     if (existingEmail.length) {
@@ -1186,7 +1204,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
     transactionStarted = true;
 
     const [profileTableRows] = await connection.query(
-      `SHOW TABLES LIKE 'user_job_profiles'`
+      `SHOW TABLES LIKE 'user_job_profiles'`,
     );
     const hasProfileTable = profileTableRows.length > 0;
 
@@ -1220,7 +1238,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           bankName ? String(bankName).trim() : null,
           bankAccountNumber ? String(bankAccountNumber).trim() : null,
           bankIfscCode ? String(bankIfscCode).trim().toUpperCase() : null,
-        ]
+        ],
       );
     } catch (insertError) {
       if (insertError?.code !== "ER_BAD_FIELD_ERROR") {
@@ -1244,7 +1262,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           normalizedPhone,
           hashedDefaultPassword,
           systemRole,
-        ]
+        ],
       );
     }
 
@@ -1275,7 +1293,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           vehicleNumber ? String(vehicleNumber).trim() : null,
           vehicleType ? String(vehicleType).trim() : null,
           drivingLicenseNumber ? String(drivingLicenseNumber).trim() : null,
-        ]
+        ],
       );
     }
 
@@ -1294,7 +1312,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           userId,
           vehicleNumber ? String(vehicleNumber).trim() : null,
           drivingLicenseNumber ? String(drivingLicenseNumber).trim() : null,
-        ]
+        ],
       );
     }
 
@@ -1304,7 +1322,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
         INSERT INTO addresses (user_id, address, is_default)
         VALUES (?, ?, 1)
         `,
-        [userId, String(address).trim()]
+        [userId, String(address).trim()],
       );
     }
 
@@ -1360,7 +1378,7 @@ export const updateOwnerJobAssignmentUserStatus = async (req, res) => {
       WHERE id = ?
         AND role IN ('GODOWN_MANAGER', 'PURCHASE_MANAGER', 'DRIVER', 'CASHIER', 'SUPPORT')
       `,
-      [status, userId]
+      [status, userId],
     );
 
     if (!result.affectedRows) {
@@ -1392,7 +1410,9 @@ export const updateOwnerJobAssignmentUser = async (req, res) => {
   try {
     const userId = Number(req.params.id);
     if (!userId || Number.isNaN(userId)) {
-      return res.status(400).json({ success: false, message: "Valid user id is required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Valid user id is required" });
     }
 
     const {
@@ -1431,21 +1451,55 @@ export const updateOwnerJobAssignmentUser = async (req, res) => {
         bank_ifsc_code = COALESCE(?, bank_ifsc_code)
       WHERE id = ?
     `;
-    
+
     await connection.query(updateUsersQuery, [
-      fullName !== undefined ? (fullName ? String(fullName).trim() : null) : null,
-      phoneNumber !== undefined ? (phoneNumber ? String(phoneNumber).trim() : null) : null,
-      email !== undefined ? (email ? String(email).trim().toLowerCase() : null) : null,
-      aadhaarNumber !== undefined ? (aadhaarNumber ? String(aadhaarNumber).trim() : null) : null,
-      bankAccountHolderName !== undefined ? (bankAccountHolderName ? String(bankAccountHolderName).trim() : null) : null,
-      bankName !== undefined ? (bankName ? String(bankName).trim() : null) : null,
-      bankAccountNumber !== undefined ? (bankAccountNumber ? String(bankAccountNumber).trim() : null) : null,
-      bankIfscCode !== undefined ? (bankIfscCode ? String(bankIfscCode).trim().toUpperCase() : null) : null,
-      userId
+      fullName !== undefined
+        ? fullName
+          ? String(fullName).trim()
+          : null
+        : null,
+      phoneNumber !== undefined
+        ? phoneNumber
+          ? String(phoneNumber).trim()
+          : null
+        : null,
+      email !== undefined
+        ? email
+          ? String(email).trim().toLowerCase()
+          : null
+        : null,
+      aadhaarNumber !== undefined
+        ? aadhaarNumber
+          ? String(aadhaarNumber).trim()
+          : null
+        : null,
+      bankAccountHolderName !== undefined
+        ? bankAccountHolderName
+          ? String(bankAccountHolderName).trim()
+          : null
+        : null,
+      bankName !== undefined
+        ? bankName
+          ? String(bankName).trim()
+          : null
+        : null,
+      bankAccountNumber !== undefined
+        ? bankAccountNumber
+          ? String(bankAccountNumber).trim()
+          : null
+        : null,
+      bankIfscCode !== undefined
+        ? bankIfscCode
+          ? String(bankIfscCode).trim().toUpperCase()
+          : null
+        : null,
+      userId,
     ]);
 
     // Check if profile exists
-    const [profileTableRows] = await connection.query(`SHOW TABLES LIKE 'user_job_profiles'`);
+    const [profileTableRows] = await connection.query(
+      `SHOW TABLES LIKE 'user_job_profiles'`,
+    );
     if (profileTableRows.length > 0) {
       const updateProfileQuery = `
         UPDATE user_job_profiles
@@ -1460,48 +1514,91 @@ export const updateOwnerJobAssignmentUser = async (req, res) => {
         WHERE user_id = ?
       `;
       await connection.query(updateProfileQuery, [
-        age !== undefined ? (age === null || age === "" ? null : Number(age)) : null,
-        dateOfBirth !== undefined ? (dateOfBirth || null) : null,
-        gender !== undefined ? (gender || null) : null,
-        address !== undefined ? (address ? String(address).trim() : null) : null,
-        vehicleNumber !== undefined ? (vehicleNumber ? String(vehicleNumber).trim() : null) : null,
-        vehicleType !== undefined ? (vehicleType ? String(vehicleType).trim() : null) : null,
-        drivingLicenseNumber !== undefined ? (drivingLicenseNumber ? String(drivingLicenseNumber).trim() : null) : null,
-        userId
+        age !== undefined
+          ? age === null || age === ""
+            ? null
+            : Number(age)
+          : null,
+        dateOfBirth !== undefined ? dateOfBirth || null : null,
+        gender !== undefined ? gender || null : null,
+        address !== undefined
+          ? address
+            ? String(address).trim()
+            : null
+          : null,
+        vehicleNumber !== undefined
+          ? vehicleNumber
+            ? String(vehicleNumber).trim()
+            : null
+          : null,
+        vehicleType !== undefined
+          ? vehicleType
+            ? String(vehicleType).trim()
+            : null
+          : null,
+        drivingLicenseNumber !== undefined
+          ? drivingLicenseNumber
+            ? String(drivingLicenseNumber).trim()
+            : null
+          : null,
+        userId,
       ]);
     }
 
     // Update address if exists
     if (address !== undefined) {
-      const [addressRows] = await connection.query(`SELECT id FROM addresses WHERE user_id = ?`, [userId]);
+      const [addressRows] = await connection.query(
+        `SELECT id FROM addresses WHERE user_id = ?`,
+        [userId],
+      );
       if (addressRows.length > 0) {
-        await connection.query(`UPDATE addresses SET address = ? WHERE user_id = ?`, [String(address).trim(), userId]);
+        await connection.query(
+          `UPDATE addresses SET address = ? WHERE user_id = ?`,
+          [String(address).trim(), userId],
+        );
       } else {
-        await connection.query(`INSERT INTO addresses (user_id, address, is_default) VALUES (?, ?, 1)`, [userId, String(address).trim()]);
+        await connection.query(
+          `INSERT INTO addresses (user_id, address, is_default) VALUES (?, ?, 1)`,
+          [userId, String(address).trim()],
+        );
       }
     }
 
     // Update drivers table if applicable
-    const [driverRows] = await connection.query(`SELECT id FROM drivers WHERE user_id = ?`, [userId]);
+    const [driverRows] = await connection.query(
+      `SELECT id FROM drivers WHERE user_id = ?`,
+      [userId],
+    );
     if (driverRows.length > 0) {
-      await connection.query(`
+      await connection.query(
+        `
         UPDATE drivers 
         SET 
           vehicle_number = COALESCE(?, vehicle_number),
           license_number = COALESCE(?, license_number)
         WHERE user_id = ?
-      `, [
-        vehicleNumber !== undefined ? (vehicleNumber ? String(vehicleNumber).trim() : null) : null,
-        drivingLicenseNumber !== undefined ? (drivingLicenseNumber ? String(drivingLicenseNumber).trim() : null) : null,
-        userId
-      ]);
+      `,
+        [
+          vehicleNumber !== undefined
+            ? vehicleNumber
+              ? String(vehicleNumber).trim()
+              : null
+            : null,
+          drivingLicenseNumber !== undefined
+            ? drivingLicenseNumber
+              ? String(drivingLicenseNumber).trim()
+              : null
+            : null,
+          userId,
+        ],
+      );
     }
 
     await connection.commit();
 
     return res.status(200).json({
       success: true,
-      message: "User details updated successfully"
+      message: "User details updated successfully",
     });
   } catch (error) {
     if (transactionStarted) {
@@ -1525,22 +1622,31 @@ export const deleteOwnerJobAssignmentUser = async (req, res) => {
   try {
     const userId = Number(req.params.id);
     if (!userId || Number.isNaN(userId)) {
-      return res.status(400).json({ success: false, message: "Valid user id is required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Valid user id is required" });
     }
 
     await connection.beginTransaction();
     transactionStarted = true;
 
     // Delete related records
-    const [profileTableRows] = await connection.query(`SHOW TABLES LIKE 'user_job_profiles'`);
+    const [profileTableRows] = await connection.query(
+      `SHOW TABLES LIKE 'user_job_profiles'`,
+    );
     if (profileTableRows.length > 0) {
-      await connection.query(`DELETE FROM user_job_profiles WHERE user_id = ?`, [userId]);
+      await connection.query(
+        `DELETE FROM user_job_profiles WHERE user_id = ?`,
+        [userId],
+      );
     }
-    
+
     await connection.query(`DELETE FROM drivers WHERE user_id = ?`, [userId]);
     await connection.query(`DELETE FROM addresses WHERE user_id = ?`, [userId]);
-    
-    const [result] = await connection.query(`DELETE FROM users WHERE id = ?`, [userId]);
+
+    const [result] = await connection.query(`DELETE FROM users WHERE id = ?`, [
+      userId,
+    ]);
 
     await connection.commit();
 
@@ -1560,11 +1666,15 @@ export const deleteOwnerJobAssignmentUser = async (req, res) => {
       await connection.rollback();
     }
     console.error("deleteOwnerJobAssignmentUser error:", error);
-    
-    if (error.code === 'ER_ROW_IS_REFERENCED_2' || error.code === 'ER_ROW_IS_REFERENCED') {
+
+    if (
+      error.code === "ER_ROW_IS_REFERENCED_2" ||
+      error.code === "ER_ROW_IS_REFERENCED"
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Cannot delete user because they have associated records (e.g., sales, payments, or stock transactions). Consider making them INACTIVE instead.",
+        message:
+          "Cannot delete user because they have associated records (e.g., sales, payments, or stock transactions). Consider making them INACTIVE instead.",
       });
     }
 

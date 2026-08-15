@@ -30,7 +30,7 @@ const hasPurchaseTripColumn = async (connection, columnName) => {
       AND COLUMN_NAME = ?
     LIMIT 1
     `,
-    [columnName]
+    [columnName],
   );
 
   const exists = rows.length > 0;
@@ -95,7 +95,7 @@ const getFirstPurchaseManager = async (connection) => {
     WHERE role = 'PURCHASE_MANAGER'
     ORDER BY id ASC
     LIMIT 1
-    `
+    `,
   );
 
   return rows[0] || null;
@@ -109,7 +109,7 @@ const getDefaultStockArea = async (connection) => {
     WHERE id = ?
     LIMIT 1
     `,
-    [DEFAULT_PURCHASE_STOCK_AREA_ID]
+    [DEFAULT_PURCHASE_STOCK_AREA_ID],
   );
 
   if (preferredRows.length) {
@@ -122,7 +122,7 @@ const getDefaultStockArea = async (connection) => {
     FROM stock_areas
     ORDER BY id ASC
     LIMIT 1
-    `
+    `,
   );
 
   return rows[0] || null;
@@ -141,11 +141,11 @@ const derivePurchaseLoadType = (productRows) => {
 const getTripOverview = async (connection, tripId) => {
   const hasEndOdometerReading = await hasPurchaseTripColumn(
     connection,
-    "end_odometer_reading"
+    "end_odometer_reading",
   );
   const hasEndOdometerImage = await hasPurchaseTripColumn(
     connection,
-    "end_odometer_image_url"
+    "end_odometer_image_url",
   );
   const hasTripType = await hasPurchaseTripColumn(connection, "trip_type");
   const hasEmptyLoadId = await hasPurchaseTripColumn(
@@ -175,7 +175,7 @@ const getTripOverview = async (connection, tripId) => {
     LEFT JOIN stock_areas sa ON sa.id = pt.stock_area_id
     WHERE pt.id = ?
     `,
-    [tripId]
+    [tripId],
   );
 
   if (!tripRows.length) {
@@ -202,7 +202,7 @@ const getTripOverview = async (connection, tripId) => {
     GROUP BY pl.id, pl.product_type, pl.invoice_url, pl.invoice_source, pl.invoice_number, pl.total_quantity, pl.status, pl.created_at
     ORDER BY pl.created_at DESC, pl.id DESC
     `,
-    [tripId]
+    [tripId],
   );
 
   const [expenseRows] = await connection.query(
@@ -221,7 +221,7 @@ const getTripOverview = async (connection, tripId) => {
       AND (? IS NULL OR created_at <= ?)
     ORDER BY created_at DESC, id DESC
     `,
-    [trip.purchase_manager_id, trip.started_at, trip.ended_at, trip.ended_at]
+    [trip.purchase_manager_id, trip.started_at, trip.ended_at, trip.ended_at],
   );
 
   const tripType =
@@ -338,7 +338,7 @@ export const getPurchaseBootstrap = async (req, res) => {
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
         ORDER BY p.type ASC, p.name ASC
-        `
+        `,
       ),
     ]);
 
@@ -432,7 +432,7 @@ export const getPurchaseDashboard = async (req, res) => {
             AND MONTH(pt.started_at) = MONTH(CURDATE())
         ) AS completedTrips
       `,
-      [userId, userId, userId]
+      [userId, userId, userId],
     );
 
     const [recentRows] = await connection.query(
@@ -459,7 +459,7 @@ export const getPurchaseDashboard = async (req, res) => {
       ORDER BY pt.started_at DESC, pt.id DESC
       LIMIT 10
       `,
-      [userId]
+      [userId],
     );
 
     const [activeRows] = await connection.query(
@@ -471,7 +471,7 @@ export const getPurchaseDashboard = async (req, res) => {
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [userId]
+      [userId],
     );
 
     const activeTrip = activeRows.length
@@ -521,7 +521,7 @@ export const startPurchaseTrip = async (req, res) => {
 
     const parsedUserId = Number(userId);
     const parsedOdometer = Number(odometerReading);
-    
+
     let parsedStockAreaId = null;
     if (stockAreaId) {
       parsedStockAreaId = Number(stockAreaId);
@@ -532,7 +532,11 @@ export const startPurchaseTrip = async (req, res) => {
       }
     }
 
-    if (!parsedUserId || !Number.isFinite(parsedOdometer) || parsedOdometer <= 0) {
+    if (
+      !parsedUserId ||
+      !Number.isFinite(parsedOdometer) ||
+      parsedOdometer <= 0
+    ) {
       return res.status(400).json({
         success: false,
         message: "userId and a valid odometerReading are required",
@@ -548,7 +552,7 @@ export const startPurchaseTrip = async (req, res) => {
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [parsedUserId]
+      [parsedUserId],
     );
 
     if (existingRows.length) {
@@ -564,7 +568,7 @@ export const startPurchaseTrip = async (req, res) => {
       INSERT INTO purchase_trips (purchase_manager_id, stock_area_id, odometer_reading, odometer_image_url, status)
       VALUES (?, ?, ?, ?, 'IN_PROGRESS')
       `,
-      [parsedUserId, parsedStockAreaId, parsedOdometer, odometerImageUrl]
+      [parsedUserId, parsedStockAreaId, parsedOdometer, odometerImageUrl],
     );
 
     return res.status(201).json({
@@ -761,7 +765,7 @@ export const getActivePurchaseTrip = async (req, res) => {
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [userId]
+      [userId],
     );
 
     return res.json({
@@ -897,7 +901,7 @@ export const getPurchaseTrips = async (req, res) => {
       WHERE pt.purchase_manager_id = ?
       ORDER BY pt.started_at DESC, pt.id DESC
       `,
-      [userId]
+      [userId],
     );
 
     return res.json({
@@ -966,7 +970,7 @@ export const getPurchaseLoads = async (req, res) => {
       GROUP BY pl.id, pl.trip_id, pl.product_type, pl.invoice_url, pl.invoice_source, pl.invoice_number, pl.total_quantity, pl.status, pl.created_at, pt.status
       ORDER BY pl.created_at DESC, pl.id DESC
       `,
-      [userId]
+      [userId],
     );
 
     return res.json({
@@ -1036,7 +1040,7 @@ export const getPurchaseLoadDetail = async (req, res) => {
       WHERE pl.id = ?
       ORDER BY pli.id ASC
       `,
-      [loadId]
+      [loadId],
     );
 
     if (!rows.length) {
@@ -1112,7 +1116,10 @@ export const createPurchaseLoad = async (req, res) => {
         productId: Number(item.productId),
         quantity: Number(item.quantity),
       }))
-      .filter((item) => item.productId && Number.isFinite(item.quantity) && item.quantity > 0);
+      .filter(
+        (item) =>
+          item.productId && Number.isFinite(item.quantity) && item.quantity > 0,
+      );
 
     if (!normalizedItems.length) {
       return res.status(400).json({
@@ -1129,7 +1136,7 @@ export const createPurchaseLoad = async (req, res) => {
       FROM purchase_trips
       WHERE id = ?
       `,
-      [parsedTripId]
+      [parsedTripId],
     );
 
     if (!tripRows.length) {
@@ -1171,7 +1178,7 @@ export const createPurchaseLoad = async (req, res) => {
         WHERE id = ?
         LIMIT 1
         `,
-        [effectiveStockAreaId]
+        [effectiveStockAreaId],
       );
 
       if (!stockAreaRows.length) {
@@ -1190,7 +1197,7 @@ export const createPurchaseLoad = async (req, res) => {
       FROM products
       WHERE id IN (${placeholders})
       `,
-      productIds
+      productIds,
     );
 
     if (productRows.length !== normalizedItems.length) {
@@ -1204,7 +1211,7 @@ export const createPurchaseLoad = async (req, res) => {
 
     const totalQuantity = normalizedItems.reduce(
       (sum, item) => sum + item.quantity,
-      0
+      0,
     );
     const loadProductType = derivePurchaseLoadType(productRows);
 
@@ -1213,7 +1220,13 @@ export const createPurchaseLoad = async (req, res) => {
       INSERT INTO purchase_loads (trip_id, created_by, stock_area_id, product_type, total_quantity, status)
       VALUES (?, ?, ?, ?, ?, 'DRAFT')
       `,
-      [parsedTripId, parsedCreatedBy, effectiveStockAreaId, loadProductType, totalQuantity]
+      [
+        parsedTripId,
+        parsedCreatedBy,
+        effectiveStockAreaId,
+        loadProductType,
+        totalQuantity,
+      ],
     );
 
     const loadId = loadResult.insertId;
@@ -1224,7 +1237,7 @@ export const createPurchaseLoad = async (req, res) => {
         INSERT INTO purchase_load_items (load_id, product_id, quantity)
         VALUES (?, ?, ?)
         `,
-        [loadId, item.productId, item.quantity]
+        [loadId, item.productId, item.quantity],
       );
 
       if (effectiveStockAreaId !== null) {
@@ -1242,7 +1255,13 @@ export const createPurchaseLoad = async (req, res) => {
           )
           VALUES (?, ?, 'PURCHASE', ?, 0, ?, ?, 'depot')
           `,
-          [item.productId, effectiveStockAreaId, item.quantity, loadId, parsedCreatedBy]
+          [
+            item.productId,
+            effectiveStockAreaId,
+            item.quantity,
+            loadId,
+            parsedCreatedBy,
+          ],
         );
 
         await connection.query(
@@ -1251,7 +1270,7 @@ export const createPurchaseLoad = async (req, res) => {
           VALUES (?, ?, 0, 0, 0, 0)
           ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
           `,
-          [item.productId, effectiveStockAreaId]
+          [item.productId, effectiveStockAreaId],
         );
       }
     }
@@ -1288,11 +1307,7 @@ export const updatePurchaseLoad = async (req, res) => {
         ? null
         : Number(stockAreaId);
 
-    if (
-      !loadId ||
-      !Array.isArray(items) ||
-      !items.length
-    ) {
+    if (!loadId || !Array.isArray(items) || !items.length) {
       return res.status(400).json({
         success: false,
         message: "loadId and items are required",
@@ -1304,7 +1319,10 @@ export const updatePurchaseLoad = async (req, res) => {
         productId: Number(item.productId),
         quantity: Number(item.quantity),
       }))
-      .filter((item) => item.productId && Number.isFinite(item.quantity) && item.quantity > 0);
+      .filter(
+        (item) =>
+          item.productId && Number.isFinite(item.quantity) && item.quantity > 0,
+      );
 
     if (!normalizedItems.length) {
       return res.status(400).json({
@@ -1320,7 +1338,7 @@ export const updatePurchaseLoad = async (req, res) => {
       JOIN purchase_trips pt ON pt.id = pl.trip_id
       WHERE pl.id = ?
       `,
-      [loadId]
+      [loadId],
     );
 
     if (!loadRows.length) {
@@ -1364,7 +1382,7 @@ export const updatePurchaseLoad = async (req, res) => {
         WHERE id = ?
         LIMIT 1
         `,
-        [effectiveStockAreaId]
+        [effectiveStockAreaId],
       );
 
       if (!stockAreaRows.length) {
@@ -1383,7 +1401,7 @@ export const updatePurchaseLoad = async (req, res) => {
       FROM products
       WHERE id IN (${placeholders})
       `,
-      productIds
+      productIds,
     );
 
     if (productRows.length !== normalizedItems.length) {
@@ -1395,7 +1413,10 @@ export const updatePurchaseLoad = async (req, res) => {
 
     await connection.beginTransaction();
 
-    const totalQuantity = normalizedItems.reduce((sum, item) => sum + item.quantity, 0);
+    const totalQuantity = normalizedItems.reduce(
+      (sum, item) => sum + item.quantity,
+      0,
+    );
     const loadProductType = derivePurchaseLoadType(productRows);
 
     await connection.query(
@@ -1404,7 +1425,7 @@ export const updatePurchaseLoad = async (req, res) => {
       SET stock_area_id = ?, product_type = ?, total_quantity = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
       `,
-      [effectiveStockAreaId, loadProductType, totalQuantity, loadId]
+      [effectiveStockAreaId, loadProductType, totalQuantity, loadId],
     );
 
     await connection.query(
@@ -1412,7 +1433,7 @@ export const updatePurchaseLoad = async (req, res) => {
       DELETE FROM purchase_load_items
       WHERE load_id = ?
       `,
-      [loadId]
+      [loadId],
     );
 
     await connection.query(
@@ -1422,7 +1443,7 @@ export const updatePurchaseLoad = async (req, res) => {
         AND reference_id = ?
         AND isApproved = 0
       `,
-      [loadId]
+      [loadId],
     );
 
     for (const item of normalizedItems) {
@@ -1431,7 +1452,7 @@ export const updatePurchaseLoad = async (req, res) => {
         INSERT INTO purchase_load_items (load_id, product_id, quantity)
         VALUES (?, ?, ?)
         `,
-        [loadId, item.productId, item.quantity]
+        [loadId, item.productId, item.quantity],
       );
 
       if (effectiveStockAreaId !== null) {
@@ -1455,7 +1476,7 @@ export const updatePurchaseLoad = async (req, res) => {
             item.quantity,
             loadId,
             Number(loadRows[0].created_by),
-          ]
+          ],
         );
 
         await connection.query(
@@ -1464,7 +1485,7 @@ export const updatePurchaseLoad = async (req, res) => {
           VALUES (?, ?, 0, 0, 0, 0)
           ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
           `,
-          [item.productId, effectiveStockAreaId]
+          [item.productId, effectiveStockAreaId],
         );
       }
     }
@@ -1516,7 +1537,7 @@ const getPurchaseLoadDetailData = async (connection, loadId) => {
     WHERE pl.id = ?
     ORDER BY pli.id ASC
     `,
-    [loadId]
+    [loadId],
   );
 
   if (!rows.length) {
@@ -1559,7 +1580,7 @@ const _markLoadStockWaiting = async (connection, loadId) => {
       AND reference_id = ?
       AND isApproved IN (0, 2)
     `,
-    [loadId]
+    [loadId],
   );
 };
 
@@ -1577,7 +1598,7 @@ const _approveLoadStock = async (connection, loadId) => {
       AND isApproved = 2
     FOR UPDATE
     `,
-    [loadId]
+    [loadId],
   );
 
   for (const tx of txRows) {
@@ -1593,19 +1614,19 @@ const _approveLoadStock = async (connection, loadId) => {
       LIMIT 1
       FOR UPDATE
       `,
-      [productId, stockAreaId]
+      [productId, stockAreaId],
     );
 
     if (stockRows.length) {
       await connection.query(
         `UPDATE stock SET quantity = quantity + ? WHERE product_id = ? AND stock_area_id = ?`,
-        [qty, productId, stockAreaId]
+        [qty, productId, stockAreaId],
       );
     } else {
       await connection.query(
         `INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity)
          VALUES (?, ?, ?, 0, 0, 0)`,
-        [productId, stockAreaId, qty]
+        [productId, stockAreaId, qty],
       );
     }
   }
@@ -1619,7 +1640,7 @@ const _approveLoadStock = async (connection, loadId) => {
         AND reference_id = ?
         AND isApproved = 2
       `,
-      [loadId]
+      [loadId],
     );
   }
 };
@@ -1627,11 +1648,11 @@ const _approveLoadStock = async (connection, loadId) => {
 const ensurePurchaseLoadInvoiceNumberColumn = async (connection) => {
   const [cols] = await connection.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'purchase_loads' AND COLUMN_NAME = 'invoice_number'`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'purchase_loads' AND COLUMN_NAME = 'invoice_number'`,
   );
   if (!cols.length) {
     await connection.query(
-      `ALTER TABLE purchase_loads ADD COLUMN invoice_number VARCHAR(100) DEFAULT NULL AFTER product_type`
+      `ALTER TABLE purchase_loads ADD COLUMN invoice_number VARCHAR(100) DEFAULT NULL AFTER product_type`,
     );
   }
 };
@@ -1642,7 +1663,11 @@ export const attachPurchaseLoadInvoice = async (req, res) => {
 
   try {
     const loadId = Number(req.params.loadId);
-    const { invoiceUrl = null, invoiceSource = null, invoiceNumber = null } = req.body || {};
+    const {
+      invoiceUrl = null,
+      invoiceSource = null,
+      invoiceNumber = null,
+    } = req.body || {};
 
     if (!loadId) {
       return res.status(400).json({
@@ -1658,7 +1683,7 @@ export const attachPurchaseLoadInvoice = async (req, res) => {
       JOIN purchase_trips pt ON pt.id = pl.trip_id
       WHERE pl.id = ?
       `,
-      [loadId]
+      [loadId],
     );
 
     if (!rows.length) {
@@ -1691,7 +1716,7 @@ export const attachPurchaseLoadInvoice = async (req, res) => {
       SET invoice_url = ?, invoice_source = ?, invoice_number = ?, status = 'PENDING'
       WHERE id = ?
       `,
-      [invoiceUrl, invoiceSource, invoiceNumber, loadId]
+      [invoiceUrl, invoiceSource, invoiceNumber, loadId],
     );
 
     // 2. Move stock_transactions to waiting approval for this load
@@ -1739,7 +1764,7 @@ export const cancelPurchaseLoad = async (req, res) => {
       JOIN purchase_trips pt ON pt.id = pl.trip_id
       WHERE pl.id = ?
       `,
-      [loadId]
+      [loadId],
     );
 
     if (!rows.length) {
@@ -1773,7 +1798,7 @@ export const cancelPurchaseLoad = async (req, res) => {
         AND reference_id = ?
         AND isApproved IN (0, 2)
       `,
-      [loadId]
+      [loadId],
     );
 
     await connection.query(
@@ -1782,7 +1807,7 @@ export const cancelPurchaseLoad = async (req, res) => {
       SET status = 'CANCELLED'
       WHERE id = ?
       `,
-      [loadId]
+      [loadId],
     );
 
     await connection.commit();
@@ -1809,8 +1834,15 @@ export const submitPurchaseTrip = async (req, res) => {
 
   try {
     const tripId = Number(req.params.tripId);
-    const { endOdometerImageUrl = null, endOdometerReading } = req.body || {};
+
+    const {
+      endOdometerImageUrl = null,
+      endOdometerReading,
+      emptyLoadId,
+      invoiceUrl = null,
+    } = req.body || {};
     const parsedEndOdometer = Number(endOdometerReading);
+    const parsedEmptyLoadId = emptyLoadId ? Number(emptyLoadId) : null;
 
     if (!tripId) {
       return res.status(400).json({
@@ -1845,7 +1877,7 @@ export const submitPurchaseTrip = async (req, res) => {
       FROM purchase_trips
       WHERE id = ?
       `,
-      [tripId]
+      [tripId],
     );
 
     if (!tripRows.length) {
@@ -1856,16 +1888,11 @@ export const submitPurchaseTrip = async (req, res) => {
       });
     }
 
-    if (String(tripRows[0].trip_type || "").toUpperCase() === TRIP_TYPE.EMPTY) {
-      await connection.rollback();
-      return res.status(400).json({
-        success: false,
-        message:
-          "This is an empty cylinder trip — close it from the empty trip flow instead",
-      });
-    }
-
-    if (!["IN_PROGRESS", "WAITING_APPROVAL", "APPROVED"].includes(tripRows[0].status)) {
+    if (
+      !["IN_PROGRESS", "WAITING_APPROVAL", "APPROVED"].includes(
+        tripRows[0].status,
+      )
+    ) {
       await connection.rollback();
       return res.status(400).json({
         success: false,
@@ -1873,6 +1900,53 @@ export const submitPurchaseTrip = async (req, res) => {
       });
     }
 
+    const hasEndOdometerReading = await hasPurchaseTripColumn(
+      connection,
+      "end_odometer_reading",
+    );
+    const hasEndOdometerImage = await hasPurchaseTripColumn(
+      connection,
+      "end_odometer_image_url",
+    );
+
+    // 2. ADD THIS ENTIRE BLOCK: Handle Empty Cylinder Trips
+    if (parsedEmptyLoadId) {
+      const [emptyLoadRows] = await connection.query(
+        `SELECT id, status FROM empty_cylinder_loads WHERE id = ?`,
+        [parsedEmptyLoadId]
+      );
+      if (!emptyLoadRows.length) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: "Empty cylinder load not found" });
+      }
+
+      // Complete the empty cylinder load
+      await connection.query(
+        `UPDATE empty_cylinder_loads SET status = 'COMPLETED', completed_at = NOW(), invoice_url = COALESCE(?, invoice_url) WHERE id = ?`,
+        [invoiceUrl, parsedEmptyLoadId]
+      );
+
+      const nextTripStatus = "COMPLETED"; // Empty trips complete immediately
+      if (hasEndOdometerReading && hasEndOdometerImage) {
+        await connection.query(
+          `UPDATE purchase_trips SET status = ?, ended_at = CURRENT_TIMESTAMP, end_odometer_image_url = ?, end_odometer_reading = ? WHERE id = ?`,
+          [nextTripStatus, endOdometerImageUrl, parsedEndOdometer, tripId]
+        );
+      } else {
+        await connection.query(
+          `UPDATE purchase_trips SET status = ?, ended_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [nextTripStatus, tripId]
+        );
+      }
+
+      await connection.commit();
+      return res.json({
+        success: true,
+        message: "Empty cylinder trip and load completed successfully",
+      });
+    }
+
+    // 3. EXISTING LOGIC STARTS HERE (leave this unchanged, it runs for regular trips)
     const [loadRows] = await connection.query(
       `
       SELECT id, status
@@ -1880,7 +1954,7 @@ export const submitPurchaseTrip = async (req, res) => {
       WHERE trip_id = ?
         AND status <> 'CANCELLED'
       `,
-      [tripId]
+      [tripId],
     );
 
     if (!loadRows.length) {
@@ -1906,23 +1980,15 @@ export const submitPurchaseTrip = async (req, res) => {
       if (load.status !== "PENDING" && load.status !== "APPROVED") {
         await connection.query(
           `UPDATE purchase_loads SET status = 'PENDING' WHERE id = ?`,
-          [load.id]
+          [load.id],
         );
       }
 
       await _markLoadStockWaiting(connection, load.id);
     }
 
-    const nextTripStatus = tripRows[0].status === "APPROVED" ? "APPROVED" : "WAITING_APPROVAL";
-
-    const hasEndOdometerReading = await hasPurchaseTripColumn(
-      connection,
-      "end_odometer_reading"
-    );
-    const hasEndOdometerImage = await hasPurchaseTripColumn(
-      connection,
-      "end_odometer_image_url"
-    );
+    const nextTripStatus =
+      tripRows[0].status === "APPROVED" ? "APPROVED" : "WAITING_APPROVAL";
 
     if (hasEndOdometerReading && hasEndOdometerImage) {
       await connection.query(
@@ -1931,7 +1997,7 @@ export const submitPurchaseTrip = async (req, res) => {
         SET status = ?, ended_at = CURRENT_TIMESTAMP, end_odometer_image_url = ?, end_odometer_reading = ?
         WHERE id = ?
         `,
-        [nextTripStatus, endOdometerImageUrl, parsedEndOdometer, tripId]
+        [nextTripStatus, endOdometerImageUrl, parsedEndOdometer, tripId],
       );
     } else {
       await connection.query(
@@ -1940,7 +2006,7 @@ export const submitPurchaseTrip = async (req, res) => {
         SET status = ?, ended_at = CURRENT_TIMESTAMP
         WHERE id = ?
         `,
-        [nextTripStatus, tripId]
+        [nextTripStatus, tripId],
       );
     }
 
@@ -2154,7 +2220,7 @@ export const getPurchaseExpenses = async (req, res) => {
       WHERE e.created_by = ?
       ORDER BY e.created_at DESC, e.id DESC
       `,
-      [userId]
+      [userId],
     );
 
     return res.json({
@@ -2193,7 +2259,7 @@ export const syncPurchaseApprovalState = async (connection, loadId) => {
     FROM purchase_loads
     WHERE id = ?
     `,
-    [loadId]
+    [loadId],
   );
 
   if (!loadRows.length) {
@@ -2208,7 +2274,7 @@ export const syncPurchaseApprovalState = async (connection, loadId) => {
     SET status = 'APPROVED'
     WHERE id = ?
     `,
-    [loadId]
+    [loadId],
   );
 
   const [pendingRows] = await connection.query(
@@ -2218,7 +2284,7 @@ export const syncPurchaseApprovalState = async (connection, loadId) => {
     WHERE trip_id = ?
       AND status IN ('DRAFT', 'PENDING')
     `,
-    [tripId]
+    [tripId],
   );
 
   if (Number(pendingRows[0]?.pendingCount || 0) === 0) {
@@ -2229,7 +2295,7 @@ export const syncPurchaseApprovalState = async (connection, loadId) => {
       WHERE id = ?
         AND status IN ('WAITING_APPROVAL', 'IN_PROGRESS')
       `,
-      [tripId]
+      [tripId],
     );
   }
 };

@@ -2203,10 +2203,10 @@ export const recordOfficeSale = async (req, res) => {
     } = req.body;
     const payment_method = payments && payments.length > 0 ? 'SPLIT' : originalPaymentMethod;
 
-    if (!customer_name || !phone || !address || !items.length) {
+    if (!customer_name || !address || !items.length) {
       return res.status(400).json({
         success: false,
-        message: 'customer_name, phone, address and items are required',
+        message: 'customer_name, address and items are required',
       });
     }
 
@@ -2267,34 +2267,39 @@ export const recordOfficeSale = async (req, res) => {
     const cashierUserId = req.user?.id || null;
 
     let customerId = null;
-    const [existingCustomers] = await connection.execute(
-      `
-      SELECT id
-      FROM users
-      WHERE phone = ?
-      LIMIT 1
-      `,
-      [phone]
-    );
-
-    if (existingCustomers.length) {
-      customerId = existingCustomers[0].id;
-      await connection.execute(
+    
+    if (phone) {
+      const [existingCustomers] = await connection.execute(
         `
-        UPDATE users
-        SET name = ?, role = 'CUSTOMER', updated_at = NOW()
-        WHERE id = ?
+        SELECT id
+        FROM users
+        WHERE phone = ?
+        LIMIT 1
         `,
-        [customer_name, customerId]
+        [phone]
       );
-    } else {
+
+      if (existingCustomers.length) {
+        customerId = existingCustomers[0].id;
+        await connection.execute(
+          `
+          UPDATE users
+          SET name = ?, role = 'CUSTOMER', updated_at = NOW()
+          WHERE id = ?
+          `,
+          [customer_name, customerId]
+        );
+      }
+    }
+
+    if (!customerId) {
       const [customerResult] = await connection.execute(
         `
         INSERT INTO users
           (name, phone, role, created_at, updated_at)
         VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
         `,
-        [customer_name, phone]
+        [customer_name, phone || null]
       );
       customerId = customerResult.insertId;
     }
