@@ -2917,7 +2917,8 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
     const [collectedRows] = await connection.execute(
       `
       SELECT
-        COALESCE(SUM(si.empty_cylinder_qty), 0) AS collected_qty
+        COALESCE(SUM(si.empty_cylinder_qty), 0) AS collected_qty,
+        COALESCE(SUM(CASE WHEN DATE(COALESCE(s.delivered_at, s.created_at)) = CURRENT_DATE() THEN si.empty_cylinder_qty ELSE 0 END), 0) AS today_collected_qty
       FROM sales s
       INNER JOIN sales_items si
         ON si.sale_id = s.id
@@ -2933,7 +2934,8 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
     const [returnedRows] = await connection.execute(
       `
       SELECT
-        COALESCE(SUM(st.quantity), 0) AS returned_qty
+        COALESCE(SUM(st.quantity), 0) AS returned_qty,
+        COALESCE(SUM(CASE WHEN DATE(st.created_at) = CURRENT_DATE() THEN st.quantity ELSE 0 END), 0) AS today_returned_qty
       FROM stock_transactions st
       LEFT JOIN sales linked_sale
         ON linked_sale.id = st.reference_id
@@ -2949,8 +2951,13 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
     );
 
     const collectedQty = Number(collectedRows[0]?.collected_qty || 0);
+    const todayCollectedQty = Number(collectedRows[0]?.today_collected_qty || 0);
     const returnedQty = Number(returnedRows[0]?.returned_qty || 0);
-    const availableQty = Math.max(collectedQty - returnedQty, 0);
+    const todayReturnedQty = Number(returnedRows[0]?.today_returned_qty || 0);
+    
+    const allTimeAvailable = Math.max(collectedQty - returnedQty, 0);
+    const todayAvailable = Math.max(todayCollectedQty - todayReturnedQty, 0);
+    const availableQty = Math.max(allTimeAvailable, todayAvailable);
 
     if (availableQty <= 0) {
       await connection.rollback();
@@ -3038,7 +3045,9 @@ export const getDriverReturnableEmptyProducts = async (req, res) => {
         c.name AS category_name,
 
         COALESCE(collected_data.collected_qty, 0) AS collected_qty,
-        COALESCE(returned_data.returned_qty, 0) AS returned_qty
+        COALESCE(returned_data.returned_qty, 0) AS returned_qty,
+        COALESCE(returned_data.today_returned_qty, 0) AS today_returned_qty,
+        COALESCE(today_collected_data.today_collected_qty, 0) AS today_collected_qty
       FROM products p
       LEFT JOIN categories c
         ON c.id = p.category_id
@@ -3060,8 +3069,25 @@ export const getDriverReturnableEmptyProducts = async (req, res) => {
 
       LEFT JOIN (
         SELECT
+          si.product_id,
+          COALESCE(SUM(si.empty_cylinder_qty), 0) AS today_collected_qty
+        FROM sales s
+        INNER JOIN sales_items si
+          ON si.sale_id = s.id
+        WHERE s.driver_id = ?
+          AND s.status = 'DELIVERED'
+          AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
+          AND COALESCE(si.empty_cylinder_qty, 0) > 0
+          AND DATE(COALESCE(s.delivered_at, s.created_at)) = CURRENT_DATE()
+        GROUP BY si.product_id
+      ) today_collected_data
+        ON today_collected_data.product_id = p.id
+
+      LEFT JOIN (
+        SELECT
           st.product_id,
-          COALESCE(SUM(st.quantity), 0) AS returned_qty
+          COALESCE(SUM(st.quantity), 0) AS returned_qty,
+          COALESCE(SUM(CASE WHEN DATE(st.created_at) = CURRENT_DATE() THEN st.quantity ELSE 0 END), 0) AS today_returned_qty
         FROM stock_transactions st
         LEFT JOIN sales linked_sale
           ON linked_sale.id = st.reference_id
@@ -3076,8 +3102,9 @@ export const getDriverReturnableEmptyProducts = async (req, res) => {
         ON returned_data.product_id = p.id
 
       WHERE (
-        COALESCE(collected_data.collected_qty, 0) - COALESCE(returned_data.returned_qty, 0)
-      ) > 0
+        COALESCE(collected_data.collected_qty, 0) > 0
+        OR COALESCE(returned_data.returned_qty, 0) > 0
+      )
         AND (
           ? = ''
           OR p.name LIKE ?
@@ -3085,13 +3112,18 @@ export const getDriverReturnableEmptyProducts = async (req, res) => {
 
       ORDER BY p.name ASC
       `,
-      [numericDriverId, numericDriverId, search, `%${search}%`]
+      [numericDriverId, numericDriverId, numericDriverId, search, `%${search}%`]
     );
 
     const data = rows.map((row) => {
       const collectedQty = Number(row.collected_qty || 0);
       const returnedQty = Number(row.returned_qty || 0);
-      const availableQty = Math.max(collectedQty - returnedQty, 0);
+      const todayCollectedQty = Number(row.today_collected_qty || 0);
+      const todayReturnedQty = Number(row.today_returned_qty || 0);
+      
+      const allTimeAvailable = Math.max(collectedQty - returnedQty, 0);
+      const todayAvailable = Math.max(todayCollectedQty - todayReturnedQty, 0);
+      const availableQty = Math.max(allTimeAvailable, todayAvailable);
 
       return {
         id: Number(row.id),
