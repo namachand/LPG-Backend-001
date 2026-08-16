@@ -402,7 +402,7 @@ const purchaseExpenseTripJoin = `
 `;
 
 const DEFAULT_STOCK_AREA_ID = 1;
-const ALLOWED_CASHIER_REQUEST_PAYMENT_MODES = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+const ALLOWED_CASHIER_REQUEST_PAYMENT_MODES = ["CASH", "UPI", "CARD", "BANK_TRANSFER", "SPLIT"];
 
 const consumeStockForCashierSale = async (connection, productId, requiredQty) => {
   let remaining = Number(requiredQty || 0);
@@ -784,18 +784,18 @@ const [rows] = await connection.query(
         d.id AS driver_id,
         u.name AS driverName,
         COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS cashAssigned,
-        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS upiAssigned,
+        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS upiAssigned,
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS totalAssigned,
         COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cashPending,
-        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
+        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS totalPending,
         COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS cashSettled,
-        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS upiSettled,
+        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS upiSettled,
         COALESCE(SUM(CASE WHEN sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS totalSettled,
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS assignedCount,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingCount,
         COALESCE(SUM(CASE WHEN sh.status = 'SETTLED' THEN 1 ELSE 0 END), 0) AS settledCount,
-        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') THEN 1 ELSE 0 END), 0) AS iocOnlineCount,
+        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') THEN 1 ELSE 0 END), 0) AS iocOnlineCount,
         CASE
           WHEN COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) > 0 THEN 'Pending'
           WHEN COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) > 0 THEN 'Assigned'

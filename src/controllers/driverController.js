@@ -1457,7 +1457,7 @@ export const createDriverSale = async (req, res) => {
 
     const paymentId = paymentInsertResult.insertId;
 
-    if (payment_method === "CASH" || payment_method === "UPI") {
+    if (payment_method === "CASH" || payment_method === "UPI" || payment_method === "ONLINE") {
       await connection.execute(
         `
         INSERT INTO settlement_history
