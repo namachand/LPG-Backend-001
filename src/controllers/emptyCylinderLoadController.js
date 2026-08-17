@@ -33,6 +33,20 @@ const getAvailableEmptyForUpdate = async (connection, productId) => {
   return Number(rows[0]?.total || 0);
 };
 
+const getAvailableDefectiveForUpdate = async (connection, productId) => {
+  const [rows] = await connection.execute(
+    `
+    SELECT COALESCE(SUM(defective_quantity), 0) AS total
+    FROM stock
+    WHERE product_id = ?
+    FOR UPDATE
+    `,
+    [Number(productId)]
+  );
+
+  return Number(rows[0]?.total || 0);
+};
+
 // Reserve (deduct) empty cylinders from the godown's available empty stock.
 const consumeEmptyStock = async (connection, productId, requiredQty) => {
   let remaining = Number(requiredQty || 0);
@@ -69,6 +83,52 @@ const consumeEmptyStock = async (connection, productId, requiredQty) => {
       `
       UPDATE stock
       SET empty_quantity = GREATEST(COALESCE(empty_quantity, 0) - ?, 0),
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [deductQty, row.id]
+    );
+
+    remaining -= deductQty;
+  }
+};
+
+// Reserve (deduct) defective cylinders from the godown's available defective stock.
+const consumeDefectiveStock = async (connection, productId, requiredQty) => {
+  let remaining = Number(requiredQty || 0);
+
+  if (remaining <= 0) {
+    return;
+  }
+
+  const [rows] = await connection.execute(
+    `
+    SELECT id, COALESCE(defective_quantity, 0) AS metric_qty
+    FROM stock
+    WHERE product_id = ?
+    ORDER BY (stock_area_id = ?) DESC, id ASC
+    FOR UPDATE
+    `,
+    [Number(productId), DEFAULT_STOCK_AREA_ID]
+  );
+
+  for (const row of rows) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const currentQty = Number(row.metric_qty || 0);
+
+    if (currentQty <= 0) {
+      continue;
+    }
+
+    const deductQty = Math.min(currentQty, remaining);
+
+    await connection.execute(
+      `
+      UPDATE stock
+      SET defective_quantity = GREATEST(COALESCE(defective_quantity, 0) - ?, 0),
           updated_at = NOW()
       WHERE id = ?
       `,
@@ -122,11 +182,56 @@ const restoreEmptyStock = async (connection, productId, qty) => {
   );
 };
 
+const restoreDefectiveStock = async (connection, productId, qty) => {
+  const quantity = Number(qty || 0);
+
+  if (!quantity || quantity <= 0) {
+    return;
+  }
+
+  const [rows] = await connection.execute(
+    `
+    SELECT id
+    FROM stock
+    WHERE product_id = ?
+    ORDER BY (stock_area_id = ?) DESC, id ASC
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [Number(productId), DEFAULT_STOCK_AREA_ID]
+  );
+
+  if (rows.length) {
+    await connection.execute(
+      `
+      UPDATE stock
+      SET defective_quantity = COALESCE(defective_quantity, 0) + ?,
+          updated_at = NOW()
+      WHERE id = ?
+      `,
+      [quantity, rows[0].id]
+    );
+    return;
+  }
+
+  await connection.execute(
+    `
+    INSERT INTO stock (product_id, stock_area_id, quantity, empty_quantity, defective_quantity)
+    VALUES (?, NULL, 0, 0, ?)
+    `,
+    [Number(productId), quantity]
+  );
+};
+
 // Ensures the tables backing the empty-cylinder-load flow exist. Follows the
 // same CREATE TABLE IF NOT EXISTS convention used elsewhere in the codebase.
 // Exported because the purchase-trip flow reads these tables too and cannot
 // assume a godown dispatch has already created them.
+let tablesEnsured = false;
+
 export const ensureEmptyCylinderLoadTables = async (connection) => {
+  if (tablesEnsured) return;
+
   await connection.execute(
     `
     CREATE TABLE IF NOT EXISTS empty_cylinder_loads (
@@ -177,6 +282,28 @@ export const ensureEmptyCylinderLoadTables = async (connection) => {
       throw error;
     }
   }
+
+  try {
+    await connection.execute(
+      `ALTER TABLE empty_cylinder_load_items ADD COLUMN defective_quantity INT NOT NULL DEFAULT 0 AFTER quantity`
+    );
+  } catch (error) {
+    if (error?.code !== "ER_DUP_FIELDNAME") {
+      throw error;
+    }
+  }
+
+  try {
+    await connection.execute(
+      `ALTER TABLE empty_cylinder_load_items ADD COLUMN defective_stock_transaction_id BIGINT NULL AFTER stock_transaction_id`
+    );
+  } catch (error) {
+    if (error?.code !== "ER_DUP_FIELDNAME") {
+      throw error;
+    }
+  }
+
+  tablesEnsured = true;
 };
 
 // GET /purchase-managers — assignee list for the godown dispatch screen.
@@ -236,19 +363,19 @@ export const createEmptyCylinderLoad = async (req, res) => {
       .map((item) => ({
         product_id: Number(item.product_id),
         quantity: Number(item.quantity || 0),
+        defective_quantity: Number(item.defective_quantity || 0),
       }))
-      .filter((item) => item.product_id && item.quantity > 0);
+      .filter((item) => item.product_id && (item.quantity > 0 || item.defective_quantity > 0));
 
     if (!validItems.length) {
       return res.status(400).json({
         success: false,
-        message: "At least one empty cylinder quantity is required",
+        message: "At least one empty or defective cylinder quantity is required",
       });
     }
 
-    await connection.beginTransaction();
-
     await ensureEmptyCylinderLoadTables(connection);
+    await connection.beginTransaction();
 
     // Confirm the assignee is actually a purchase manager.
     const [pmRows] = await connection.execute(
@@ -281,16 +408,29 @@ export const createEmptyCylinderLoad = async (req, res) => {
 
       item.category = String(productRows[0].type || "").toUpperCase();
 
-      const available = await getAvailableEmptyForUpdate(
+      const availableEmpty = await getAvailableEmptyForUpdate(
         connection,
         item.product_id
       );
 
-      if (item.quantity > available) {
+      if (item.quantity > availableEmpty) {
         await connection.rollback();
         return res.status(400).json({
           success: false,
-          message: `Only ${available} empty cylinder(s) available for product ${item.product_id}`,
+          message: `Only ${availableEmpty} empty cylinder(s) available for product ${item.product_id}`,
+        });
+      }
+
+      const availableDefective = await getAvailableDefectiveForUpdate(
+        connection,
+        item.product_id
+      );
+
+      if (item.defective_quantity > availableDefective) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Only ${availableDefective} defective cylinder(s) available for product ${item.product_id}`,
         });
       }
     }
@@ -310,31 +450,54 @@ export const createEmptyCylinderLoad = async (req, res) => {
     const loadId = loadResult.insertId;
 
     for (const item of validItems) {
-      // Reserve the empties out of available godown stock.
-      await consumeEmptyStock(connection, item.product_id, item.quantity);
+      let txnId = null;
+      let defTxnId = null;
 
-      // Pending stock movement — finalized on accept, voided on reject.
-      const [txnResult] = await connection.execute(
-        `
-        INSERT INTO stock_transactions
-        (product_id, stock_area_id, type, quantity, isApproved, reference_id, driver_id, created_by, is_defective, stock_from)
-        VALUES (?, NULL, 'EMPTY_RETURN', ?, ?, ?, NULL, ?, 0, 'godown')
-        `,
-        [item.product_id, item.quantity, TXN_PENDING, loadId, createdBy]
-      );
+      if (item.quantity > 0) {
+        // Reserve the empties out of available godown stock.
+        await consumeEmptyStock(connection, item.product_id, item.quantity);
+
+        // Pending stock movement — finalized on accept, voided on reject.
+        const [txnResult] = await connection.execute(
+          `
+          INSERT INTO stock_transactions
+          (product_id, stock_area_id, type, quantity, isApproved, reference_id, driver_id, created_by, is_defective, stock_from)
+          VALUES (?, NULL, 'EMPTY_RETURN', ?, ?, ?, NULL, ?, 0, 'godown')
+          `,
+          [item.product_id, item.quantity, TXN_PENDING, loadId, createdBy]
+        );
+        txnId = txnResult.insertId;
+      }
+
+      if (item.defective_quantity > 0) {
+        // Reserve the defectives out of available godown stock.
+        await consumeDefectiveStock(connection, item.product_id, item.defective_quantity);
+
+        const [defTxnResult] = await connection.execute(
+          `
+          INSERT INTO stock_transactions
+          (product_id, stock_area_id, type, quantity, isApproved, reference_id, driver_id, created_by, is_defective, stock_from)
+          VALUES (?, NULL, 'EMPTY_RETURN', ?, ?, ?, NULL, ?, 1, 'godown')
+          `,
+          [item.product_id, item.defective_quantity, TXN_PENDING, loadId, createdBy]
+        );
+        defTxnId = defTxnResult.insertId;
+      }
 
       await connection.execute(
         `
         INSERT INTO empty_cylinder_load_items
-        (load_id, product_id, category, quantity, stock_transaction_id)
-        VALUES (?, ?, ?, ?, ?)
+        (load_id, product_id, category, quantity, defective_quantity, stock_transaction_id, defective_stock_transaction_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         `,
         [
           loadId,
           item.product_id,
           item.category || null,
           item.quantity,
-          txnResult.insertId,
+          item.defective_quantity,
+          txnId,
+          defTxnId,
         ]
       );
     }
@@ -413,9 +576,20 @@ export const getEmptyCylinderLoads = async (req, res) => {
         ecl.accepted_at,
         ecl.completed_at,
         assigner.name AS assigned_by_name,
+        (
+          SELECT pt.id
+          FROM purchase_trips pt
+          WHERE pt.empty_load_id = ecl.id
+            AND pt.status <> 'CANCELLED'
+          ORDER BY pt.id DESC
+          LIMIT 1
+        ) AS trip_id,
         COALESCE(SUM(ecli.quantity), 0) AS total_qty,
         COALESCE(SUM(CASE WHEN ecli.category = 'DOMESTIC' THEN ecli.quantity ELSE 0 END), 0) AS domestic_qty,
-        COALESCE(SUM(CASE WHEN ecli.category = 'COMMERCIAL' THEN ecli.quantity ELSE 0 END), 0) AS commercial_qty
+        COALESCE(SUM(CASE WHEN ecli.category = 'COMMERCIAL' THEN ecli.quantity ELSE 0 END), 0) AS commercial_qty,
+        COALESCE(SUM(ecli.defective_quantity), 0) AS total_defective_qty,
+        COALESCE(SUM(CASE WHEN ecli.category = 'DOMESTIC' THEN ecli.defective_quantity ELSE 0 END), 0) AS domestic_defective_qty,
+        COALESCE(SUM(CASE WHEN ecli.category = 'COMMERCIAL' THEN ecli.defective_quantity ELSE 0 END), 0) AS commercial_defective_qty
       FROM empty_cylinder_loads ecl
       LEFT JOIN users assigner ON assigner.id = ecl.assigned_by
       LEFT JOIN empty_cylinder_load_items ecli ON ecli.load_id = ecl.id
@@ -432,6 +606,7 @@ export const getEmptyCylinderLoads = async (req, res) => {
       success: true,
       data: rows.map((row) => ({
         id: Number(row.id),
+        tripId: row.trip_id ? Number(row.trip_id) : undefined,
         vehicleNumber: row.vehicle_number || "N/A",
         ervNumber: row.erv_number || null,
         assignedBy: row.assigned_by_name || "Godown",
@@ -445,6 +620,9 @@ export const getEmptyCylinderLoads = async (req, res) => {
         totalQuantity: Number(row.total_qty || 0),
         domesticQuantity: Number(row.domestic_qty || 0),
         commercialQuantity: Number(row.commercial_qty || 0),
+        totalDefectiveQuantity: Number(row.total_defective_qty || 0),
+        domesticDefectiveQuantity: Number(row.domestic_defective_qty || 0),
+        commercialDefectiveQuantity: Number(row.commercial_defective_qty || 0),
       })),
     });
   } catch (error) {
@@ -511,6 +689,7 @@ export const getEmptyCylinderLoadDetail = async (req, res) => {
         ecli.product_id,
         ecli.category,
         ecli.quantity,
+        ecli.defective_quantity,
         p.name AS product_name,
         c.name AS category_name
       FROM empty_cylinder_load_items ecli
@@ -530,6 +709,7 @@ export const getEmptyCylinderLoadDetail = async (req, res) => {
       category: row.category || "",
       categoryName: row.category_name || "",
       quantity: Number(row.quantity || 0),
+      defectiveQuantity: Number(row.defective_quantity || 0),
     });
 
     const domesticItems = itemRows
@@ -542,6 +722,8 @@ export const getEmptyCylinderLoadDetail = async (req, res) => {
 
     const domesticQty = domesticItems.reduce((s, i) => s + i.quantity, 0);
     const commercialQty = commercialItems.reduce((s, i) => s + i.quantity, 0);
+    const domesticDefectiveQty = domesticItems.reduce((s, i) => s + i.defectiveQuantity, 0);
+    const commercialDefectiveQty = commercialItems.reduce((s, i) => s + i.defectiveQuantity, 0);
 
     return res.json({
       success: true,
@@ -561,6 +743,9 @@ export const getEmptyCylinderLoadDetail = async (req, res) => {
         totalQuantity: domesticQty + commercialQty,
         domesticQuantity: domesticQty,
         commercialQuantity: commercialQty,
+        totalDefectiveQuantity: domesticDefectiveQty + commercialDefectiveQty,
+        domesticDefectiveQuantity: domesticDefectiveQty,
+        commercialDefectiveQuantity: commercialDefectiveQty,
         domesticItems,
         commercialItems,
       },
@@ -698,16 +883,25 @@ export const rejectEmptyCylinderLoad = async (req, res) => {
     }
 
     const [items] = await connection.execute(
-      `SELECT product_id, quantity FROM empty_cylinder_load_items WHERE load_id = ?`,
+      `SELECT product_id, quantity, defective_quantity FROM empty_cylinder_load_items WHERE load_id = ?`,
       [loadId]
     );
 
     for (const item of items) {
-      await restoreEmptyStock(
-        connection,
-        Number(item.product_id),
-        Number(item.quantity || 0)
-      );
+      if (item.quantity > 0) {
+        await restoreEmptyStock(
+          connection,
+          Number(item.product_id),
+          Number(item.quantity || 0)
+        );
+      }
+      if (item.defective_quantity > 0) {
+        await restoreDefectiveStock(
+          connection,
+          Number(item.product_id),
+          Number(item.defective_quantity || 0)
+        );
+      }
     }
 
     await connection.execute(
