@@ -9,6 +9,7 @@ import { bulkUploadCustomers } from "../controllers/customerBulkUploadController
 import {
   startPurchaseTrip,
   submitPurchaseTrip,
+  startEmptyCylinderTrip,
 } from "../controllers/purchaseController.js";
 
 const router = express.Router();
@@ -106,6 +107,7 @@ router.post(
           access: "private",
           token: process.env.BLOB_READ_WRITE_TOKEN,
           contentType: file.mimetype,
+          addRandomSuffix: true,
         });
         odometerUrl = blob.url;
       }
@@ -120,6 +122,7 @@ router.post(
           access: "private",
           token: process.env.BLOB_READ_WRITE_TOKEN,
           contentType: file.mimetype,
+          addRandomSuffix: true,
         });
         invoiceUrl = blob.url;
       }
@@ -130,6 +133,12 @@ router.post(
       if (action === "START") {
         req.body.odometerImageUrl = odometerUrl;
         return startPurchaseTrip(req, res);
+      }
+
+      // --- HANDLE START EMPTY TRIP ---
+      if (action === "START_EMPTY") {
+        req.body.odometerImageUrl = odometerUrl;
+        return startEmptyCylinderTrip(req, res);
       }
 
       // --- HANDLE END TRIP ---
@@ -231,6 +240,7 @@ router.post("/image", imageUpload.single("image"), async (req, res) => {
       access: "public",
       token: process.env.BLOB_READ_WRITE_TOKEN,
       contentType: req.file.mimetype,
+      addRandomSuffix: true,
     });
 
     res.json({
