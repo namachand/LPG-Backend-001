@@ -104,7 +104,7 @@ router.post(
         const filename = `uploads/odometers/odometer_${Date.now()}_${Math.round(Math.random() * 1000)}${ext}`;
 
         const blob = await put(filename, file.buffer, {
-          access: "private",
+          access: "public",
           token: process.env.BLOB_READ_WRITE_TOKEN,
           contentType: file.mimetype,
           addRandomSuffix: true,
@@ -119,7 +119,7 @@ router.post(
         const filename = `uploads/supporting-documents/invoice_${Date.now()}_${Math.round(Math.random() * 1000)}${ext}`;
 
         const blob = await put(filename, file.buffer, {
-          access: "private",
+          access: "public",
           token: process.env.BLOB_READ_WRITE_TOKEN,
           contentType: file.mimetype,
           addRandomSuffix: true,
