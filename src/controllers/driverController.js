@@ -642,11 +642,14 @@ export const getDriverDeliveriesApp = async (req, res) => {
         COALESCE(s.total_amount, 0) AS total_amount,
         s.created_at,
         s.delivered_at,
-        COALESCE(
-          MAX(CASE WHEN p.status = 'SUCCESS' THEN p.method ELSE NULL END),
-          s.payment_method,
-          'N/A'
-        ) AS payment_mode
+        CASE
+          WHEN s.payment_method = 'ONLINE' THEN 'ONLINE'
+          ELSE COALESCE(
+            MAX(CASE WHEN p.status = 'SUCCESS' THEN p.method ELSE NULL END),
+            s.payment_method,
+            'N/A'
+          )
+        END AS payment_mode
       FROM sales s
       LEFT JOIN users u ON u.id = s.customer_id
       LEFT JOIN addresses a ON a.id = s.address_id
@@ -1457,7 +1460,7 @@ export const createDriverSale = async (req, res) => {
 
     const paymentId = paymentInsertResult.insertId;
 
-    if (payment_method === "CASH" || payment_method === "UPI" || payment_method === "ONLINE") {
+    if (payment_method === "CASH" || payment_method === "UPI") {
       await connection.execute(
         `
         INSERT INTO settlement_history
@@ -1951,9 +1954,10 @@ export const getDriverCollectionSummary = async (req, res) => {
     const cashPending = buildGroup("CASH", "PENDING");
     const upiAssigned = buildGroup("UPI", "ASSIGNED");
     const upiPending = buildGroup("UPI", "PENDING");
+    const totalUpiPending = buildGroup("TOTAL_UPI", "PENDING");
 
     const cashTotal = cashAssigned.amount + cashPending.amount;
-    const upiTotal = upiAssigned.amount + upiPending.amount;
+    const upiTotal = upiAssigned.amount + upiPending.amount + totalUpiPending.amount;
 
     const [deliveredRows] = await db.execute(
       `
@@ -1974,16 +1978,18 @@ export const getDriverCollectionSummary = async (req, res) => {
       message: "Collection summary fetched successfully",
       data: {
         summary: {
-          cashCollected: cashTotal,
-          upiCollected: upiTotal,
+          cashCollected: cashAssigned.amount,
+          upiCollected: upiAssigned.amount,
           totalCollected: cashTotal + upiTotal,
           totalDeliveries,
+          totalSettled: cashPending.amount + upiPending.amount + totalUpiPending.amount,
         },
         settlements: {
           cashAssigned,
           cashPending,
           upiAssigned,
           upiPending,
+          totalUpiPending,
         },
       },
     });
@@ -2021,15 +2027,24 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
 
     await connection.beginTransaction();
 
+    let methodFilter = "";
+    const queryParams = [driverId];
+    if (method !== "TOTAL_UPI") {
+      methodFilter = " AND method = ?";
+      queryParams.push(method);
+    }
+
     const [rows] = await connection.execute(
       `
       SELECT id, amount
       FROM settlement_history
       WHERE driver_id = ?
         AND status = 'ASSIGNED'
+        ${methodFilter}
+      ORDER BY created_at DESC
       FOR UPDATE
       `,
-      [driverId]
+      queryParams
     );
 
     if (!rows.length) {
@@ -2093,7 +2108,7 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
         );
         await connection.execute(
           `INSERT INTO settlement_history (driver_id, sale_id, payment_id, method, amount, status, created_at)
-           SELECT driver_id, sale_id, payment_id, ?, ?, 'PENDING', NOW()
+           SELECT driver_id, sale_id, payment_id, ?, ?, 'PENDING', created_at
            FROM settlement_history WHERE id = ?`,
           [method, remainingToSettle, row.id]
         );
