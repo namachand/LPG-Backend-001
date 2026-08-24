@@ -775,10 +775,15 @@ export const getCashierDriverCollections = async (req, res) => {
     const queryParams = [];
     if (hasRange) {
       joinCondition += " AND DATE(sh.created_at) BETWEEN ? AND ?";
-      queryParams.push(startDate, endDate);
+      queryParams.push(startDate, endDate);       // for settlement_history JOIN
+    }
+    // The iocOnlineCount correlated subquery also needs date params when range is set.
+    // These must come AFTER the JOIN params but BEFORE limit/offset.
+    if (hasRange) {
+      queryParams.push(startDate, endDate);       // for iocOnlineCount subquery
     }
     queryParams.push(limit, offset);
-const [rows] = await connection.query(
+    const [rows] = await connection.query(
       `
       SELECT
         d.id AS driver_id,
@@ -795,7 +800,17 @@ const [rows] = await connection.query(
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS assignedCount,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingCount,
         COALESCE(SUM(CASE WHEN sh.status = 'SETTLED' THEN 1 ELSE 0 END), 0) AS settledCount,
-        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') THEN 1 ELSE 0 END), 0) AS iocOnlineCount,
+        -- iocOnlineCount: count of distinct DELIVERED sales whose payment_method = 'ONLINE'
+        -- (uses the sale's original payment_method, not settlement_history.method which
+        --  changes when the driver settles with a different method)
+        COALESCE((
+          SELECT COUNT(DISTINCT s2.id)
+          FROM sales s2
+          WHERE s2.driver_id = d.id
+            AND s2.payment_method = 'ONLINE'
+            AND s2.status = 'DELIVERED'
+            ${hasRange ? "AND DATE(COALESCE(s2.delivered_at, s2.created_at)) BETWEEN ? AND ?" : ""}
+        ), 0) AS iocOnlineCount,
         CASE
           WHEN COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) > 0 THEN 'Pending'
           WHEN COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) > 0 THEN 'Assigned'
@@ -812,6 +827,7 @@ const [rows] = await connection.query(
       `,
       queryParams
     );
+
 
     return res.status(200).json({
       success: true,
@@ -848,7 +864,11 @@ const [rows] = await connection.query(
           status: driver.status,
           pendingCash: Number(driver.cashPending || 0),
           pendingUpi: Number(driver.upiPending || 0),
-          pendingTotal: Number(driver.totalPending || 0),
+          // requested = amount driver has submitted to cashier but not yet approved (PENDING status)
+          requested: Number(driver.totalPending || 0),
+          // pendingTotal = total collection still unsettled with the driver
+          //              = totalCollected - settled = ASSIGNED + PENDING
+          pendingTotal: Number(driver.totalAssigned || 0) + Number(driver.totalPending || 0),
           assignedCash: Number(driver.cashAssigned || 0),
           assignedUpi: Number(driver.upiAssigned || 0),
           assignedTotal: Number(driver.totalAssigned || 0),
