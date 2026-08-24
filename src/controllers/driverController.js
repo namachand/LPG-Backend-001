@@ -1893,6 +1893,11 @@ export const getDriverCollectionSummary = async (req, res) => {
       });
     }
 
+    // Fetch ALL records for the date range across all statuses so that
+    // totalCollected never drops to zero after cashier approval.
+    //   ASSIGNED  = collected by driver, not yet settled to cashier
+    //   PENDING   = driver submitted, awaiting cashier approval
+    //   SETTLED   = cashier has approved / closed out
     const [rows] = await db.execute(
       `
       SELECT
@@ -1908,7 +1913,7 @@ export const getDriverCollectionSummary = async (req, res) => {
       INNER JOIN sales s ON s.id = sh.sale_id
       LEFT JOIN users u ON u.id = s.customer_id
       WHERE sh.driver_id = ?
-        AND sh.status IN ('ASSIGNED', 'PENDING')
+        AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')
         AND DATE(sh.created_at) BETWEEN ? AND ?
       ORDER BY sh.created_at ASC
       `,
@@ -1930,6 +1935,8 @@ export const getDriverCollectionSummary = async (req, res) => {
         displayMessage = amount > 0 ? "Ready to Settle" : "No pending collection";
       } else if (status === "PENDING") {
         displayMessage = amount > 0 ? "Pending for approval" : "No collections pending approval";
+      } else if (status === "SETTLED") {
+        displayMessage = amount > 0 ? "Settled" : "";
       }
 
       return {
@@ -1950,14 +1957,31 @@ export const getDriverCollectionSummary = async (req, res) => {
       };
     };
 
-    const cashAssigned = buildGroup("CASH", "ASSIGNED");
-    const cashPending = buildGroup("CASH", "PENDING");
-    const upiAssigned = buildGroup("UPI", "ASSIGNED");
-    const upiPending = buildGroup("UPI", "PENDING");
-    const totalUpiPending = buildGroup("TOTAL_UPI", "PENDING");
+    const cashAssigned   = buildGroup("CASH",      "ASSIGNED");
+    const cashPending    = buildGroup("CASH",      "PENDING");
+    const cashSettled    = buildGroup("CASH",      "SETTLED");
+    const upiAssigned    = buildGroup("UPI",       "ASSIGNED");
+    const upiPending     = buildGroup("UPI",       "PENDING");
+    const upiSettled     = buildGroup("UPI",       "SETTLED");
+    const onlineAssigned = buildGroup("ONLINE",    "ASSIGNED");
+    const onlinePending  = buildGroup("ONLINE",    "PENDING");
+    const onlineSettled  = buildGroup("ONLINE",    "SETTLED");
+    const totalUpiPending  = buildGroup("TOTAL_UPI", "PENDING");
+    const totalUpiSettled  = buildGroup("TOTAL_UPI", "SETTLED");
 
-    const cashTotal = cashAssigned.amount + cashPending.amount;
-    const upiTotal = upiAssigned.amount + upiPending.amount + totalUpiPending.amount;
+    // totalCollected = everything collected today (regardless of settlement state)
+    const cashTotal   = cashAssigned.amount   + cashPending.amount   + cashSettled.amount;
+    const upiTotal    = upiAssigned.amount    + upiPending.amount    + upiSettled.amount
+                      + totalUpiPending.amount + totalUpiSettled.amount;
+    const onlineTotal = onlineAssigned.amount + onlinePending.amount + onlineSettled.amount;
+
+    // totalSettled = amount that has been cashier-approved (status = SETTLED)
+    const totalSettledAmount = cashSettled.amount + upiSettled.amount
+                              + onlineSettled.amount + totalUpiSettled.amount;
+
+    // totalPending = submitted by driver but not yet approved
+    const totalPendingAmount = cashPending.amount + upiPending.amount
+                              + onlinePending.amount + totalUpiPending.amount;
 
     const [deliveredRows] = await db.execute(
       `
@@ -1978,18 +2002,28 @@ export const getDriverCollectionSummary = async (req, res) => {
       message: "Collection summary fetched successfully",
       data: {
         summary: {
-          cashCollected: cashAssigned.amount,
-          upiCollected: upiAssigned.amount,
-          totalCollected: cashTotal + upiTotal,
+          cashCollected:   cashTotal,
+          upiCollected:    upiTotal,
+          onlineCollected: onlineTotal,
+          totalCollected:  cashTotal + upiTotal + onlineTotal,
           totalDeliveries,
-          totalSettled: cashPending.amount + upiPending.amount + totalUpiPending.amount,
+          // totalSettled shown to driver = cashier-approved amount
+          totalSettled: totalSettledAmount,
+          // totalPending = submitted, awaiting cashier
+          totalPending: totalPendingAmount,
         },
         settlements: {
           cashAssigned,
           cashPending,
+          cashSettled,
           upiAssigned,
           upiPending,
+          upiSettled,
+          onlineAssigned,
+          onlinePending,
+          onlineSettled,
           totalUpiPending,
+          totalUpiSettled,
         },
       },
     });
@@ -2018,33 +2052,30 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
       });
     }
 
-    if (!["CASH", "UPI", "TOTAL_UPI"].includes(method)) {
+    if (!["CASH", "UPI", "ONLINE", "TOTAL_UPI"].includes(method)) {
       return res.status(400).json({
         success: false,
-        message: "method must be CASH, UPI or TOTAL_UPI",
+        message: "method must be CASH, UPI, ONLINE or TOTAL_UPI",
       });
     }
 
     await connection.beginTransaction();
 
-    let methodFilter = "";
-    const queryParams = [driverId];
-    if (method !== "TOTAL_UPI") {
-      methodFilter = " AND method = ?";
-      queryParams.push(method);
-    }
-
+    // Fetch ALL assigned records for today regardless of original payment method.
+    // The driver should be able to hand over cash collections via UPI and vice versa.
+    // DATE(created_at) = CURDATE() prevents stale ASSIGNED records from previous days
+    // from being accidentally settled.
     const [rows] = await connection.execute(
       `
-      SELECT id, amount
+      SELECT id, amount, method AS original_method
       FROM settlement_history
       WHERE driver_id = ?
         AND status = 'ASSIGNED'
-        ${methodFilter}
+        AND DATE(created_at) = CURDATE()
       ORDER BY created_at DESC
       FOR UPDATE
       `,
-      queryParams
+      [driverId]
     );
 
     if (!rows.length) {
