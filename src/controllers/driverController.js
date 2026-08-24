@@ -79,7 +79,7 @@ const resolveDriverId = async (value) => {
     WHERE id = ?
     LIMIT 1
     `,
-    [numericValue]
+    [numericValue],
   );
 
   if (driverRows.length) {
@@ -93,7 +93,7 @@ const resolveDriverId = async (value) => {
     WHERE user_id = ?
     LIMIT 1
     `,
-    [numericValue]
+    [numericValue],
   );
 
   if (userMappedRows.length) {
@@ -117,14 +117,14 @@ const reserveStockForBooking = async (connection, productId, requiredQty) => {
     WHERE product_id = ?
     FOR UPDATE
     `,
-    [Number(productId)]
+    [Number(productId)],
   );
 
   const availableQty = Number(availableRows[0]?.available_qty || 0);
 
   if (availableQty < remaining) {
     throw new Error(
-      `Insufficient stock for product ${productId}. Available ${availableQty}, required ${remaining}`
+      `Insufficient stock for product ${productId}. Available ${availableQty}, required ${remaining}`,
     );
   }
 
@@ -136,7 +136,7 @@ const reserveStockForBooking = async (connection, productId, requiredQty) => {
     ORDER BY (stock_area_id = ?) DESC, id ASC
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), DEFAULT_STOCK_AREA_ID],
   );
 
   for (const row of rows) {
@@ -159,7 +159,7 @@ const reserveStockForBooking = async (connection, productId, requiredQty) => {
           updated_at = NOW()
       WHERE id = ?
       `,
-      [deductQty, row.id]
+      [deductQty, row.id],
     );
 
     remaining -= deductQty;
@@ -182,7 +182,7 @@ const restoreStockForBooking = async (connection, productId, quantity) => {
     LIMIT 1
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), DEFAULT_STOCK_AREA_ID],
   );
 
   if (rows.length) {
@@ -193,7 +193,7 @@ const restoreStockForBooking = async (connection, productId, quantity) => {
           updated_at = NOW()
       WHERE id = ?
       `,
-      [qty, rows[0].id]
+      [qty, rows[0].id],
     );
     return;
   }
@@ -210,7 +210,7 @@ const restoreStockForBooking = async (connection, productId, quantity) => {
     )
     VALUES (?, ?, ?, 0, 0)
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID, qty]
+    [Number(productId), DEFAULT_STOCK_AREA_ID, qty],
   );
 };
 
@@ -230,7 +230,7 @@ const addEmptyStockToGodown = async (connection, productId, qty) => {
     LIMIT 1
     FOR UPDATE
     `,
-    [Number(productId)]
+    [Number(productId)],
   );
 
   if (rows.length) {
@@ -241,7 +241,7 @@ const addEmptyStockToGodown = async (connection, productId, qty) => {
           updated_at = NOW()
       WHERE id = ?
       `,
-      [quantity, rows[0].id]
+      [quantity, rows[0].id],
     );
     return;
   }
@@ -258,19 +258,13 @@ const addEmptyStockToGodown = async (connection, productId, qty) => {
     )
     VALUES (?, NULL, 0, ?, 0)
     `,
-    [Number(productId), quantity]
+    [Number(productId), quantity],
   );
 };
 
 export const getDriverDashboard = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 10,
-      search = "",
-      startDate,
-      endDate,
-    } = req.query;
+    const { page = 1, limit = 10, search = "", startDate, endDate } = req.query;
 
     const offset = (page - 1) * limit;
 
@@ -324,7 +318,7 @@ export const getDriverDashboard = async (req, res) => {
       LEFT JOIN sales s ON s.driver_id = d.id
       LEFT JOIN sales_items si ON si.sale_id = s.id
       `,
-      dateValues
+      dateValues,
     );
 
     // =========================
@@ -365,10 +359,10 @@ export const getDriverDashboard = async (req, res) => {
 
       LIMIT ? OFFSET ?
       `,
-      [...dateValues, ...searchValues, Number(limit), Number(offset)]
+      [...dateValues, ...searchValues, Number(limit), Number(offset)],
     );
 
-    console.log({ drivers })
+    console.log({ drivers });
     // =========================
     // COUNT FOR PAGINATION
     // =========================
@@ -380,7 +374,7 @@ export const getDriverDashboard = async (req, res) => {
       WHERE 1=1
       ${searchFilter}
       `,
-      searchValues
+      searchValues,
     );
 
     return res.json({
@@ -412,7 +406,7 @@ export const createDriver = async (req, res) => {
       vehicle_number,
       license_number,
       is_available = 1,
-      rating = 0
+      rating = 0,
     } = req.body;
 
     // =========================
@@ -421,7 +415,7 @@ export const createDriver = async (req, res) => {
     if (!user_id) {
       return res.status(400).json({
         success: false,
-        message: "user_id is required"
+        message: "user_id is required",
       });
     }
 
@@ -439,21 +433,20 @@ export const createDriver = async (req, res) => {
         vehicle_number || null,
         license_number || null,
         is_available,
-        rating
-      ]
+        rating,
+      ],
     );
 
     return res.status(201).json({
       success: true,
       message: "Driver created successfully",
-      driver_id: result.insertId
+      driver_id: result.insertId,
     });
-
   } catch (error) {
     console.error("Create Driver Error:", error);
     res.status(500).json({
       success: false,
-      message: "Server Error"
+      message: "Server Error",
     });
   }
 };
@@ -491,7 +484,7 @@ export const findCustomerForDriverApp = async (req, res) => {
       ORDER BY a.is_default DESC, a.id DESC
       LIMIT 1
       `,
-      [searchValue, searchValue, searchValue]
+      [searchValue, searchValue, searchValue],
     );
 
     if (!rows.length) {
@@ -576,7 +569,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
           AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
       ) batch_stats
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     // Delivered: actual DELIVERED sales in the date range — same source as the delivered list page
@@ -589,7 +582,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         AND s.status = 'DELIVERED'
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     // Dashboard collection should match driver collection flow:
@@ -602,7 +595,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         AND sh.status IN ('ASSIGNED', 'PENDING')
         AND DATE(sh.created_at) BETWEEN ? AND ?
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     let statusFilterQuery = "";
@@ -671,7 +664,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         s.payment_method
       ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     // Cylinders the driver was still holding when the range opened. They are
@@ -694,7 +687,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         AND child.allocation_sales_item_id IS NOT NULL
         AND DATE(COALESCE(cs.delivered_at, cs.created_at)) BETWEEN ? AND ?
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const [batchReturnedRows] = await db.execute(
@@ -714,7 +707,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         AND st.allocation_sales_item_id IS NOT NULL
         AND DATE(st.created_at) BETWEEN ? AND ?
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const allocatedInRange = Number(statsRows[0]?.allocated || 0);
@@ -731,7 +724,10 @@ export const getDriverDeliveriesApp = async (req, res) => {
     const ihDelivered = Number(batchDeliveredRows[0]?.delivered || 0);
     const ihReturned = Number(batchReturnedRows[0]?.returned || 0);
     const ihDefective = Number(batchReturnedRows[0]?.defective || 0);
-    const inHand = Math.max(ihAllocated - ihDelivered - ihReturned - ihDefective, 0);
+    const inHand = Math.max(
+      ihAllocated - ihDelivered - ihReturned - ihDefective,
+      0,
+    );
     const inHandOriginal = Math.max(ihAllocated, 0);
 
     // empties: collected from customers in date range
@@ -745,7 +741,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     // Returned empties count only APPROVED explicit empty return requests, so the
@@ -764,14 +760,16 @@ export const getDriverDeliveriesApp = async (req, res) => {
         AND linked_sale.id IS NULL
         AND DATE(st.created_at) BETWEEN ? AND ?
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const emptiesOriginal = Number(emptiesCollectedRows[0]?.collected || 0);
     const emptiesReturned = Number(emptiesReturnedRows[0]?.returned || 0);
     const empties = Math.max(emptiesOriginal - emptiesReturned, 0);
 
-    const pendingCollection = Number(pendingCollectionRows[0]?.pending_collection || 0);
+    const pendingCollection = Number(
+      pendingCollectionRows[0]?.pending_collection || 0,
+    );
 
     // System stock for this driver: quantity of products sold on sales whose
     // IOC OTP has been marked SENT from the customer-issues dashboard, scoped to
@@ -788,7 +786,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
         )
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const systemStock = Number(systemStockRows[0]?.system_stock || 0);
@@ -849,7 +847,13 @@ export const markSaleAsDelivered = async (req, res) => {
 
   try {
     const { saleId } = req.params;
-    const { saleIds, payment_method, empty_cylinder_qty = 0, empty_product_id, created_by } = req.body || {};
+    const {
+      saleIds,
+      payment_method,
+      empty_cylinder_qty = 0,
+      empty_product_id,
+      created_by,
+    } = req.body || {};
 
     // =====================================================
     // BULK MODE
@@ -882,7 +886,7 @@ export const markSaleAsDelivered = async (req, res) => {
         FROM sales
         WHERE id IN (${placeholders})
         `,
-        numericSaleIds
+        numericSaleIds,
       );
 
       if (!existingRows.length) {
@@ -893,7 +897,9 @@ export const markSaleAsDelivered = async (req, res) => {
       }
 
       const updatableIds = existingRows
-        .filter((item) => item.status === "PENDING" || item.status === "ASSIGNED")
+        .filter(
+          (item) => item.status === "PENDING" || item.status === "ASSIGNED",
+        )
         .map((item) => item.id);
 
       if (!updatableIds.length) {
@@ -917,7 +923,7 @@ export const markSaleAsDelivered = async (req, res) => {
             delivered_at = NOW()
         WHERE id IN (${updatePlaceholders})
         `,
-        updatableIds
+        updatableIds,
       );
 
       return res.status(200).json({
@@ -962,7 +968,7 @@ export const markSaleAsDelivered = async (req, res) => {
       WHERE id = ?
       FOR UPDATE
       `,
-      [numericSaleId]
+      [numericSaleId],
     );
 
     if (!saleRows.length) {
@@ -981,7 +987,7 @@ export const markSaleAsDelivered = async (req, res) => {
           delivered_at = NOW()
       WHERE id = ?
       `,
-      [numericSaleId]
+      [numericSaleId],
     );
 
     // update payment status only, as requested
@@ -991,7 +997,7 @@ export const markSaleAsDelivered = async (req, res) => {
       SET status = 'SUCCESS'
       WHERE sale_id = ?
       `,
-      [numericSaleId]
+      [numericSaleId],
     );
 
     // Empty cylinders collected during delivery are tracked on sales_items.
@@ -1008,7 +1014,7 @@ export const markSaleAsDelivered = async (req, res) => {
           delivered_qty = quantity
       WHERE sale_id = ?
       `,
-      [numericEmptyQty, numericEmptyQty, numericEmptyQty, numericSaleId]
+      [numericEmptyQty, numericEmptyQty, numericEmptyQty, numericSaleId],
     );
 
     await connection.commit();
@@ -1096,7 +1102,7 @@ export const createDriverSale = async (req, res) => {
     // Fetch the driver's user_id so it can be used as created_by in stock_transactions
     const [driverUserRows] = await db.execute(
       `SELECT user_id FROM drivers WHERE id = ? LIMIT 1`,
-      [numericDriverId]
+      [numericDriverId],
     );
     const driverUserId = driverUserRows[0]?.user_id || null;
 
@@ -1137,7 +1143,7 @@ export const createDriverSale = async (req, res) => {
       WHERE id = ?
       LIMIT 1
       `,
-      [numericProductId]
+      [numericProductId],
     );
 
     if (!productRows.length) {
@@ -1202,7 +1208,7 @@ export const createDriverSale = async (req, res) => {
         LIMIT 1
         FOR UPDATE
         `,
-        [Number(allocation_sales_item_id), numericDriverId]
+        [Number(allocation_sales_item_id), numericDriverId],
       );
 
       if (!batchRows.length) {
@@ -1243,7 +1249,7 @@ export const createDriverSale = async (req, res) => {
     if (!customerId && allocation_sale_id) {
       const [origSaleRows] = await connection.execute(
         `SELECT customer_id FROM sales WHERE id = ? LIMIT 1`,
-        [Number(allocation_sale_id)]
+        [Number(allocation_sale_id)],
       );
       if (origSaleRows.length && origSaleRows[0].customer_id) {
         customerId = origSaleRows[0].customer_id;
@@ -1260,7 +1266,7 @@ export const createDriverSale = async (req, res) => {
         WHERE phone = ?
         LIMIT 1
         `,
-        [phone]
+        [phone],
       );
     }
 
@@ -1274,7 +1280,7 @@ export const createDriverSale = async (req, res) => {
           SET name = ?, role = 'CUSTOMER'
           WHERE id = ?
           `,
-          [customer_name, customerId]
+          [customer_name, customerId],
         );
       } else {
         const [customerResult] = await connection.execute(
@@ -1289,7 +1295,7 @@ export const createDriverSale = async (req, res) => {
           )
           VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
           `,
-          [customer_name, phone || null]
+          [customer_name, phone || null],
         );
 
         customerId = customerResult.insertId;
@@ -1306,7 +1312,7 @@ export const createDriverSale = async (req, res) => {
         AND address = ?
       LIMIT 1
       `,
-      [customerId, address]
+      [customerId, address],
     );
 
     if (addressRows.length) {
@@ -1323,14 +1329,15 @@ export const createDriverSale = async (req, res) => {
         )
         VALUES (?, ?, NOW(), NOW())
         `,
-        [customerId, address]
+        [customerId, address],
       );
 
       addressId = addressResult.insertId;
     }
 
     const unitPrice = Number(selectedProduct.price || 0);
-    const finalAmount = unitPrice > 0 ? unitPrice * numericQuantity : requestedAmount;
+    const finalAmount =
+      unitPrice > 0 ? unitPrice * numericQuantity : requestedAmount;
 
     const [saleResult] = await connection.execute(
       `
@@ -1348,13 +1355,7 @@ export const createDriverSale = async (req, res) => {
       )
       VALUES (?, ?, ?, ?, ?, 'DELIVERED', NOW(), NOW(), NOW())
       `,
-      [
-        customerId,
-        numericDriverId,
-        addressId,
-        finalAmount,
-        payment_method,
-      ]
+      [customerId, numericDriverId, addressId, finalAmount, payment_method],
     );
 
     const saleId = saleResult.insertId;
@@ -1364,7 +1365,7 @@ export const createDriverSale = async (req, res) => {
     // Diagnostic: makes it visible in server logs whether the client actually
     // sent the OTP for this sale (the IOC OTP row is only created when it did).
     console.log(
-      `createDriverSale: saleId=${saleId} otpReceived=${normalizedOtp ? "yes" : "no"} otpLength=${normalizedOtp.length}`
+      `createDriverSale: saleId=${saleId} otpReceived=${normalizedOtp ? "yes" : "no"} otpLength=${normalizedOtp.length}`,
     );
 
     await connection.execute(
@@ -1377,7 +1378,7 @@ export const createDriverSale = async (req, res) => {
       )
       VALUES (?, ?, 'PENDING')
       `,
-      [saleId, normalizedOtp]
+      [saleId, normalizedOtp],
     );
 
     const finalEmptyCylinderStatus =
@@ -1389,8 +1390,7 @@ export const createDriverSale = async (req, res) => {
           : "PARTIAL_DELIVERED");
 
     const finalBatchNo =
-      batch_no ||
-      (allocation_sale_id ? getBatchNo(allocation_sale_id) : null);
+      batch_no || (allocation_sale_id ? getBatchNo(allocation_sale_id) : null);
 
     await connection.execute(
       `
@@ -1423,7 +1423,7 @@ export const createDriverSale = async (req, res) => {
         finalBatchNo,
         allocation_sale_id ? Number(allocation_sale_id) : null,
         allocation_sales_item_id ? Number(allocation_sales_item_id) : null,
-      ]
+      ],
     );
 
     // Empty return requests are created only from the explicit
@@ -1455,7 +1455,7 @@ export const createDriverSale = async (req, res) => {
       )
       VALUES (?, ?, ?, ?, 'DRIVER')
       `,
-      [saleId, finalAmount, paymentMethodForPayments, paymentStatus]
+      [saleId, finalAmount, paymentMethodForPayments, paymentStatus],
     );
 
     const paymentId = paymentInsertResult.insertId;
@@ -1475,13 +1475,7 @@ export const createDriverSale = async (req, res) => {
         )
         VALUES (?, ?, ?, ?, ?, 'ASSIGNED', NOW())
         `,
-        [
-          numericDriverId,
-          saleId,
-          paymentId,
-          payment_method,
-          finalAmount,
-        ]
+        [numericDriverId, saleId, paymentId, payment_method, finalAmount],
       );
     }
 
@@ -1504,7 +1498,9 @@ export const createDriverSale = async (req, res) => {
 
         batch: {
           batchNo: finalBatchNo,
-          allocationSaleId: allocation_sale_id ? Number(allocation_sale_id) : null,
+          allocationSaleId: allocation_sale_id
+            ? Number(allocation_sale_id)
+            : null,
           allocationSalesItemId: allocation_sales_item_id
             ? Number(allocation_sales_item_id)
             : null,
@@ -1564,7 +1560,7 @@ const ensureDriverReturnTables = async (connection) => {
       KEY idx_driver_returns_customer_id (customer_id),
       KEY idx_driver_returns_product_id (product_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-    `
+    `,
   );
 
   await connection.execute(
@@ -1578,7 +1574,7 @@ const ensureDriverReturnTables = async (connection) => {
       PRIMARY KEY (id),
       KEY idx_driver_return_otps_return_id (return_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-    `
+    `,
   );
 };
 
@@ -1669,7 +1665,8 @@ export const createDriverReturn = async (req, res) => {
       if (!RETURN_PAYMENT_METHODS.includes(normalizedPaymentMethod)) {
         return res.status(400).json({
           success: false,
-          message: "payment_method must be CASH, UPI or CARD for a commercial return",
+          message:
+            "payment_method must be CASH, UPI or CARD for a commercial return",
         });
       }
     } else {
@@ -1686,7 +1683,7 @@ export const createDriverReturn = async (req, res) => {
     // sale flow's stock_transactions attribution).
     const [driverUserRows] = await connection.execute(
       `SELECT user_id FROM drivers WHERE id = ? LIMIT 1`,
-      [numericDriverId]
+      [numericDriverId],
     );
     const driverUserId = driverUserRows[0]?.user_id || null;
 
@@ -1696,7 +1693,7 @@ export const createDriverReturn = async (req, res) => {
 
     const [productRows] = await connection.execute(
       `SELECT id, name, type, price FROM products WHERE id = ? LIMIT 1`,
-      [numericProductId]
+      [numericProductId],
     );
 
     if (!productRows.length) {
@@ -1725,7 +1722,7 @@ export const createDriverReturn = async (req, res) => {
     if (phone && String(phone).trim() !== "") {
       [existingCustomers] = await connection.execute(
         `SELECT id FROM users WHERE phone = ? LIMIT 1`,
-        [phone]
+        [phone],
       );
     }
 
@@ -1734,7 +1731,7 @@ export const createDriverReturn = async (req, res) => {
 
       await connection.execute(
         `UPDATE users SET name = ?, role = 'CUSTOMER' WHERE id = ?`,
-        [customer_name, customerId]
+        [customer_name, customerId],
       );
     } else {
       const [customerResult] = await connection.execute(
@@ -1742,7 +1739,7 @@ export const createDriverReturn = async (req, res) => {
         INSERT INTO users (name, phone, role, created_at, updated_at)
         VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
         `,
-        [customer_name, phone || null]
+        [customer_name, phone || null],
       );
 
       customerId = customerResult.insertId;
@@ -1752,7 +1749,7 @@ export const createDriverReturn = async (req, res) => {
 
     const [addressRows] = await connection.execute(
       `SELECT id FROM addresses WHERE user_id = ? AND address = ? LIMIT 1`,
-      [customerId, address]
+      [customerId, address],
     );
 
     if (addressRows.length) {
@@ -1763,7 +1760,7 @@ export const createDriverReturn = async (req, res) => {
         INSERT INTO addresses (user_id, address, created_at, updated_at)
         VALUES (?, ?, NOW(), NOW())
         `,
-        [customerId, address]
+        [customerId, address],
       );
 
       addressId = addressResult.insertId;
@@ -1801,7 +1798,7 @@ export const createDriverReturn = async (req, res) => {
         normalizedCategory === "COMMERCIAL" ? normalizedPaymentMethod : null,
         finalAmount,
         driverUserId,
-      ]
+      ],
     );
 
     const returnId = returnResult.insertId;
@@ -1827,12 +1824,12 @@ export const createDriverReturn = async (req, res) => {
       )
       VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, NULL, ?, ?, 'driver', 0)
       `,
-      [numericProductId, numericQuantity, driverUserId, numericDriverId]
+      [numericProductId, numericQuantity, driverUserId, numericDriverId],
     );
 
     await connection.execute(
       `UPDATE driver_returns SET stock_transaction_id = ? WHERE id = ?`,
-      [stockResult.insertId, returnId]
+      [stockResult.insertId, returnId],
     );
 
     await connection.execute(
@@ -1840,7 +1837,7 @@ export const createDriverReturn = async (req, res) => {
       INSERT INTO driver_return_otps (return_id, otp, status)
       VALUES (?, ?, 'PENDING')
       `,
-      [returnId, normalizedOtp]
+      [returnId, normalizedOtp],
     );
 
     await connection.commit();
@@ -1859,7 +1856,8 @@ export const createDriverReturn = async (req, res) => {
           type: selectedProduct.type,
         },
         quantity: numericQuantity,
-        returnReason: normalizedCategory === "DOMESTIC" ? normalizedReason : null,
+        returnReason:
+          normalizedCategory === "DOMESTIC" ? normalizedReason : null,
         paymentMethod:
           normalizedCategory === "COMMERCIAL" ? normalizedPaymentMethod : null,
         amount: finalAmount,
@@ -1893,11 +1891,6 @@ export const getDriverCollectionSummary = async (req, res) => {
       });
     }
 
-    // Fetch ALL records for the date range across all statuses so that
-    // totalCollected never drops to zero after cashier approval.
-    //   ASSIGNED  = collected by driver, not yet settled to cashier
-    //   PENDING   = driver submitted, awaiting cashier approval
-    //   SETTLED   = cashier has approved / closed out
     const [rows] = await db.execute(
       `
       SELECT
@@ -1913,30 +1906,32 @@ export const getDriverCollectionSummary = async (req, res) => {
       INNER JOIN sales s ON s.id = sh.sale_id
       LEFT JOIN users u ON u.id = s.customer_id
       WHERE sh.driver_id = ?
-        AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')
+        AND sh.status IN ('ASSIGNED', 'PENDING')
         AND DATE(sh.created_at) BETWEEN ? AND ?
       ORDER BY sh.created_at ASC
       `,
-      [driverId, startDate, endDate]
+      [driverId, startDate, endDate],
     );
 
     const buildGroup = (method, status) => {
       const items = rows.filter(
-        (item) => item.method === method && item.status === status
+        (item) => item.method === method && item.status === status,
       );
 
       const amount = items.reduce(
         (sum, item) => sum + Number(item.amount || 0),
-        0
+        0,
       );
 
       let displayMessage = "";
       if (status === "ASSIGNED") {
-        displayMessage = amount > 0 ? "Ready to Settle" : "No pending collection";
+        displayMessage =
+          amount > 0 ? "Ready to Settle" : "No pending collection";
       } else if (status === "PENDING") {
-        displayMessage = amount > 0 ? "Pending for approval" : "No collections pending approval";
-      } else if (status === "SETTLED") {
-        displayMessage = amount > 0 ? "Settled" : "";
+        displayMessage =
+          amount > 0
+            ? "Pending for approval"
+            : "No collections pending approval";
       }
 
       return {
@@ -1957,31 +1952,15 @@ export const getDriverCollectionSummary = async (req, res) => {
       };
     };
 
-    const cashAssigned   = buildGroup("CASH",      "ASSIGNED");
-    const cashPending    = buildGroup("CASH",      "PENDING");
-    const cashSettled    = buildGroup("CASH",      "SETTLED");
-    const upiAssigned    = buildGroup("UPI",       "ASSIGNED");
-    const upiPending     = buildGroup("UPI",       "PENDING");
-    const upiSettled     = buildGroup("UPI",       "SETTLED");
-    const onlineAssigned = buildGroup("ONLINE",    "ASSIGNED");
-    const onlinePending  = buildGroup("ONLINE",    "PENDING");
-    const onlineSettled  = buildGroup("ONLINE",    "SETTLED");
-    const totalUpiPending  = buildGroup("TOTAL_UPI", "PENDING");
-    const totalUpiSettled  = buildGroup("TOTAL_UPI", "SETTLED");
+    const cashAssigned = buildGroup("CASH", "ASSIGNED");
+    const cashPending = buildGroup("CASH", "PENDING");
+    const upiAssigned = buildGroup("UPI", "ASSIGNED");
+    const upiPending = buildGroup("UPI", "PENDING");
+    const totalUpiPending = buildGroup("TOTAL_UPI", "PENDING");
 
-    // totalCollected = everything collected today (regardless of settlement state)
-    const cashTotal   = cashAssigned.amount   + cashPending.amount   + cashSettled.amount;
-    const upiTotal    = upiAssigned.amount    + upiPending.amount    + upiSettled.amount
-                      + totalUpiPending.amount + totalUpiSettled.amount;
-    const onlineTotal = onlineAssigned.amount + onlinePending.amount + onlineSettled.amount;
-
-    // totalSettled = amount that has been cashier-approved (status = SETTLED)
-    const totalSettledAmount = cashSettled.amount + upiSettled.amount
-                              + onlineSettled.amount + totalUpiSettled.amount;
-
-    // totalPending = submitted by driver but not yet approved
-    const totalPendingAmount = cashPending.amount + upiPending.amount
-                              + onlinePending.amount + totalUpiPending.amount;
+    const cashTotal = cashAssigned.amount + cashPending.amount;
+    const upiTotal =
+      upiAssigned.amount + upiPending.amount + totalUpiPending.amount;
 
     const [deliveredRows] = await db.execute(
       `
@@ -1992,7 +1971,7 @@ export const getDriverCollectionSummary = async (req, res) => {
         AND s.status = 'DELIVERED'
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [driverId, startDate, endDate]
+      [driverId, startDate, endDate],
     );
 
     const totalDeliveries = Number(deliveredRows[0].delivered);
@@ -2002,28 +1981,19 @@ export const getDriverCollectionSummary = async (req, res) => {
       message: "Collection summary fetched successfully",
       data: {
         summary: {
-          cashCollected:   cashTotal,
-          upiCollected:    upiTotal,
-          onlineCollected: onlineTotal,
-          totalCollected:  cashTotal + upiTotal + onlineTotal,
+          cashCollected: cashAssigned.amount,
+          upiCollected: upiAssigned.amount,
+          totalCollected: cashTotal + upiTotal,
           totalDeliveries,
-          // totalSettled shown to driver = cashier-approved amount
-          totalSettled: totalSettledAmount,
-          // totalPending = submitted, awaiting cashier
-          totalPending: totalPendingAmount,
+          totalSettled:
+            cashPending.amount + upiPending.amount + totalUpiPending.amount,
         },
         settlements: {
           cashAssigned,
           cashPending,
-          cashSettled,
           upiAssigned,
           upiPending,
-          upiSettled,
-          onlineAssigned,
-          onlinePending,
-          onlineSettled,
           totalUpiPending,
-          totalUpiSettled,
         },
       },
     });
@@ -2075,7 +2045,7 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
       ORDER BY created_at DESC
       FOR UPDATE
       `,
-      [driverId]
+      [driverId],
     );
 
     if (!rows.length) {
@@ -2088,7 +2058,7 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
 
     const totalAmount = rows.reduce(
       (sum, row) => sum + Number(row.amount || 0),
-      0
+      0,
     );
 
     const requestedAmount = amount !== undefined ? Number(amount) : totalAmount;
@@ -2122,26 +2092,26 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
     }
 
     let remainingToSettle = requestedAmount;
-    
+
     for (const row of rows) {
       if (remainingToSettle <= 0) break;
       const rowAmount = Number(row.amount);
       if (rowAmount <= remainingToSettle) {
         await connection.execute(
           `UPDATE settlement_history SET status = 'PENDING', method = ? WHERE id = ?`,
-          [method, row.id]
+          [method, row.id],
         );
         remainingToSettle -= rowAmount;
       } else {
         await connection.execute(
           `UPDATE settlement_history SET amount = ? WHERE id = ?`,
-          [rowAmount - remainingToSettle, row.id]
+          [rowAmount - remainingToSettle, row.id],
         );
         await connection.execute(
           `INSERT INTO settlement_history (driver_id, sale_id, payment_id, method, amount, status, created_at)
            SELECT driver_id, sale_id, payment_id, ?, ?, 'PENDING', created_at
            FROM settlement_history WHERE id = ?`,
-          [method, remainingToSettle, row.id]
+          [method, remainingToSettle, row.id],
         );
         remainingToSettle = 0;
       }
@@ -2195,7 +2165,7 @@ export const getDriverInHandSummary = async (req, res) => {
         AND asi.allocation_sales_item_id IS NULL
         AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
       `,
-      [driverId, startDate, endDate]
+      [driverId, startDate, endDate],
     );
 
     // Cylinders still in hand from before the range - carried forward and
@@ -2220,7 +2190,7 @@ export const getDriverInHandSummary = async (req, res) => {
         AND child.allocation_sales_item_id IS NOT NULL
         AND DATE(COALESCE(cs.delivered_at, cs.created_at)) BETWEEN ? AND ?
       `,
-      [driverId, startDate, endDate]
+      [driverId, startDate, endDate],
     );
 
     // Returns raised inside the range against any open batch. Pending requests
@@ -2242,7 +2212,7 @@ export const getDriverInHandSummary = async (req, res) => {
         AND st.allocation_sales_item_id IS NOT NULL
         AND DATE(st.created_at) BETWEEN ? AND ?
       `,
-      [driverId, startDate, endDate]
+      [driverId, startDate, endDate],
     );
 
     const allocatedInRange = toNumber(allocationRows[0]?.allocated);
@@ -2251,10 +2221,7 @@ export const getDriverInHandSummary = async (req, res) => {
     const returned = toNumber(returnedRows[0]?.returned);
     const defective = toNumber(returnedRows[0]?.defective);
 
-    const inHand = Math.max(
-      allocated - delivered - returned - defective,
-      0
-    );
+    const inHand = Math.max(allocated - delivered - returned - defective, 0);
 
     const [requestRows] = await db.execute(
       `
@@ -2280,7 +2247,7 @@ export const getDriverInHandSummary = async (req, res) => {
         AND st.isApproved = 0
       ORDER BY st.created_at DESC, st.id DESC
       `,
-      [driverId]
+      [driverId],
     );
 
     const returnRequests = [];
@@ -2380,7 +2347,7 @@ export const returnInHandToGodown = async (req, res) => {
         AND isApproved = 0
       FOR UPDATE
       `,
-      [numericDriverId]
+      [numericDriverId],
     );
 
     if (!pendingRows.length) {
@@ -2408,7 +2375,7 @@ export const returnInHandToGodown = async (req, res) => {
         LIMIT 1
         FOR UPDATE
         `,
-        [productId, stockAreaId]
+        [productId, stockAreaId],
       );
 
       if (stockRows.length) {
@@ -2420,7 +2387,7 @@ export const returnInHandToGodown = async (req, res) => {
           WHERE product_id = ?
             AND stock_area_id = ?
           `,
-          [qty, qty, productId, stockAreaId]
+          [qty, qty, productId, stockAreaId],
         );
       } else {
         await connection.execute(
@@ -2433,7 +2400,7 @@ export const returnInHandToGodown = async (req, res) => {
           )
           VALUES (?, ?, ?, ?)
           `,
-          [productId, stockAreaId, qty, qty]
+          [productId, stockAreaId, qty, qty],
         );
       }
     }
@@ -2449,7 +2416,7 @@ export const returnInHandToGodown = async (req, res) => {
         AND type = 'PURCHASE_RETURN'
         AND isApproved = 0
       `,
-      [numericDriverId]
+      [numericDriverId],
     );
 
     await connection.commit();
@@ -2510,7 +2477,7 @@ export const getDriverCollectionHistory = async (req, res) => {
       ORDER BY collection_date DESC
       LIMIT ${safeLimit} OFFSET ${offset}
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const [countRows] = await db.execute(
@@ -2525,7 +2492,7 @@ export const getDriverCollectionHistory = async (req, res) => {
         GROUP BY DATE(sh.created_at)
       ) t
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const totalDates = Number(countRows[0]?.totalDates || 0);
@@ -2546,7 +2513,7 @@ export const getDriverCollectionHistory = async (req, res) => {
           AND status = 'SETTLED'
           AND DATE(created_at) = ?
         `,
-        [numericDriverId, collectionDate]
+        [numericDriverId, collectionDate],
       );
 
       const [settlementRows] = await db.execute(
@@ -2557,7 +2524,7 @@ export const getDriverCollectionHistory = async (req, res) => {
           AND settlement_date = ?
         LIMIT 1
         `,
-        [numericDriverId, collectionDate]
+        [numericDriverId, collectionDate],
       );
 
       const cashierStatus = settlementRows[0]?.status || "PENDING";
@@ -2586,7 +2553,7 @@ export const getDriverCollectionHistory = async (req, res) => {
         GROUP BY sh.id, sh.sale_id, sh.amount, sh.method, sh.status, sh.created_at, u.name
         ORDER BY sh.created_at DESC, sh.id DESC
         `,
-        [numericDriverId, collectionDate]
+        [numericDriverId, collectionDate],
       );
 
       const cashAmount = Number(summaryRows[0]?.cash_amount || 0);
@@ -2684,7 +2651,7 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       ORDER BY COALESCE(s.delivered_at, s.created_at) ASC, si.id ASC
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const [returnRows] = await db.execute(
@@ -2709,12 +2676,12 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
         AND DATE(st.created_at) BETWEEN ? AND ?
       ORDER BY st.created_at DESC, st.id DESC
       `,
-      [numericDriverId, startDate, endDate]
+      [numericDriverId, startDate, endDate],
     );
 
     const collected = collectedRows.reduce(
       (sum, row) => sum + Number(row.quantity || 0),
-      0
+      0,
     );
 
     // Count as "returned" only once the godown manager has approved the return
@@ -2723,7 +2690,7 @@ export const getDriverEmptyCylindersToday = async (req, res) => {
     const returned = returnRows.reduce(
       (sum, row) =>
         Number(row.isApproved) === 1 ? sum + Number(row.quantity || 0) : sum,
-      0
+      0,
     );
 
     return res.status(200).json({
@@ -2816,7 +2783,7 @@ export const getDriverEmptyCylindersHistory = async (req, res) => {
         numericDriverId,
         startDate,
         endDate,
-      ]
+      ],
     );
 
     const items = [];
@@ -2844,7 +2811,7 @@ export const getDriverEmptyCylindersHistory = async (req, res) => {
           AND DATE(COALESCE(s.delivered_at, s.created_at)) = ?
         ORDER BY COALESCE(s.delivered_at, s.created_at) ASC, si.id ASC
         `,
-        [numericDriverId, historyDate]
+        [numericDriverId, historyDate],
       );
 
       const [returns] = await db.execute(
@@ -2870,19 +2837,19 @@ export const getDriverEmptyCylindersHistory = async (req, res) => {
           AND DATE(st.created_at) = ?
         ORDER BY st.created_at DESC, st.id DESC
         `,
-        [numericDriverId, historyDate]
+        [numericDriverId, historyDate],
       );
 
       const collected = collections.reduce(
         (sum, row) => sum + Number(row.quantity || 0),
-        0
+        0,
       );
 
       // Approved returns only (see getDriverEmptyCylindersToday for rationale).
       const returned = returns.reduce(
         (sum, row) =>
           Number(row.isApproved) === 1 ? sum + Number(row.quantity || 0) : sum,
-        0
+        0,
       );
 
       items.push({
@@ -2951,7 +2918,11 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
       });
     }
 
-    if (!numericQuantity || Number.isNaN(numericQuantity) || numericQuantity <= 0) {
+    if (
+      !numericQuantity ||
+      Number.isNaN(numericQuantity) ||
+      numericQuantity <= 0
+    ) {
       return res.status(400).json({
         success: false,
         message: "quantity must be greater than 0",
@@ -2974,7 +2945,7 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
         AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
         AND COALESCE(si.empty_cylinder_qty, 0) > 0
       `,
-      [numericDriverId, numericProductId]
+      [numericDriverId, numericProductId],
     );
 
     const [returnedRows] = await connection.execute(
@@ -2993,14 +2964,16 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
         AND st.type = 'EMPTY_RETURN'
         AND linked_sale.id IS NULL
       `,
-      [numericDriverId, numericProductId]
+      [numericDriverId, numericProductId],
     );
 
     const collectedQty = Number(collectedRows[0]?.collected_qty || 0);
-    const todayCollectedQty = Number(collectedRows[0]?.today_collected_qty || 0);
+    const todayCollectedQty = Number(
+      collectedRows[0]?.today_collected_qty || 0,
+    );
     const returnedQty = Number(returnedRows[0]?.returned_qty || 0);
     const todayReturnedQty = Number(returnedRows[0]?.today_returned_qty || 0);
-    
+
     const allTimeAvailable = Math.max(collectedQty - returnedQty, 0);
     const todayAvailable = Math.max(todayCollectedQty - todayReturnedQty, 0);
     const availableQty = Math.max(allTimeAvailable, todayAvailable);
@@ -3044,7 +3017,7 @@ export const createEmptyCylinderReturnRequest = async (req, res) => {
         Date.now(),
         req.user?.id || null,
         numericDriverId,
-      ]
+      ],
     );
 
     await connection.commit();
@@ -3158,7 +3131,13 @@ export const getDriverReturnableEmptyProducts = async (req, res) => {
 
       ORDER BY p.name ASC
       `,
-      [numericDriverId, numericDriverId, numericDriverId, search, `%${search}%`]
+      [
+        numericDriverId,
+        numericDriverId,
+        numericDriverId,
+        search,
+        `%${search}%`,
+      ],
     );
 
     const data = rows.map((row) => {
@@ -3166,7 +3145,7 @@ export const getDriverReturnableEmptyProducts = async (req, res) => {
       const returnedQty = Number(row.returned_qty || 0);
       const todayCollectedQty = Number(row.today_collected_qty || 0);
       const todayReturnedQty = Number(row.today_returned_qty || 0);
-      
+
       const allTimeAvailable = Math.max(collectedQty - returnedQty, 0);
       const todayAvailable = Math.max(todayCollectedQty - todayReturnedQty, 0);
       const availableQty = Math.max(allTimeAvailable, todayAvailable);
@@ -3240,7 +3219,7 @@ export const approveTodayEmptyCylinderReturns = async (req, res) => {
         AND DATE(st.created_at) = CURDATE()
       FOR UPDATE
       `,
-      [numericDriverId]
+      [numericDriverId],
     );
 
     if (!pendingRows.length) {
@@ -3263,7 +3242,7 @@ export const approveTodayEmptyCylinderReturns = async (req, res) => {
         WHERE id = ?
           AND driver_id = ?
         `,
-        [transactionId, numericDriverId]
+        [transactionId, numericDriverId],
       );
 
       if (productId && qty > 0) {
@@ -3343,7 +3322,7 @@ export const getDriverProfileHistory = async (req, res) => {
         )
       LIMIT 1
       `,
-      [numericDriverId, numericDriverId, numericDriverId]
+      [numericDriverId, numericDriverId, numericDriverId],
     );
 
     if (!driverRows.length) {
@@ -3413,7 +3392,7 @@ export const getDriverProfileHistory = async (req, res) => {
         AND s.status = 'DELIVERED'
         AND si.status = 'DELIVERED'
       `,
-      [resolvedDriverId]
+      [resolvedDriverId],
     );
 
     const [dateRows] = await db.execute(
@@ -3427,7 +3406,7 @@ export const getDriverProfileHistory = async (req, res) => {
       ORDER BY delivery_date DESC
       LIMIT ${safeLimit} OFFSET ${offset}
       `,
-      [resolvedDriverId]
+      [resolvedDriverId],
     );
 
     const [countRows] = await db.execute(
@@ -3441,7 +3420,7 @@ export const getDriverProfileHistory = async (req, res) => {
         GROUP BY DATE(s.created_at)
       ) t
       `,
-      [resolvedDriverId]
+      [resolvedDriverId],
     );
 
     const totalDates = Number(countRows[0]?.totalDates || 0);
@@ -3499,12 +3478,12 @@ export const getDriverProfileHistory = async (req, res) => {
           s.created_at
         ORDER BY s.created_at ASC, s.id ASC
         `,
-        [resolvedDriverId, deliveryDate]
+        [resolvedDriverId, deliveryDate],
       );
 
       const totalAmount = dailyRows.reduce(
         (sum, row) => sum + Number(row.total_amount || 0),
-        0
+        0,
       );
 
       const totalDeliveries = dailyRows.length;
@@ -3593,7 +3572,7 @@ export const searchProductsForDriverApp = async (req, res) => {
       ORDER BY p.name ASC
       LIMIT 20
       `,
-      params
+      params,
     );
 
     return res.status(200).json({
@@ -3688,7 +3667,7 @@ export const getAllocatedCylinders = async (req, res) => {
 
       ORDER BY COALESCE(a.assigned_at, a.created_at) DESC, asi.id DESC
       `,
-      [driverId]
+      [driverId],
     );
 
     const today = getTodayIsoDate();
@@ -3698,7 +3677,10 @@ export const getAllocatedCylinders = async (req, res) => {
       const delivered = toNumber(row.delivered_qty);
       const returned = toNumber(row.return_qty);
       const defective = toNumber(row.defective_qty);
-      const pending = Math.max(totalAllocated - delivered - returned - defective, 0);
+      const pending = Math.max(
+        totalAllocated - delivered - returned - defective,
+        0,
+      );
 
       // Batches handed over on an earlier day are still open: they were carried
       // forward instead of blocking today's allocation.
@@ -3757,7 +3739,7 @@ export const getAllocatedCylinders = async (req, res) => {
         pending: 0,
         carriedForward: 0,
         allocatedToday: 0,
-      }
+      },
     );
 
     return res.status(200).json({
@@ -3829,7 +3811,7 @@ export const getDriverDeliveryDetails = async (req, res) => {
       WHERE s.id = ?
       LIMIT 1
       `,
-      [saleId]
+      [saleId],
     );
 
     if (!rows.length) {
@@ -3919,20 +3901,21 @@ export const createInHandRequest = async (req, res) => {
       });
     }
 
-    const normalizedItems = Array.isArray(items) && items.length
-      ? items
-      : [
-        {
-          product_id,
-          quantity,
-          allocation_sale_id,
-          allocation_sales_item_id,
-          batch_no,
-        },
-      ];
+    const normalizedItems =
+      Array.isArray(items) && items.length
+        ? items
+        : [
+            {
+              product_id,
+              quantity,
+              allocation_sale_id,
+              allocation_sales_item_id,
+              batch_no,
+            },
+          ];
 
     const validItems = normalizedItems.filter(
-      (item) => Number(item.product_id) && Number(item.quantity) > 0
+      (item) => Number(item.product_id) && Number(item.quantity) > 0,
     );
 
     if (!validItems.length) {
@@ -4005,7 +3988,7 @@ export const createInHandRequest = async (req, res) => {
           LIMIT 1
           FOR UPDATE
           `,
-          [allocationSalesItemId, numericDriverId, numericProductId]
+          [allocationSalesItemId, numericDriverId, numericProductId],
         );
 
         if (!batchRows.length) {
@@ -4060,10 +4043,11 @@ export const createInHandRequest = async (req, res) => {
           req.user?.id || null,
           numericDriverId,
           Number(is_defective) === 1 ? 1 : 0,
-          item.batch_no || (allocationSaleId ? getBatchNo(allocationSaleId) : null),
+          item.batch_no ||
+            (allocationSaleId ? getBatchNo(allocationSaleId) : null),
           allocationSaleId,
           allocationSalesItemId,
-        ]
+        ],
       );
     }
 
@@ -4158,7 +4142,7 @@ export const getAllocatedBatchDetail = async (req, res) => {
         AND asi.allocation_sales_item_id IS NULL
       LIMIT 1
       `,
-      [driverId, allocationSalesItemId]
+      [driverId, allocationSalesItemId],
     );
 
     if (!rows.length) {
@@ -4174,7 +4158,10 @@ export const getAllocatedBatchDetail = async (req, res) => {
     const delivered = toNumber(row.delivered_qty);
     const returned = toNumber(row.return_qty);
     const defective = toNumber(row.defective_qty);
-    const pending = Math.max(totalAllocated - delivered - returned - defective, 0);
+    const pending = Math.max(
+      totalAllocated - delivered - returned - defective,
+      0,
+    );
 
     return res.status(200).json({
       success: true,
@@ -4291,7 +4278,7 @@ export const getAvailableBatchesForDriver = async (req, res) => {
 
       ORDER BY COALESCE(a.assigned_at, a.created_at) DESC, asi.id DESC
       `,
-      params
+      params,
     );
 
     const batches = rows
@@ -4300,7 +4287,10 @@ export const getAvailableBatchesForDriver = async (req, res) => {
         const delivered = toNumber(row.delivered_qty);
         const returned = toNumber(row.return_qty);
         const defective = toNumber(row.defective_qty);
-        const pending = Math.max(totalAllocated - delivered - returned - defective, 0);
+        const pending = Math.max(
+          totalAllocated - delivered - returned - defective,
+          0,
+        );
 
         return {
           allocationSaleId: Number(row.allocation_sale_id),
@@ -4365,7 +4355,7 @@ export const findBookingCustomer = async (req, res) => {
       ORDER BY a.is_default DESC, a.id DESC
       LIMIT 1
       `,
-      [String(phone).trim()]
+      [String(phone).trim()],
     );
 
     if (!rows.length) {
@@ -4440,7 +4430,7 @@ export const createBookingCustomer = async (req, res) => {
         AND role = 'CUSTOMER'
       LIMIT 1
       `,
-      [String(phone).trim()]
+      [String(phone).trim()],
     );
 
     if (existingRows.length) {
@@ -4452,7 +4442,7 @@ export const createBookingCustomer = async (req, res) => {
         ORDER BY is_default DESC, id DESC
         LIMIT 1
         `,
-        [existingRows[0].id]
+        [existingRows[0].id],
       );
 
       await connection.commit();
@@ -4484,7 +4474,7 @@ export const createBookingCustomer = async (req, res) => {
       )
       VALUES (?, ?, 'CUSTOMER', 'ACTIVE', NOW())
       `,
-      [String(name).trim(), String(phone).trim()]
+      [String(name).trim(), String(phone).trim()],
     );
 
     const customerId = userResult.insertId;
@@ -4504,7 +4494,7 @@ export const createBookingCustomer = async (req, res) => {
       )
       VALUES (?, ?, 1, NOW())
       `,
-      [customerId, finalAddress]
+      [customerId, finalAddress],
     );
 
     await connection.commit();
@@ -4555,7 +4545,7 @@ export const createDriverBooking = async (req, res) => {
 
     const validItems = Array.isArray(items)
       ? items.filter(
-          (item) => Number(item.product_id) && Number(item.quantity) > 0
+          (item) => Number(item.product_id) && Number(item.quantity) > 0,
         )
       : [];
 
@@ -4578,7 +4568,7 @@ export const createDriverBooking = async (req, res) => {
       WHERE id IN (${placeholders})
         AND type = 'COMMERCIAL'
       `,
-      productIds
+      productIds,
     );
 
     if (productRows.length !== productIds.length) {
@@ -4617,7 +4607,7 @@ export const createDriverBooking = async (req, res) => {
       )
       VALUES (?, ?, ?, NULL, 'PENDING', ?, 'BOOKING', NOW(), NOW())
       `,
-      [numericCustomerId, numericDriverId, totalAmount, numericAddressId]
+      [numericCustomerId, numericDriverId, totalAmount, numericAddressId],
     );
 
     const saleId = saleResult.insertId;
@@ -4644,7 +4634,7 @@ export const createDriverBooking = async (req, res) => {
         )
         VALUES (?, ?, ?, ?, 'PENDING', 0, ?, 'PENDING', 0)
         `,
-          [saleId, productId, quantity, price, quantity]
+        [saleId, productId, quantity, price, quantity],
       );
 
       await connection.execute(
@@ -4674,7 +4664,7 @@ export const createDriverBooking = async (req, res) => {
           req.user?.id || null,
           saleId,
           salesItemResult.insertId,
-        ]
+        ],
       );
     }
 
@@ -4749,7 +4739,7 @@ export const getDriverBookings = async (req, res) => {
         a.address
       ORDER BY s.created_at DESC, s.id DESC
       `,
-      [driverId]
+      [driverId],
     );
 
     const items = rows.map((item) => ({
@@ -4817,7 +4807,7 @@ export const cancelDriverBooking = async (req, res) => {
         AND sale_type = 'BOOKING'
       FOR UPDATE
       `,
-      [saleId, driverId]
+      [saleId, driverId],
     );
 
     if (!saleRows.length) {
@@ -4845,7 +4835,7 @@ export const cancelDriverBooking = async (req, res) => {
           updated_at = NOW()
       WHERE id = ?
       `,
-      [saleId]
+      [saleId],
     );
 
     await connection.execute(
@@ -4854,7 +4844,7 @@ export const cancelDriverBooking = async (req, res) => {
       SET status = 'CANCELLED'
       WHERE sale_id = ?
       `,
-      [saleId]
+      [saleId],
     );
 
     await connection.commit();
