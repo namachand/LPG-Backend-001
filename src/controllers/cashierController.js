@@ -882,8 +882,12 @@ export const getCashierDriverCollections = async (req, res) => {
       SELECT
         d.id AS driver_id,
         u.name AS driverName,
-        COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS cashAssigned,
-        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS upiAssigned,
+        -- cash/upi collected: based on the original sale's payment method.
+        -- This ensures that even if a driver settles CASH via UPI, the collected stats remain true to the source.
+        COALESCE(SUM(CASE WHEN s.payment_method = 'CASH' THEN sh.amount ELSE 0 END), 0) AS cashCollected,
+        COALESCE(SUM(CASE WHEN s.payment_method IN ('UPI', 'ONLINE') THEN sh.amount ELSE 0 END), 0) AS upiCollected,
+        -- total collected = ALL statuses (ASSIGNED + PENDING + SETTLED)
+        COALESCE(SUM(sh.amount), 0) AS totalCollected,
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS totalAssigned,
         COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cashPending,
         COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
@@ -914,6 +918,7 @@ export const getCashierDriverCollections = async (req, res) => {
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
       LEFT JOIN settlement_history sh ON ${joinCondition}
+      LEFT JOIN sales s ON s.id = sh.sale_id
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
       LIMIT ?
@@ -925,15 +930,11 @@ export const getCashierDriverCollections = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: rows.map((driver) => {
-        // cash/upi reflect original collection method (ASSIGNED records only).
-        // PENDING records store the driver's chosen settlement method (e.g. driver
-        // collected ₹909 cash but requests to settle ₹500 via UPI) — including
-        // upiPending/cashPending would wrongly show the settlement method, not the
-        // collection method. total still covers the full unsettled amount (ASSIGNED + PENDING).
-        const cash = Number(driver.cashAssigned || 0);
-        const upi = Number(driver.upiAssigned || 0);
-        const total =
-          Number(driver.totalAssigned || 0) + Number(driver.totalPending || 0);
+        // cash/upi = total collected by payment method across ALL statuses.
+        // total = grand total collected across ALL statuses (constant regardless of settlement state).
+        const cash = Number(driver.cashCollected || 0);
+        const upi = Number(driver.upiCollected || 0);
+        const total = Number(driver.totalCollected || 0);
 
         return {
           driver_id: driver.driver_id,
@@ -952,8 +953,8 @@ export const getCashierDriverCollections = async (req, res) => {
           pendingTotal:
             Number(driver.totalAssigned || 0) +
             Number(driver.totalPending || 0),
-          assignedCash: Number(driver.cashAssigned || 0),
-          assignedUpi: Number(driver.upiAssigned || 0),
+          assignedCash: Number(driver.cashCollected || 0) - Number(driver.cashSettled || 0),
+          assignedUpi: Number(driver.upiCollected || 0) - Number(driver.upiSettled || 0),
           assignedTotal: Number(driver.totalAssigned || 0),
           pendingCount: Number(driver.pendingCount || 0),
           assignedCount: Number(driver.assignedCount || 0),

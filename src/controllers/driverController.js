@@ -1898,6 +1898,7 @@ export const getDriverCollectionSummary = async (req, res) => {
         sh.sale_id,
         sh.payment_id,
         sh.method,
+        s.payment_method AS original_method,
         sh.amount,
         sh.status,
         sh.created_at,
@@ -1906,7 +1907,7 @@ export const getDriverCollectionSummary = async (req, res) => {
       INNER JOIN sales s ON s.id = sh.sale_id
       LEFT JOIN users u ON u.id = s.customer_id
       WHERE sh.driver_id = ?
-        AND sh.status IN ('ASSIGNED', 'PENDING')
+        AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')
         AND DATE(sh.created_at) BETWEEN ? AND ?
       ORDER BY sh.created_at ASC
       `,
@@ -1932,6 +1933,8 @@ export const getDriverCollectionSummary = async (req, res) => {
           amount > 0
             ? "Pending for approval"
             : "No collections pending approval";
+      } else if (status === "SETTLED") {
+        displayMessage = amount > 0 ? "Settled" : "No settled collections";
       }
 
       return {
@@ -1954,13 +1957,26 @@ export const getDriverCollectionSummary = async (req, res) => {
 
     const cashAssigned = buildGroup("CASH", "ASSIGNED");
     const cashPending = buildGroup("CASH", "PENDING");
+    const cashSettled = buildGroup("CASH", "SETTLED");
     const upiAssigned = buildGroup("UPI", "ASSIGNED");
     const upiPending = buildGroup("UPI", "PENDING");
+    const upiSettled = buildGroup("UPI", "SETTLED");
+    const onlineSettled = buildGroup("ONLINE", "SETTLED");
     const totalUpiPending = buildGroup("TOTAL_UPI", "PENDING");
 
-    const cashTotal = cashAssigned.amount + cashPending.amount;
-    const upiTotal =
-      upiAssigned.amount + upiPending.amount + totalUpiPending.amount;
+    // cashCollected / upiCollected = total collected based on the ORIGINAL sale method (invariant)
+    const cashCollected = rows
+      .filter((r) => r.original_method === "CASH")
+      .reduce((sum, r) => sum + Number(r.amount || 0), 0);
+
+    const upiCollected = rows
+      .filter((r) => ["UPI", "ONLINE"].includes(r.original_method))
+      .reduce((sum, r) => sum + Number(r.amount || 0), 0);
+
+    const totalSettled = cashSettled.amount + upiSettled.amount + onlineSettled.amount;
+
+    const cashTotal = cashCollected;
+    const upiTotal = upiCollected;
 
     const [deliveredRows] = await db.execute(
       `
@@ -1981,18 +1997,19 @@ export const getDriverCollectionSummary = async (req, res) => {
       message: "Collection summary fetched successfully",
       data: {
         summary: {
-          cashCollected: cashAssigned.amount,
-          upiCollected: upiAssigned.amount,
+          cashCollected,
+          upiCollected,
           totalCollected: cashTotal + upiTotal,
           totalDeliveries,
-          totalSettled:
-            cashPending.amount + upiPending.amount + totalUpiPending.amount,
+          totalSettled,
         },
         settlements: {
           cashAssigned,
           cashPending,
+          cashSettled,
           upiAssigned,
           upiPending,
+          upiSettled,
           totalUpiPending,
         },
       },
