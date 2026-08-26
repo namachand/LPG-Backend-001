@@ -10,19 +10,19 @@ const cashierDayLog = {
 const ensureCashierClosingPettyCashColumn = async (connection) => {
   const [cols] = await connection.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cashier_closings' AND COLUMN_NAME = 'petty_cash'`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cashier_closings' AND COLUMN_NAME = 'petty_cash'`,
   );
 
   if (!cols.length) {
     await connection.query(
-      `ALTER TABLE cashier_closings ADD COLUMN petty_cash DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER total_cash`
+      `ALTER TABLE cashier_closings ADD COLUMN petty_cash DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER total_cash`,
     );
   }
 };
 
 const getLatestClosingBalance = async (connection) => {
   const [rows] = await connection.query(
-    `SELECT total_cash FROM cashier_closings ORDER BY id DESC LIMIT 1`
+    `SELECT total_cash FROM cashier_closings ORDER BY id DESC LIMIT 1`,
   );
   return rows.length ? Number(rows[0].total_cash || 0) : null;
 };
@@ -32,7 +32,7 @@ const getLatestClosing = async (connection) => {
   await ensureCashierClosingPettyCashColumn(connection);
 
   const [rows] = await connection.query(
-    `SELECT total_cash, petty_cash, created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`
+    `SELECT total_cash, petty_cash, created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`,
   );
 
   if (!rows.length) {
@@ -49,7 +49,7 @@ const getLatestClosing = async (connection) => {
 // created_at of the most recent day-close. Null if the day was never closed.
 const getLastClosingAt = async (connection) => {
   const [rows] = await connection.query(
-    `SELECT created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`
+    `SELECT created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`,
   );
   return rows.length ? rows[0].created_at : null;
 };
@@ -73,7 +73,7 @@ const ensureCashierOpeningsTable = async (connection) => {
 const getLastOpeningAt = async (connection) => {
   await ensureCashierOpeningsTable(connection);
   const [rows] = await connection.query(
-    `SELECT started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`
+    `SELECT started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`,
   );
   return rows.length ? rows[0].started_at : null;
 };
@@ -91,7 +91,9 @@ const getCurrentDayAnchor = async (connection) => {
   if (!closeAt && !openAt) return null;
   if (!closeAt) return openAt;
   if (!openAt) return closeAt;
-  return new Date(openAt).getTime() >= new Date(closeAt).getTime() ? openAt : closeAt;
+  return new Date(openAt).getTime() >= new Date(closeAt).getTime()
+    ? openAt
+    : closeAt;
 };
 
 // Opening balance of the CURRENT open day (the amount entered at Start Day).
@@ -102,11 +104,12 @@ const getCurrentDayOpeningBalance = async (connection) => {
   await ensureCashierOpeningsTable(connection);
   const closeAt = await getLastClosingAt(connection);
   const [openRows] = await connection.query(
-    `SELECT opening_amount, started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`
+    `SELECT opening_amount, started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`,
   );
   if (!openRows.length) return 0;
   const openAt = openRows[0].started_at;
-  const dayIsOpen = !closeAt || new Date(openAt).getTime() >= new Date(closeAt).getTime();
+  const dayIsOpen =
+    !closeAt || new Date(openAt).getTime() >= new Date(closeAt).getTime();
   return dayIsOpen ? Number(openRows[0].opening_amount || 0) : 0;
 };
 
@@ -115,11 +118,11 @@ const getCurrentDayOpeningBalance = async (connection) => {
 const ensureSettlementSettledAtColumn = async (connection) => {
   const [cols] = await connection.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'settlement_history' AND COLUMN_NAME = 'settled_at'`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'settlement_history' AND COLUMN_NAME = 'settled_at'`,
   );
   if (!cols.length) {
     await connection.query(
-      `ALTER TABLE settlement_history ADD COLUMN settled_at DATETIME NULL AFTER status`
+      `ALTER TABLE settlement_history ADD COLUMN settled_at DATETIME NULL AFTER status`,
     );
   }
 };
@@ -130,8 +133,10 @@ const ensureSettlementSettledAtColumn = async (connection) => {
 // expenses to be excluded correctly.
 const ensureExpensePaymentColumns = async (connection) => {
   const requiredColumns = {
-    payment_mode: "ALTER TABLE expenses ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER status",
-    payment_reference: "ALTER TABLE expenses ADD COLUMN payment_reference varchar(120) DEFAULT NULL AFTER payment_mode",
+    payment_mode:
+      "ALTER TABLE expenses ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER status",
+    payment_reference:
+      "ALTER TABLE expenses ADD COLUMN payment_reference varchar(120) DEFAULT NULL AFTER payment_mode",
   };
 
   const [rows] = await connection.query(
@@ -141,7 +146,7 @@ const ensureExpensePaymentColumns = async (connection) => {
     WHERE TABLE_SCHEMA = DATABASE()
       AND TABLE_NAME = 'expenses'
       AND COLUMN_NAME IN ('payment_mode', 'payment_reference')
-    `
+    `,
   );
 
   const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
@@ -154,7 +159,7 @@ const ensureExpensePaymentColumns = async (connection) => {
       await connection.query(ddl);
     } catch (error) {
       // Ignore duplicate column race conditions from parallel requests.
-      if (error?.code !== 'ER_DUP_FIELDNAME') {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
         throw error;
       }
     }
@@ -166,8 +171,10 @@ const ensureExpensePaymentColumns = async (connection) => {
 // The cash ledger only counts CASH office expenses as cash outflow.
 const ensureOfficeExpensePaymentColumns = async (connection) => {
   const requiredColumns = {
-    payment_mode: "ALTER TABLE office_expenses ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER description",
-    payment_reference: "ALTER TABLE office_expenses ADD COLUMN payment_reference varchar(120) DEFAULT NULL AFTER payment_mode",
+    payment_mode:
+      "ALTER TABLE office_expenses ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER description",
+    payment_reference:
+      "ALTER TABLE office_expenses ADD COLUMN payment_reference varchar(120) DEFAULT NULL AFTER payment_mode",
   };
 
   const [rows] = await connection.query(
@@ -177,7 +184,7 @@ const ensureOfficeExpensePaymentColumns = async (connection) => {
     WHERE TABLE_SCHEMA = DATABASE()
       AND TABLE_NAME = 'office_expenses'
       AND COLUMN_NAME IN ('payment_mode', 'payment_reference')
-    `
+    `,
   );
 
   const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
@@ -190,7 +197,7 @@ const ensureOfficeExpensePaymentColumns = async (connection) => {
       await connection.query(ddl);
     } catch (error) {
       // Ignore duplicate column race conditions from parallel requests.
-      if (error?.code !== 'ER_DUP_FIELDNAME') {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
         throw error;
       }
     }
@@ -200,7 +207,10 @@ const ensureOfficeExpensePaymentColumns = async (connection) => {
 // Dashboard window: honor an optional [startDate,endDate]; no range => today.
 const makeRangeDateCond = (startDate, endDate) => (dateExpr) => {
   if (startDate && endDate) {
-    return { sql: `AND DATE(${dateExpr}) BETWEEN ? AND ?`, params: [startDate, endDate] };
+    return {
+      sql: `AND DATE(${dateExpr}) BETWEEN ? AND ?`,
+      params: [startDate, endDate],
+    };
   }
   return { sql: `AND DATE(${dateExpr}) = CURDATE()`, params: [] };
 };
@@ -230,9 +240,9 @@ const makeSinceCloseDateCond = (anchorAt) => (dateExpr) => {
 //                  customer), so it lowers the drawer when paid in cash.
 const getCashLedger = async (connection, makeDateCond) => {
   await ensureNewConnectionCashierTables(connection);
-    await ensureSplitPaymentsColumns(connection);
+  await ensureSplitPaymentsColumns(connection);
   await ensureTransferVoucherPaymentColumns(connection);
-    await ensureSplitPaymentsColumns(connection);
+  await ensureSplitPaymentsColumns(connection);
   await ensureSettlementSettledAtColumn(connection);
   await ensureExpensePaymentColumns(connection);
   await ensureOfficeExpensePaymentColumns(connection);
@@ -241,7 +251,7 @@ const getCashLedger = async (connection, makeDateCond) => {
 
   const [expModeCol] = await connection.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'expenses' AND COLUMN_NAME = 'payment_mode'`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'expenses' AND COLUMN_NAME = 'payment_mode'`,
   );
   const expenseCashOnly = expModeCol.length
     ? "SUM(CASE WHEN e.payment_mode = 'CASH' OR e.payment_mode IS NULL THEN e.amount ELSE 0 END)"
@@ -249,12 +259,12 @@ const getCashLedger = async (connection, makeDateCond) => {
 
   const [oeStatusCol] = await connection.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'status'`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'status'`,
   );
 
   const [oeModeCol] = await connection.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'payment_mode'`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'payment_mode'`,
   );
   // Legacy office expenses (no payment_mode) are treated as CASH.
   const officeCashOnly = oeModeCol.length
@@ -262,7 +272,7 @@ const getCashLedger = async (connection, makeDateCond) => {
     : "SUM(oe.amount)";
 
   // ---- CASH IN ----
-  const drvC = makeDateCond('COALESCE(sh.settled_at, sh.created_at)');
+  const drvC = makeDateCond("COALESCE(sh.settled_at, sh.created_at)");
   const [drv] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN sh.method = 'CASH' THEN sh.amount ELSE 0 END), 0) AS cash,
@@ -270,10 +280,10 @@ const getCashLedger = async (connection, makeDateCond) => {
        COUNT(*) AS cnt
      FROM settlement_history sh
      WHERE sh.status = 'SETTLED' ${drvC.sql}`,
-    drvC.params
+    drvC.params,
   );
 
-  const offC = makeDateCond('p.created_at');
+  const offC = makeDateCond("p.created_at");
   const [off] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash,
@@ -283,10 +293,10 @@ const getCashLedger = async (connection, makeDateCond) => {
      FROM payments p
      INNER JOIN sales s ON s.id = p.sale_id
      WHERE p.status = 'SUCCESS' AND s.sales_from = 'CASHIER' ${offC.sql}`,
-    offC.params
+    offC.params,
   );
 
-  const prC = makeDateCond('pr.paid_at');
+  const prC = makeDateCond("pr.paid_at");
   const [pr] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN pr.payment_mode = 'CASH' THEN pr.penalty_amount ELSE 0 END), 0) AS cash,
@@ -295,10 +305,10 @@ const getCashLedger = async (connection, makeDateCond) => {
        COUNT(*) AS cnt
      FROM customer_pr_penalties pr
      WHERE pr.payment_status = 'PAID' ${prC.sql}`,
-    prC.params
+    prC.params,
   );
 
-  const ncC = makeDateCond('nc.approved_at');
+  const ncC = makeDateCond("nc.approved_at");
   const [nc] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN nc.payment_mode = 'CASH' THEN nc.service_fee ELSE 0 END), 0) AS cash,
@@ -307,10 +317,10 @@ const getCashLedger = async (connection, makeDateCond) => {
        COUNT(*) AS cnt
      FROM customer_name_change_requests nc
      WHERE nc.status = 'APPROVED' ${ncC.sql}`,
-    ncC.params
+    ncC.params,
   );
 
-  const cnC = makeDateCond('cnc.paid_at');
+  const cnC = makeDateCond("cnc.paid_at");
   const [cn] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN cnc.payment_mode = 'CASH' THEN cnc.total_amount ELSE 0 END), 0) AS cash,
@@ -319,38 +329,54 @@ const getCashLedger = async (connection, makeDateCond) => {
        COUNT(*) AS cnt
      FROM customer_new_connections cnc
      WHERE cnc.payment_status = 'PAID' ${cnC.sql}`,
-    cnC.params
+    cnC.params,
   );
 
   const cashIn = {
-    cash: num(drv[0].cash) + num(off[0].cash) + num(pr[0].cash) + num(nc[0].cash) + num(cn[0].cash),
-    online: num(drv[0].upi) + num(off[0].upi) + num(pr[0].upi) + num(nc[0].upi) + num(cn[0].upi),
-    bank: num(off[0].bank) + num(pr[0].bank) + num(nc[0].bank) + num(cn[0].bank),
-    count: num(drv[0].cnt) + num(off[0].cnt) + num(pr[0].cnt) + num(nc[0].cnt) + num(cn[0].cnt),
+    cash:
+      num(drv[0].cash) +
+      num(off[0].cash) +
+      num(pr[0].cash) +
+      num(nc[0].cash) +
+      num(cn[0].cash),
+    online:
+      num(drv[0].upi) +
+      num(off[0].upi) +
+      num(pr[0].upi) +
+      num(nc[0].upi) +
+      num(cn[0].upi),
+    bank:
+      num(off[0].bank) + num(pr[0].bank) + num(nc[0].bank) + num(cn[0].bank),
+    count:
+      num(drv[0].cnt) +
+      num(off[0].cnt) +
+      num(pr[0].cnt) +
+      num(nc[0].cnt) +
+      num(cn[0].cnt),
   };
   cashIn.total = cashIn.cash + cashIn.online + cashIn.bank;
 
   // ---- CASH OUT (approved only) ----
-  const expC = makeDateCond('e.created_at');
+  const expC = makeDateCond("e.created_at");
   const [exp] = await connection.query(
     `SELECT COALESCE(SUM(e.amount), 0) AS total,
             COALESCE(${expenseCashOnly}, 0) AS cash,
             COUNT(*) AS cnt
      FROM expenses e
      WHERE e.status = 'APPROVED' ${expC.sql}`,
-    expC.params
+    expC.params,
   );
 
   let office = { total: 0, cash: 0, cnt: 0 };
   if (oeStatusCol.length) {
-    const oeC = makeDateCond('oe.updated_at');
+    const oeC = makeDateCond("oe.updated_at");
     const [oe] = await connection.query(
       `SELECT COALESCE(SUM(oe.amount), 0) AS total,
               COALESCE(${officeCashOnly}, 0) AS cash,
               COUNT(*) AS cnt
        FROM office_expenses oe
        WHERE oe.status = 'APPROVED' ${oeC.sql}`,
-      oeC.params
+      oeC.params,
     );
     office = oe[0];
   }
@@ -358,14 +384,14 @@ const getCashLedger = async (connection, makeDateCond) => {
   // Transfer vouchers: an APPROVED voucher refunds the deposit to the customer,
   // so a CASH-mode approval is a cash outflow. Dated by updated_at (stamped at
   // approval). payment_mode column is guaranteed by ensureTransferVoucherPaymentColumns.
-  const tvC = makeDateCond('t.updated_at');
+  const tvC = makeDateCond("t.updated_at");
   const [tv] = await connection.query(
     `SELECT COALESCE(SUM(t.deposit_liability), 0) AS total,
             COALESCE(SUM(CASE WHEN t.payment_mode = 'CASH' THEN t.deposit_liability ELSE 0 END), 0) AS cash,
             COUNT(*) AS cnt
      FROM customer_connection_transfers t
      WHERE t.status = 'APPROVED' ${tvC.sql}`,
-    tvC.params
+    tvC.params,
   );
 
   const cashOut = {
@@ -383,10 +409,19 @@ const getCashLedger = async (connection, makeDateCond) => {
 // dashboard shows as "Current Balance", and it is the ceiling for any new cash
 // payout: you can never pay out more cash than you are holding.
 const getAvailableCashBalance = async (connection) => {
-  const openingBalance = Number((await getLatestClosingBalance(connection)) ?? 0);
+  const openingBalance = Number(
+    (await getLatestClosingBalance(connection)) ?? 0,
+  );
   const anchorAt = await getCurrentDayAnchor(connection);
-  const ledger = await getCashLedger(connection, makeSinceCloseDateCond(anchorAt));
-  return openingBalance + Number(ledger.cashIn.cash || 0) - Number(ledger.cashOut.cash || 0);
+  const ledger = await getCashLedger(
+    connection,
+    makeSinceCloseDateCond(anchorAt),
+  );
+  return (
+    openingBalance +
+    Number(ledger.cashIn.cash || 0) -
+    Number(ledger.cashOut.cash || 0)
+  );
 };
 
 const purchaseExpenseTripJoin = `
@@ -402,9 +437,19 @@ const purchaseExpenseTripJoin = `
 `;
 
 const DEFAULT_STOCK_AREA_ID = 1;
-const ALLOWED_CASHIER_REQUEST_PAYMENT_MODES = ["CASH", "UPI", "CARD", "BANK_TRANSFER", "SPLIT"];
+const ALLOWED_CASHIER_REQUEST_PAYMENT_MODES = [
+  "CASH",
+  "UPI",
+  "CARD",
+  "BANK_TRANSFER",
+  "SPLIT",
+];
 
-const consumeStockForCashierSale = async (connection, productId, requiredQty) => {
+const consumeStockForCashierSale = async (
+  connection,
+  productId,
+  requiredQty,
+) => {
   let remaining = Number(requiredQty || 0);
   let sourceStockAreaId = null;
 
@@ -419,14 +464,14 @@ const consumeStockForCashierSale = async (connection, productId, requiredQty) =>
     WHERE product_id = ?
     FOR UPDATE
     `,
-    [Number(productId)]
+    [Number(productId)],
   );
 
   const availableQty = Number(availableRows[0]?.available_qty || 0);
 
   if (availableQty < remaining) {
     throw new Error(
-      `Insufficient stock for product ${productId}. Available ${availableQty}, required ${remaining}`
+      `Insufficient stock for product ${productId}. Available ${availableQty}, required ${remaining}`,
     );
   }
 
@@ -438,7 +483,7 @@ const consumeStockForCashierSale = async (connection, productId, requiredQty) =>
     ORDER BY (stock_area_id = ?) DESC, id ASC
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), DEFAULT_STOCK_AREA_ID],
   );
 
   for (const row of rows) {
@@ -453,7 +498,11 @@ const consumeStockForCashierSale = async (connection, productId, requiredQty) =>
 
     const deductQty = Math.min(currentQty, remaining);
 
-    if (sourceStockAreaId === null && row.stock_area_id !== null && row.stock_area_id !== undefined) {
+    if (
+      sourceStockAreaId === null &&
+      row.stock_area_id !== null &&
+      row.stock_area_id !== undefined
+    ) {
       sourceStockAreaId = Number(row.stock_area_id);
     }
 
@@ -464,7 +513,7 @@ const consumeStockForCashierSale = async (connection, productId, requiredQty) =>
           updated_at = NOW()
       WHERE id = ?
       `,
-      [deductQty, row.id]
+      [deductQty, row.id],
     );
 
     remaining -= deductQty;
@@ -509,12 +558,18 @@ const ensureNewConnectionCashierTables = async (connection) => {
   `);
 
   const requiredColumns = {
-    product_id: "ALTER TABLE customer_new_connections ADD COLUMN product_id INT DEFAULT NULL AFTER product_details",
-    id_proof_url: "ALTER TABLE customer_new_connections ADD COLUMN id_proof_url VARCHAR(500) DEFAULT NULL AFTER id_proof_details",
-    payment_mode: "ALTER TABLE customer_new_connections ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER payment_status",
-    payment_reference_id: "ALTER TABLE customer_new_connections ADD COLUMN payment_reference_id varchar(120) DEFAULT NULL AFTER payment_mode",
-    cashier_remarks: "ALTER TABLE customer_new_connections ADD COLUMN cashier_remarks text AFTER payment_reference_id",
-    paid_at: "ALTER TABLE customer_new_connections ADD COLUMN paid_at timestamp NULL DEFAULT NULL AFTER cashier_remarks",
+    product_id:
+      "ALTER TABLE customer_new_connections ADD COLUMN product_id INT DEFAULT NULL AFTER product_details",
+    id_proof_url:
+      "ALTER TABLE customer_new_connections ADD COLUMN id_proof_url VARCHAR(500) DEFAULT NULL AFTER id_proof_details",
+    payment_mode:
+      "ALTER TABLE customer_new_connections ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER payment_status",
+    payment_reference_id:
+      "ALTER TABLE customer_new_connections ADD COLUMN payment_reference_id varchar(120) DEFAULT NULL AFTER payment_mode",
+    cashier_remarks:
+      "ALTER TABLE customer_new_connections ADD COLUMN cashier_remarks text AFTER payment_reference_id",
+    paid_at:
+      "ALTER TABLE customer_new_connections ADD COLUMN paid_at timestamp NULL DEFAULT NULL AFTER cashier_remarks",
   };
 
   const [rows] = await connection.query(
@@ -524,7 +579,7 @@ const ensureNewConnectionCashierTables = async (connection) => {
     WHERE TABLE_SCHEMA = DATABASE()
       AND TABLE_NAME = 'customer_new_connections'
       AND COLUMN_NAME IN ('product_id', 'id_proof_url', 'payment_mode', 'payment_reference_id', 'cashier_remarks', 'paid_at')
-    `
+    `,
   );
 
   const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
@@ -549,8 +604,12 @@ export const getCashierDashboard = async (req, res) => {
 
     // Optional date-range filter (YYYY-MM-DD). No range => all-time (default).
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -562,11 +621,17 @@ export const getCashierDashboard = async (req, res) => {
     const rangeParams = hasRange ? [startDate, endDate] : [];
 
     const receiptDateClause = hasRange
-      ? 'AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?'
-      : '';
-    const expenseWhereClause = hasRange ? 'WHERE DATE(e.created_at) BETWEEN ? AND ?' : '';
-    const pendingExpenseDateClause = hasRange ? 'AND DATE(e.created_at) BETWEEN ? AND ?' : '';
-    const settlementDateClause = hasRange ? 'AND DATE(sh.created_at) BETWEEN ? AND ?' : '';
+      ? "AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?"
+      : "";
+    const expenseWhereClause = hasRange
+      ? "WHERE DATE(e.created_at) BETWEEN ? AND ?"
+      : "";
+    const pendingExpenseDateClause = hasRange
+      ? "AND DATE(e.created_at) BETWEEN ? AND ?"
+      : "";
+    const settlementDateClause = hasRange
+      ? "AND DATE(sh.created_at) BETWEEN ? AND ?"
+      : "";
 
     const [expenseRows] = await connection.query(
       `
@@ -576,7 +641,7 @@ export const getCashierDashboard = async (req, res) => {
       FROM expenses e
       ${expenseWhereClause}
       `,
-      rangeParams
+      rangeParams,
     );
 
     const [pendingExpenses] = await connection.query(
@@ -596,7 +661,7 @@ export const getCashierDashboard = async (req, res) => {
       ORDER BY e.created_at DESC
       LIMIT 2
       `,
-      rangeParams
+      rangeParams,
     );
 
     const [driverRows] = await connection.query(
@@ -624,10 +689,13 @@ export const getCashierDashboard = async (req, res) => {
       ORDER BY totalPending DESC, u.name ASC
       LIMIT 4
       `,
-      rangeParams
+      rangeParams,
     );
 
-    const expenseSummary = expenseRows[0] || { totalExpenses: 0, pendingApproval: 0 };
+    const expenseSummary = expenseRows[0] || {
+      totalExpenses: 0,
+      pendingApproval: 0,
+    };
 
     // Unified cash accounting. A historical date range is for viewing past days;
     // but the DEFAULT / today-only view shows the CURRENT RUNNING DAY (since the
@@ -636,7 +704,10 @@ export const getCashierDashboard = async (req, res) => {
     // cash only; Current Balance = opening + cash in − cash out.
     let requestIsTodayOnly = false;
     if (hasRange && startDate === endDate) {
-      const [todayCheck] = await connection.query('SELECT (? = CURDATE()) AS isToday', [startDate]);
+      const [todayCheck] = await connection.query(
+        "SELECT (? = CURDATE()) AS isToday",
+        [startDate],
+      );
       requestIsTodayOnly = Number(todayCheck[0]?.isToday) === 1;
     }
     const useRunningDay = !hasRange || requestIsTodayOnly;
@@ -653,7 +724,9 @@ export const getCashierDashboard = async (req, res) => {
     // cash-out mode (driver/office expenses + transfer vouchers). The Total Cash
     // In / Out cards above stay cash-only; only this figure spans all modes.
     const currentBalance =
-      openingBalance + Number(ledger.cashIn.total || 0) - Number(ledger.cashOut.total || 0);
+      openingBalance +
+      Number(ledger.cashIn.total || 0) -
+      Number(ledger.cashOut.total || 0);
     const onlineIn = ledger.cashIn.online;
     const bankIn = ledger.cashIn.bank;
 
@@ -662,88 +735,104 @@ export const getCashierDashboard = async (req, res) => {
       lastClosingBalance: lastClosing ?? 0,
       metrics: [
         {
-          title: 'Opening Balance',
-          value: `₹${Number(lastClosing ?? 0).toLocaleString('en-IN')}`,
-          description: lastClosing !== null ? 'Last closing balance' : 'No previous closing',
-          variant: 'neutral',
-          icon: '💼',
+          title: "Opening Balance",
+          value: `₹${Number(lastClosing ?? 0).toLocaleString("en-IN")}`,
+          description:
+            lastClosing !== null
+              ? "Last closing balance"
+              : "No previous closing",
+          variant: "neutral",
+          icon: "💼",
         },
         {
-          title: 'Total Cash In',
-          value: `₹${totalCashIn.toLocaleString('en-IN')}`,
+          title: "Total Cash In",
+          value: `₹${totalCashIn.toLocaleString("en-IN")}`,
           description: `${driverRows.length} driver entries`,
-          variant: 'success',
-          badge: '+4.2%',
-          icon: '⬆️',
+          variant: "success",
+          badge: "+4.2%",
+          icon: "⬆️",
         },
         {
-          title: 'Total Cash Out',
-          value: `₹${totalCashOut.toLocaleString('en-IN')}`,
+          title: "Total Cash Out",
+          value: `₹${totalCashOut.toLocaleString("en-IN")}`,
           description: `${expenseSummary.pendingApproval} pending approvals`,
-          variant: 'danger',
-          badge: expenseSummary.pendingApproval > 0 ? `+${expenseSummary.pendingApproval}` : undefined,
-          icon: '⬇️',
+          variant: "danger",
+          badge:
+            expenseSummary.pendingApproval > 0
+              ? `+${expenseSummary.pendingApproval}`
+              : undefined,
+          icon: "⬇️",
         },
         {
-          title: 'Current Balance',
-          value: `₹${currentBalance.toLocaleString('en-IN')}`,
-          description: 'Live · last sync just now',
-          variant: currentBalance >= 0 ? 'success' : 'danger',
-          icon: '💚',
+          title: "Current Balance",
+          value: `₹${currentBalance.toLocaleString("en-IN")}`,
+          description: "Live · last sync just now",
+          variant: currentBalance >= 0 ? "success" : "danger",
+          icon: "💚",
         },
       ],
       chart: {
-        labels: ['9', '10', '11', '12', '1', '2', '3', '4', '5', '6', '7', '8'],
+        labels: ["9", "10", "11", "12", "1", "2", "3", "4", "5", "6", "7", "8"],
         cashIn: [28, 45, 60, 55, 68, 75, 82, 78, 85, 90, 95, 103],
         cashOut: [18, 24, 31, 29, 34, 35, 38, 37, 39, 41, 43, 45],
       },
       actions: [
         {
-          title: 'driver collections to verify',
-          description: `${driverRows.filter((row) => row.status === 'Pending').length} drivers awaiting confirmation`,
-          badge: `${driverRows.filter((row) => row.status === 'Pending').length}`,
-          theme: 'warning',
+          title: "driver collections to verify",
+          description: `${driverRows.filter((row) => row.status === "Pending").length} drivers awaiting confirmation`,
+          badge: `${driverRows.filter((row) => row.status === "Pending").length}`,
+          theme: "warning",
         },
         {
-          title: 'expense approvals pending',
-          description: 'Vehicle fuel · Office supplies',
+          title: "expense approvals pending",
+          description: "Vehicle fuel · Office supplies",
           badge: `${expenseSummary.pendingApproval}`,
-          theme: 'danger',
+          theme: "danger",
         },
         {
-          title: 'large transaction flagged',
-          description: 'Review transfers above ₹50,000',
-          badge: '1',
-          theme: 'info',
+          title: "large transaction flagged",
+          description: "Review transfers above ₹50,000",
+          badge: "1",
+          theme: "info",
         },
       ],
       drivers: driverRows.map((driver) => ({
         initials: driver.driverName
-          .split(' ')
+          .split(" ")
           .map((part) => part[0])
-          .join('')
+          .join("")
           .slice(0, 2),
         name: driver.driverName,
-        subtitle: `${driver.totalPending ? 'Pending collections' : 'Verified'}`,
-        amount: `₹${Number(driver.totalPending || 0).toLocaleString('en-IN')}`,
+        subtitle: `${driver.totalPending ? "Pending collections" : "Verified"}`,
+        amount: `₹${Number(driver.totalPending || 0).toLocaleString("en-IN")}`,
         status: driver.status,
       })),
       approvals: pendingExpenses.map((expense) => ({
         label: expense.category,
         category: expense.category,
-        amount: `₹${Number(expense.amount || 0).toLocaleString('en-IN')}`,
+        amount: `₹${Number(expense.amount || 0).toLocaleString("en-IN")}`,
         time: expense.date,
       })),
       receipts: [
-        { type: 'UPI / Online', count: 0, amount: `₹${Number(onlineIn || 0).toLocaleString('en-IN')}`, icon: '📱' },
-        { type: 'Bank / Card', count: 0, amount: `₹${Number(bankIn || 0).toLocaleString('en-IN')}`, icon: '🏦' },
+        {
+          type: "UPI / Online",
+          count: 0,
+          amount: `₹${Number(onlineIn || 0).toLocaleString("en-IN")}`,
+          icon: "📱",
+        },
+        {
+          type: "Bank / Card",
+          count: 0,
+          amount: `₹${Number(bankIn || 0).toLocaleString("en-IN")}`,
+          icon: "🏦",
+        },
       ],
     });
   } catch (error) {
-    console.error('getCashierDashboard error:', error);
+    console.error("getCashierDashboard error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch cashier dashboard',
+      message: "Failed to fetch cashier dashboard",
       error: error.message,
     });
   } finally {
@@ -760,8 +849,12 @@ export const getCashierDriverCollections = async (req, res) => {
     const offset = (page - 1) * limit;
 
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -771,16 +864,17 @@ export const getCashierDriverCollections = async (req, res) => {
     }
     const hasRange = Boolean(startDate && endDate);
 
-    let joinCondition = "sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')";
+    let joinCondition =
+      "sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')";
     const queryParams = [];
     if (hasRange) {
       joinCondition += " AND DATE(sh.created_at) BETWEEN ? AND ?";
-      queryParams.push(startDate, endDate);       // for settlement_history JOIN
+      queryParams.push(startDate, endDate); // for settlement_history JOIN
     }
     // The iocOnlineCount correlated subquery also needs date params when range is set.
     // These must come AFTER the JOIN params but BEFORE limit/offset.
     if (hasRange) {
-      queryParams.push(startDate, endDate);       // for iocOnlineCount subquery
+      queryParams.push(startDate, endDate); // for iocOnlineCount subquery
     }
     queryParams.push(limit, offset);
     const [rows] = await connection.query(
@@ -825,34 +919,21 @@ export const getCashierDriverCollections = async (req, res) => {
       LIMIT ?
       OFFSET ?
       `,
-      queryParams
+      queryParams,
     );
-
 
     return res.status(200).json({
       success: true,
       data: rows.map((driver) => {
-        const cash = Number(
-          driver.totalPending > 0
-            ? driver.cashPending
-            : driver.totalAssigned > 0
-            ? driver.cashAssigned
-            : driver.cashSettled
-        );
-        const upi = Number(
-          driver.totalPending > 0
-            ? driver.upiPending
-            : driver.totalAssigned > 0
-            ? driver.upiAssigned
-            : driver.upiSettled
-        );
-        const total = Number(
-          driver.totalPending > 0
-            ? driver.totalPending
-            : driver.totalAssigned > 0
-            ? driver.totalAssigned
-            : driver.totalSettled
-        );
+        // cash/upi reflect original collection method (ASSIGNED records only).
+        // PENDING records store the driver's chosen settlement method (e.g. driver
+        // collected ₹909 cash but requests to settle ₹500 via UPI) — including
+        // upiPending/cashPending would wrongly show the settlement method, not the
+        // collection method. total still covers the full unsettled amount (ASSIGNED + PENDING).
+        const cash = Number(driver.cashAssigned || 0);
+        const upi = Number(driver.upiAssigned || 0);
+        const total =
+          Number(driver.totalAssigned || 0) + Number(driver.totalPending || 0);
 
         return {
           driver_id: driver.driver_id,
@@ -868,7 +949,9 @@ export const getCashierDriverCollections = async (req, res) => {
           requested: Number(driver.totalPending || 0),
           // pendingTotal = total collection still unsettled with the driver
           //              = totalCollected - settled = ASSIGNED + PENDING
-          pendingTotal: Number(driver.totalAssigned || 0) + Number(driver.totalPending || 0),
+          pendingTotal:
+            Number(driver.totalAssigned || 0) +
+            Number(driver.totalPending || 0),
           assignedCash: Number(driver.cashAssigned || 0),
           assignedUpi: Number(driver.upiAssigned || 0),
           assignedTotal: Number(driver.totalAssigned || 0),
@@ -885,10 +968,10 @@ export const getCashierDriverCollections = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('getCashierDriverCollections error:', error);
+    console.error("getCashierDriverCollections error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch driver collections',
+      message: "Failed to fetch driver collections",
       error: error.message,
     });
   } finally {
@@ -901,8 +984,12 @@ export const getCashierPenaltyRequests = async (req, res) => {
 
   try {
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -911,19 +998,16 @@ export const getCashierPenaltyRequests = async (req, res) => {
       endDate = tmp;
     }
     const hasRange = Boolean(startDate && endDate);
-    const dateClause = hasRange ? 'AND DATE(p.created_at) BETWEEN ? AND ?' : '';
+    const dateClause = hasRange ? "AND DATE(p.created_at) BETWEEN ? AND ?" : "";
     const queryParams = hasRange ? [startDate, endDate] : [];
-
-
-
 
     const status = String(req.query.status || "ALL").toUpperCase();
     const whereClause =
       status === "PENDING"
         ? "WHERE p.payment_status = 'UNPAID'"
         : status === "PAID"
-        ? "WHERE p.payment_status = 'PAID'"
-        : "";
+          ? "WHERE p.payment_status = 'PAID'"
+          : "";
 
     const [rows] = await connection.query(
       `
@@ -949,8 +1033,9 @@ export const getCashierPenaltyRequests = async (req, res) => {
       ${dateClause}
       ORDER BY p.created_at DESC, p.id DESC
       LIMIT 100
-      `
-    , queryParams);
+      `,
+      queryParams,
+    );
 
     return res.status(200).json({
       success: true,
@@ -966,7 +1051,10 @@ export const getCashierPenaltyRequests = async (req, res) => {
         paymentMode: row.payment_mode || "",
         paymentId: row.payment_reference_id || "",
         remarks: row.cashier_remarks || "",
-        status: String(row.payment_status || "UNPAID").toUpperCase() === "PAID" ? "APPROVED" : "PENDING",
+        status:
+          String(row.payment_status || "UNPAID").toUpperCase() === "PAID"
+            ? "APPROVED"
+            : "PENDING",
         createdAt: row.created_at,
         paidAt: row.paid_at,
       })),
@@ -989,14 +1077,20 @@ export const collectCashierPenaltyRequest = async (req, res) => {
   try {
     await ensureSplitPaymentsColumns(connection);
     const requestId = Number(req.params.requestId);
-    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    const payments = Array.isArray(req.body?.payments)
+      ? req.body.payments
+      : null;
     let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
     let paymentId = String(req.body?.paymentId || "").trim();
     let splitPaymentsJson = null;
 
     if (payments && payments.length > 0) {
       paymentMode = "SPLIT";
-      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      paymentId =
+        payments
+          .map((p) => p.paymentId)
+          .filter(Boolean)
+          .join(",") || null;
       splitPaymentsJson = JSON.stringify(payments);
     }
     const remarks = String(req.body?.remarks || "").trim();
@@ -1035,7 +1129,13 @@ export const collectCashierPenaltyRequest = async (req, res) => {
         paid_at = NOW()
       WHERE id = ? AND payment_status = 'UNPAID'
       `,
-      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
+      [
+        paymentMode,
+        paymentId || null,
+        splitPaymentsJson,
+        remarks || null,
+        requestId,
+      ],
     );
 
     if (!result.affectedRows) {
@@ -1066,8 +1166,12 @@ export const getCashierNameChangeRequests = async (req, res) => {
 
   try {
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -1076,19 +1180,16 @@ export const getCashierNameChangeRequests = async (req, res) => {
       endDate = tmp;
     }
     const hasRange = Boolean(startDate && endDate);
-    const dateClause = hasRange ? 'AND DATE(r.created_at) BETWEEN ? AND ?' : '';
+    const dateClause = hasRange ? "AND DATE(r.created_at) BETWEEN ? AND ?" : "";
     const queryParams = hasRange ? [startDate, endDate] : [];
-
-
-
 
     const status = String(req.query.status || "ALL").toUpperCase();
     const whereClause =
       status === "PENDING"
         ? "WHERE r.status = 'PENDING'"
         : status === "APPROVED"
-        ? "WHERE r.status = 'APPROVED'"
-        : "";
+          ? "WHERE r.status = 'APPROVED'"
+          : "";
 
     const [rows] = await connection.query(
       `
@@ -1114,8 +1215,9 @@ export const getCashierNameChangeRequests = async (req, res) => {
       ${dateClause}
       ORDER BY r.created_at DESC, r.id DESC
       LIMIT 100
-      `
-    , queryParams);
+      `,
+      queryParams,
+    );
 
     return res.status(200).json({
       success: true,
@@ -1132,7 +1234,10 @@ export const getCashierNameChangeRequests = async (req, res) => {
         paymentMode: row.payment_mode || "",
         paymentId: row.payment_reference_id || "",
         remarks: row.cashier_remarks || "",
-        status: String(row.status || "PENDING").toUpperCase() === "APPROVED" ? "APPROVED" : "PENDING",
+        status:
+          String(row.status || "PENDING").toUpperCase() === "APPROVED"
+            ? "APPROVED"
+            : "PENDING",
         createdAt: row.created_at,
         approvedAt: row.approved_at,
       })),
@@ -1155,14 +1260,20 @@ export const collectCashierNameChangeRequest = async (req, res) => {
   try {
     await ensureSplitPaymentsColumns(connection);
     const requestId = Number(req.params.requestId);
-    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    const payments = Array.isArray(req.body?.payments)
+      ? req.body.payments
+      : null;
     let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
     let paymentId = String(req.body?.paymentId || "").trim();
     let splitPaymentsJson = null;
 
     if (payments && payments.length > 0) {
       paymentMode = "SPLIT";
-      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      paymentId =
+        payments
+          .map((p) => p.paymentId)
+          .filter(Boolean)
+          .join(",") || null;
       splitPaymentsJson = JSON.stringify(payments);
     }
     const remarks = String(req.body?.remarks || "").trim();
@@ -1193,7 +1304,7 @@ export const collectCashierNameChangeRequest = async (req, res) => {
 
     const [requests] = await connection.query(
       `SELECT customer_id, new_name_requested FROM customer_name_change_requests WHERE id = ? AND status = 'PENDING' FOR UPDATE`,
-      [requestId]
+      [requestId],
     );
 
     if (!requests.length) {
@@ -1218,13 +1329,19 @@ export const collectCashierNameChangeRequest = async (req, res) => {
         approved_at = NOW()
       WHERE id = ?
       `,
-      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
+      [
+        paymentMode,
+        paymentId || null,
+        splitPaymentsJson,
+        remarks || null,
+        requestId,
+      ],
     );
 
-    await connection.query(
-      `UPDATE users SET name = ? WHERE id = ?`,
-      [new_name_requested, customer_id]
-    );
+    await connection.query(`UPDATE users SET name = ? WHERE id = ?`, [
+      new_name_requested,
+      customer_id,
+    ]);
 
     await connection.commit();
 
@@ -1287,9 +1404,12 @@ const ensureSplitPaymentsColumns = async (connection) => {
 
 const ensureTransferVoucherPaymentColumns = async (connection) => {
   const requiredColumns = {
-    payment_mode: "ALTER TABLE customer_connection_transfers ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER reason",
-    payment_reference_id: "ALTER TABLE customer_connection_transfers ADD COLUMN payment_reference_id varchar(120) DEFAULT NULL AFTER payment_mode",
-    cashier_remarks: "ALTER TABLE customer_connection_transfers ADD COLUMN cashier_remarks text AFTER payment_reference_id",
+    payment_mode:
+      "ALTER TABLE customer_connection_transfers ADD COLUMN payment_mode enum('CASH','UPI','CARD','BANK_TRANSFER') DEFAULT NULL AFTER reason",
+    payment_reference_id:
+      "ALTER TABLE customer_connection_transfers ADD COLUMN payment_reference_id varchar(120) DEFAULT NULL AFTER payment_mode",
+    cashier_remarks:
+      "ALTER TABLE customer_connection_transfers ADD COLUMN cashier_remarks text AFTER payment_reference_id",
   };
 
   const [rows] = await connection.query(
@@ -1299,7 +1419,7 @@ const ensureTransferVoucherPaymentColumns = async (connection) => {
     WHERE TABLE_SCHEMA = DATABASE()
       AND TABLE_NAME = 'customer_connection_transfers'
       AND COLUMN_NAME IN ('payment_mode', 'payment_reference_id', 'cashier_remarks')
-    `
+    `,
   );
 
   const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
@@ -1312,7 +1432,7 @@ const ensureTransferVoucherPaymentColumns = async (connection) => {
       await connection.query(ddl);
     } catch (error) {
       // Ignore duplicate column race conditions from parallel requests.
-      if (error?.code !== 'ER_DUP_FIELDNAME') {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
         throw error;
       }
     }
@@ -1324,8 +1444,12 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
 
   try {
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -1334,11 +1458,8 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
       endDate = tmp;
     }
     const hasRange = Boolean(startDate && endDate);
-    const dateClause = hasRange ? 'AND DATE(t.created_at) BETWEEN ? AND ?' : '';
+    const dateClause = hasRange ? "AND DATE(t.created_at) BETWEEN ? AND ?" : "";
     const queryParams = hasRange ? [startDate, endDate] : [];
-
-
-
 
     await ensureTransferVoucherPaymentColumns(connection);
 
@@ -1347,8 +1468,8 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
       status === "PENDING"
         ? "WHERE t.status = 'PENDING_MANAGER'"
         : status === "APPROVED"
-        ? "WHERE t.status = 'APPROVED'"
-        : "";
+          ? "WHERE t.status = 'APPROVED'"
+          : "";
 
     const [rows] = await connection.query(
       `
@@ -1378,8 +1499,9 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
       ${dateClause}
       ORDER BY t.created_at DESC, t.id DESC
       LIMIT 100
-      `
-    , queryParams);
+      `,
+      queryParams,
+    );
 
     return res.status(200).json({
       success: true,
@@ -1399,7 +1521,10 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
         paymentMode: row.payment_mode || "",
         paymentId: row.payment_reference_id || "",
         remarks: row.cashier_remarks || "",
-        status: String(row.status || "PENDING_MANAGER").toUpperCase() === "APPROVED" ? "APPROVED" : "PENDING",
+        status:
+          String(row.status || "PENDING_MANAGER").toUpperCase() === "APPROVED"
+            ? "APPROVED"
+            : "PENDING",
         createdAt: row.created_at,
         approvedAt: row.updated_at,
       })),
@@ -1423,14 +1548,20 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
     await ensureTransferVoucherPaymentColumns(connection);
 
     const requestId = Number(req.params.requestId);
-    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    const payments = Array.isArray(req.body?.payments)
+      ? req.body.payments
+      : null;
     let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
     let paymentId = String(req.body?.paymentId || "").trim();
     let splitPaymentsJson = null;
 
     if (payments && payments.length > 0) {
       paymentMode = "SPLIT";
-      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      paymentId =
+        payments
+          .map((p) => p.paymentId)
+          .filter(Boolean)
+          .join(",") || null;
       splitPaymentsJson = JSON.stringify(payments);
     }
     const remarks = String(req.body?.remarks || "").trim();
@@ -1462,7 +1593,7 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
     if (paymentMode === "CASH") {
       const [transferRows] = await connection.query(
         "SELECT deposit_liability FROM customer_connection_transfers WHERE id = ? AND status = 'PENDING_MANAGER' LIMIT 1",
-        [requestId]
+        [requestId],
       );
 
       if (!transferRows.length) {
@@ -1496,7 +1627,13 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
         updated_at = NOW()
       WHERE id = ? AND status = 'PENDING_MANAGER'
       `,
-      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
+      [
+        paymentMode,
+        paymentId || null,
+        splitPaymentsJson,
+        remarks || null,
+        requestId,
+      ],
     );
 
     if (!result.affectedRows) {
@@ -1527,8 +1664,12 @@ export const getCashierNewConnectionRequests = async (req, res) => {
 
   try {
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -1537,7 +1678,9 @@ export const getCashierNewConnectionRequests = async (req, res) => {
       endDate = tmp;
     }
     const hasRange = Boolean(startDate && endDate);
-    const dateClause = hasRange ? 'AND DATE(cnc.created_at) BETWEEN ? AND ?' : '';
+    const dateClause = hasRange
+      ? "AND DATE(cnc.created_at) BETWEEN ? AND ?"
+      : "";
     const queryParams = hasRange ? [startDate, endDate] : [];
 
     await ensureNewConnectionCashierTables(connection);
@@ -1547,8 +1690,8 @@ export const getCashierNewConnectionRequests = async (req, res) => {
       status === "PENDING"
         ? "WHERE cnc.payment_status = 'PENDING_PAYMENT'"
         : status === "APPROVED" || status === "PAID"
-        ? "WHERE cnc.payment_status = 'PAID'"
-        : "";
+          ? "WHERE cnc.payment_status = 'PAID'"
+          : "";
 
     const [rows] = await connection.query(
       `
@@ -1613,20 +1756,21 @@ export const getCashierNewConnectionRequests = async (req, res) => {
         a.address
       ORDER BY cnc.created_at DESC, cnc.id DESC
       LIMIT 100
-      `
-    , queryParams);
+      `,
+      queryParams,
+    );
 
     return res.status(200).json({
       success: true,
       data: rows.map((row) => {
         const parsedProducts = row.products_detailed
-          ? row.products_detailed.split('||').map(pStr => {
-              const [id, name, type, price] = pStr.split('::');
-              return { 
-                id: Number(id), 
-                name: name || "", 
-                type: type || "", 
-                price: Number(price || 0) 
+          ? row.products_detailed.split("||").map((pStr) => {
+              const [id, name, type, price] = pStr.split("::");
+              return {
+                id: Number(id),
+                name: name || "",
+                type: type || "",
+                price: Number(price || 0),
               };
             })
           : [];
@@ -1640,7 +1784,7 @@ export const getCashierNewConnectionRequests = async (req, res) => {
           address: row.address,
           connectionId: `NC-${String(row.id).padStart(4, "0")}`,
           productDetails: row.selected_products || row.product_details || "",
-          productIds: parsedProducts.map(p => p.id),
+          productIds: parsedProducts.map((p) => p.id),
           products: parsedProducts,
           depositAmount: Number(row.deposit_amount || 0),
           gstAmount: Number(row.gst_amount || 0),
@@ -1648,7 +1792,11 @@ export const getCashierNewConnectionRequests = async (req, res) => {
           paymentMode: row.payment_mode || "",
           paymentId: row.payment_reference_id || "",
           remarks: row.cashier_remarks || "",
-          status: String(row.payment_status || "PENDING_PAYMENT").toUpperCase() === "PAID" ? "APPROVED" : "PENDING",
+          status:
+            String(row.payment_status || "PENDING_PAYMENT").toUpperCase() ===
+            "PAID"
+              ? "APPROVED"
+              : "PENDING",
           createdAt: row.created_at,
           approvedAt: row.paid_at,
         };
@@ -1673,14 +1821,20 @@ export const collectCashierNewConnectionRequest = async (req, res) => {
     await ensureNewConnectionCashierTables(connection);
 
     const requestId = Number(req.params.requestId);
-    const payments = Array.isArray(req.body?.payments) ? req.body.payments : null;
+    const payments = Array.isArray(req.body?.payments)
+      ? req.body.payments
+      : null;
     let paymentMode = String(req.body?.paymentMode || "CASH").toUpperCase();
     let paymentId = String(req.body?.paymentId || "").trim();
     let splitPaymentsJson = null;
 
     if (payments && payments.length > 0) {
       paymentMode = "SPLIT";
-      paymentId = payments.map(p => p.paymentId).filter(Boolean).join(',') || null;
+      paymentId =
+        payments
+          .map((p) => p.paymentId)
+          .filter(Boolean)
+          .join(",") || null;
       splitPaymentsJson = JSON.stringify(payments);
     }
     const remarks = String(req.body?.remarks || "").trim();
@@ -1715,7 +1869,13 @@ export const collectCashierNewConnectionRequest = async (req, res) => {
         updated_at = NOW()
       WHERE id = ? AND payment_status = 'PENDING_PAYMENT'
       `,
-      [paymentMode, paymentId || null, splitPaymentsJson, remarks || null, requestId]
+      [
+        paymentMode,
+        paymentId || null,
+        splitPaymentsJson,
+        remarks || null,
+        requestId,
+      ],
     );
 
     if (!result.affectedRows) {
@@ -1732,7 +1892,7 @@ export const collectCashierNewConnectionRequest = async (req, res) => {
       SET status = 'APPROVED', updated_at = NOW()
       WHERE connection_id = ?
       `,
-      [requestId]
+      [requestId],
     );
 
     await connection.commit();
@@ -1762,16 +1922,16 @@ export const recordOtherPayment = async (req, res) => {
   if (!customer_name || !method || amount === undefined || amount === null) {
     return res.status(400).json({
       success: false,
-      message: 'Customer name, method, and amount are required',
+      message: "Customer name, method, and amount are required",
     });
   }
 
   const normalizedMethod = method.toUpperCase();
-  const validMethods = ['UPI', 'BANK_TRANSFER', 'CARD'];
+  const validMethods = ["UPI", "BANK_TRANSFER", "CARD"];
   if (!validMethods.includes(normalizedMethod)) {
     return res.status(400).json({
       success: false,
-      message: 'Invalid payment method',
+      message: "Invalid payment method",
     });
   }
 
@@ -1779,7 +1939,7 @@ export const recordOtherPayment = async (req, res) => {
   if (Number.isNaN(numericAmount) || numericAmount < 0) {
     return res.status(400).json({
       success: false,
-      message: 'Amount must be a valid non-negative number',
+      message: "Amount must be a valid non-negative number",
     });
   }
 
@@ -1798,19 +1958,26 @@ export const recordOtherPayment = async (req, res) => {
         updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `,
-      [cashierId, customer_name.trim(), normalizedMethod, transfer_id?.trim() || null, numericAmount, note?.trim() || null]
+      [
+        cashierId,
+        customer_name.trim(),
+        normalizedMethod,
+        transfer_id?.trim() || null,
+        numericAmount,
+        note?.trim() || null,
+      ],
     );
 
     return res.status(201).json({
       success: true,
-      message: 'Other payment saved',
+      message: "Other payment saved",
       paymentId: result.insertId,
     });
   } catch (error) {
-    console.error('recordOtherPayment error:', error);
+    console.error("recordOtherPayment error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to save other payment',
+      message: "Failed to save other payment",
       error: error.message,
     });
   } finally {
@@ -1822,8 +1989,12 @@ export const recordOtherPayment = async (req, res) => {
 // No valid range => no filter (caller/UI decides the default window).
 const buildOtherPaymentsDateFilter = (query = {}) => {
   const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-  let startDate = DATE_ONLY.test(String(query.startDate || '')) ? String(query.startDate) : null;
-  let endDate = DATE_ONLY.test(String(query.endDate || '')) ? String(query.endDate) : null;
+  let startDate = DATE_ONLY.test(String(query.startDate || ""))
+    ? String(query.startDate)
+    : null;
+  let endDate = DATE_ONLY.test(String(query.endDate || ""))
+    ? String(query.endDate)
+    : null;
   if (startDate && !endDate) endDate = startDate;
   if (endDate && !startDate) startDate = endDate;
   if (startDate && endDate && startDate > endDate) {
@@ -1832,9 +2003,12 @@ const buildOtherPaymentsDateFilter = (query = {}) => {
     endDate = tmp;
   }
   if (startDate && endDate) {
-    return { whereClause: 'WHERE DATE(created_at) BETWEEN ? AND ?', params: [startDate, endDate] };
+    return {
+      whereClause: "WHERE DATE(created_at) BETWEEN ? AND ?",
+      params: [startDate, endDate],
+    };
   }
-  return { whereClause: '', params: [] };
+  return { whereClause: "", params: [] };
 };
 
 export const getOtherPayments = async (req, res) => {
@@ -1859,7 +2033,7 @@ export const getOtherPayments = async (req, res) => {
       ORDER BY created_at DESC
       LIMIT 100
       `,
-      params
+      params,
     );
 
     return res.status(200).json({
@@ -1867,10 +2041,10 @@ export const getOtherPayments = async (req, res) => {
       data: rows,
     });
   } catch (error) {
-    console.error('getOtherPayments error:', error);
+    console.error("getOtherPayments error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch other payments',
+      message: "Failed to fetch other payments",
       error: error.message,
     });
   } finally {
@@ -1894,7 +2068,7 @@ export const getOtherPaymentsSummary = async (req, res) => {
       ${whereClause}
       GROUP BY method
       `,
-      params
+      params,
     );
 
     const summary = {
@@ -1915,10 +2089,10 @@ export const getOtherPaymentsSummary = async (req, res) => {
       summary,
     });
   } catch (error) {
-    console.error('getOtherPaymentsSummary error:', error);
+    console.error("getOtherPaymentsSummary error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch other payments summary',
+      message: "Failed to fetch other payments summary",
       error: error.message,
     });
   } finally {
@@ -1935,7 +2109,7 @@ export const verifyDriverCollections = async (req, res) => {
     if (!driverId) {
       return res.status(400).json({
         success: false,
-        message: 'Driver id is required',
+        message: "Driver id is required",
       });
     }
 
@@ -1953,19 +2127,19 @@ export const verifyDriverCollections = async (req, res) => {
         AND status = 'PENDING'
       FOR UPDATE
       `,
-      [driverId]
+      [driverId],
     );
 
     if (!rows.length) {
       await connection.rollback();
       return res.status(404).json({
         success: false,
-        message: 'No pending collections found for this driver',
+        message: "No pending collections found for this driver",
       });
     }
 
     const totalsByDate = rows.reduce((acc, row) => {
-      const rowDate = new Date(row.created_at).toISOString().split('T')[0];
+      const rowDate = new Date(row.created_at).toISOString().split("T")[0];
       acc[rowDate] = (acc[rowDate] || 0) + Number(row.amount || 0);
       return acc;
     }, {});
@@ -1978,7 +2152,7 @@ export const verifyDriverCollections = async (req, res) => {
       WHERE driver_id = ?
         AND status = 'PENDING'
       `,
-      [driverId]
+      [driverId],
     );
 
     for (const [settlementDate, amount] of Object.entries(totalsByDate)) {
@@ -1994,7 +2168,7 @@ export const verifyDriverCollections = async (req, res) => {
           amount = VALUES(amount),
           status = VALUES(status)
         `,
-        [driverId, amount, settlementDate]
+        [driverId, amount, settlementDate],
       );
     }
 
@@ -2004,7 +2178,7 @@ export const verifyDriverCollections = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Driver collections verified and settled',
+      message: "Driver collections verified and settled",
       data: {
         updatedCount: updateResult.affectedRows,
         totalSettled: total,
@@ -2012,10 +2186,10 @@ export const verifyDriverCollections = async (req, res) => {
     });
   } catch (error) {
     await connection.rollback();
-    console.error('verifyDriverCollections error:', error);
+    console.error("verifyDriverCollections error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to verify driver collections',
+      message: "Failed to verify driver collections",
       error: error.message,
     });
   } finally {
@@ -2039,10 +2213,10 @@ export const getLastClosingBalance = async (req, res) => {
       hasPrevious: latest !== null,
     });
   } catch (error) {
-    console.error('getLastClosingBalance error:', error);
+    console.error("getLastClosingBalance error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch last closing balance',
+      message: "Failed to fetch last closing balance",
       error: error.message,
     });
   } finally {
@@ -2065,20 +2239,25 @@ export const getClosingSummary = async (req, res) => {
     // is 0. Right after Start Day: cash in/out are 0, so it equals the opening
     // balance. Then it moves as new billing/expenses happen.
     const anchorAt = await getCurrentDayAnchor(connection);
-    const ledger = await getCashLedger(connection, makeSinceCloseDateCond(anchorAt));
+    const ledger = await getCashLedger(
+      connection,
+      makeSinceCloseDateCond(anchorAt),
+    );
     const openingBalance = await getCurrentDayOpeningBalance(connection);
     const cashTotal =
-      openingBalance + Number(ledger.cashIn.cash || 0) - Number(ledger.cashOut.cash || 0);
+      openingBalance +
+      Number(ledger.cashIn.cash || 0) -
+      Number(ledger.cashOut.cash || 0);
 
     return res.status(200).json({
       success: true,
       cashTotal,
     });
   } catch (error) {
-    console.error('getClosingSummary error:', error);
+    console.error("getClosingSummary error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch closing summary',
+      message: "Failed to fetch closing summary",
       error: error.message,
     });
   } finally {
@@ -2092,7 +2271,7 @@ export const startCashierDay = async (req, res) => {
   if (totalAmount === undefined || !denominations) {
     return res.status(400).json({
       success: false,
-      message: 'totalAmount and denominations are required',
+      message: "totalAmount and denominations are required",
     });
   }
 
@@ -2104,7 +2283,7 @@ export const startCashierDay = async (req, res) => {
     if (latest !== null && Number(totalAmount) !== Number(latest)) {
       return res.status(400).json({
         success: false,
-        message: `Opening balance must match last closing balance of ₹${latest.toLocaleString('en-IN')}`,
+        message: `Opening balance must match last closing balance of ₹${latest.toLocaleString("en-IN")}`,
       });
     }
 
@@ -2113,11 +2292,11 @@ export const startCashierDay = async (req, res) => {
     await ensureCashierOpeningsTable(connection);
     const [result] = await connection.execute(
       `INSERT INTO cashier_openings (opening_amount, denominations) VALUES (?, ?)`,
-      [Number(totalAmount) || 0, JSON.stringify(denominations)]
+      [Number(totalAmount) || 0, JSON.stringify(denominations)],
     );
 
     cashierDayLog.opening = {
-      startedAt: new Date().toLocaleString('en-IN', { hour12: true }),
+      startedAt: new Date().toLocaleString("en-IN", { hour12: true }),
       totalAmount,
       denominations,
       openingId: result.insertId,
@@ -2125,15 +2304,15 @@ export const startCashierDay = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Cashier day started successfully',
+      message: "Cashier day started successfully",
       opening: cashierDayLog.opening,
       lastClosingBalance: latest ?? 0,
     });
   } catch (error) {
-    console.error('startCashierDay error:', error);
+    console.error("startCashierDay error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to start cashier day',
+      message: "Failed to start cashier day",
       error: error.message,
     });
   } finally {
@@ -2142,25 +2321,32 @@ export const startCashierDay = async (req, res) => {
 };
 
 export const closeCashierDay = async (req, res) => {
-  const { closingAmount, denominations, differenceReason, pettyCash, reasonDisposition, note } = req.body;
+  const {
+    closingAmount,
+    denominations,
+    differenceReason,
+    pettyCash,
+    reasonDisposition,
+    note,
+  } = req.body;
 
   if (closingAmount === undefined || !denominations) {
     return res.status(400).json({
       success: false,
-      message: 'closingAmount and denominations are required',
+      message: "closingAmount and denominations are required",
     });
   }
 
   // Petty cash is optional - an unsent or blank value closes the day with 0.
   const pettyCashAmount =
-    pettyCash === undefined || pettyCash === null || pettyCash === ''
+    pettyCash === undefined || pettyCash === null || pettyCash === ""
       ? 0
       : Number(pettyCash);
 
   if (Number.isNaN(pettyCashAmount) || pettyCashAmount < 0) {
     return res.status(400).json({
       success: false,
-      message: 'pettyCash must be a non-negative amount',
+      message: "pettyCash must be a non-negative amount",
     });
   }
 
@@ -2175,13 +2361,13 @@ export const closeCashierDay = async (req, res) => {
       INSERT INTO cashier_closings (total_cash, petty_cash)
       VALUES (?, ?)
       `,
-      [closingAmount, pettyCashAmount]
+      [closingAmount, pettyCashAmount],
     );
 
     await connection.commit();
 
     cashierDayLog.closing = {
-      closedAt: new Date().toLocaleString('en-IN', { hour12: true }),
+      closedAt: new Date().toLocaleString("en-IN", { hour12: true }),
       closingAmount,
       denominations,
       differenceReason: differenceReason || null,
@@ -2193,15 +2379,15 @@ export const closeCashierDay = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Cashier day closed successfully',
+      message: "Cashier day closed successfully",
       closing: cashierDayLog.closing,
     });
   } catch (error) {
     await connection.rollback();
-    console.error('closeCashierDay error:', error);
+    console.error("closeCashierDay error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to close cashier day',
+      message: "Failed to close cashier day",
       error: error.message,
     });
   } finally {
@@ -2218,15 +2404,16 @@ export const recordOfficeSale = async (req, res) => {
       phone,
       address,
       items = [],
-      payment_method: originalPaymentMethod = 'CASH',
+      payment_method: originalPaymentMethod = "CASH",
       payments = null,
     } = req.body;
-    const payment_method = payments && payments.length > 0 ? 'SPLIT' : originalPaymentMethod;
+    const payment_method =
+      payments && payments.length > 0 ? "SPLIT" : originalPaymentMethod;
 
     if (!customer_name || !address || !items.length) {
       return res.status(400).json({
         success: false,
-        message: 'customer_name, address and items are required',
+        message: "customer_name, address and items are required",
       });
     }
 
@@ -2236,33 +2423,43 @@ export const recordOfficeSale = async (req, res) => {
       price: Number(item.price),
     }));
 
-    if (parsedItems.some((item) => !item.product_id || item.quantity <= 0 || item.price < 0)) {
+    if (
+      parsedItems.some(
+        (item) => !item.product_id || item.quantity <= 0 || item.price < 0,
+      )
+    ) {
       return res.status(400).json({
         success: false,
-        message: 'Each item must have a valid product_id, positive quantity and price',
+        message:
+          "Each item must have a valid product_id, positive quantity and price",
       });
     }
 
-    const totalAmount = parsedItems.reduce((sum, item) => sum + item.quantity * item.price, 0);
+    const totalAmount = parsedItems.reduce(
+      (sum, item) => sum + item.quantity * item.price,
+      0,
+    );
 
     await connection.beginTransaction();
 
-    const uniqueProductIds = [...new Set(parsedItems.map((item) => Number(item.product_id)))];
-    const productPlaceholders = uniqueProductIds.map(() => '?').join(',');
+    const uniqueProductIds = [
+      ...new Set(parsedItems.map((item) => Number(item.product_id))),
+    ];
+    const productPlaceholders = uniqueProductIds.map(() => "?").join(",");
     const [productRows] = await connection.query(
       `
       SELECT id, name, type, price
       FROM products
       WHERE id IN (${productPlaceholders})
       `,
-      uniqueProductIds
+      uniqueProductIds,
     );
 
     if (productRows.length !== uniqueProductIds.length) {
       await connection.rollback();
       return res.status(400).json({
         success: false,
-        message: 'One or more selected products are invalid',
+        message: "One or more selected products are invalid",
       });
     }
 
@@ -2276,18 +2473,22 @@ export const recordOfficeSale = async (req, res) => {
         await connection.rollback();
         return res.status(400).json({
           success: false,
-          message: 'One or more selected products are invalid',
+          message: "One or more selected products are invalid",
         });
       }
 
-      const sourceStockAreaId = await consumeStockForCashierSale(connection, item.product_id, item.quantity);
+      const sourceStockAreaId = await consumeStockForCashierSale(
+        connection,
+        item.product_id,
+        item.quantity,
+      );
       deductedStockAreaIds.push(sourceStockAreaId);
     }
 
     const cashierUserId = req.user?.id || null;
 
     let customerId = null;
-    
+
     if (phone) {
       const [existingCustomers] = await connection.execute(
         `
@@ -2296,7 +2497,7 @@ export const recordOfficeSale = async (req, res) => {
         WHERE phone = ?
         LIMIT 1
         `,
-        [phone]
+        [phone],
       );
 
       if (existingCustomers.length) {
@@ -2307,7 +2508,7 @@ export const recordOfficeSale = async (req, res) => {
           SET name = ?, role = 'CUSTOMER', updated_at = NOW()
           WHERE id = ?
           `,
-          [customer_name, customerId]
+          [customer_name, customerId],
         );
       }
     }
@@ -2319,7 +2520,7 @@ export const recordOfficeSale = async (req, res) => {
           (name, phone, role, created_at, updated_at)
         VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
         `,
-        [customer_name, phone || null]
+        [customer_name, phone || null],
       );
       customerId = customerResult.insertId;
     }
@@ -2333,7 +2534,7 @@ export const recordOfficeSale = async (req, res) => {
         AND address = ?
       LIMIT 1
       `,
-      [customerId, address]
+      [customerId, address],
     );
 
     if (addressRows.length) {
@@ -2345,12 +2546,15 @@ export const recordOfficeSale = async (req, res) => {
           (user_id, address, created_at, updated_at)
         VALUES (?, ?, NOW(), NOW())
         `,
-        [customerId, address]
+        [customerId, address],
       );
       addressId = addressResult.insertId;
     }
 
-    const totalQuantity = parsedItems.reduce((sum, item) => sum + item.quantity, 0);
+    const totalQuantity = parsedItems.reduce(
+      (sum, item) => sum + item.quantity,
+      0,
+    );
 
     const [saleResult] = await connection.execute(
       `
@@ -2358,7 +2562,7 @@ export const recordOfficeSale = async (req, res) => {
         (customer_id, driver_id, address_id, total_amount, payment_method, status, created_at, assigned_at, updated_at, empty_cylinder_qty, empty_cylinder_status, sale_type, sales_from)
       VALUES (?, NULL, ?, ?, ?, 'DELIVERED', NOW(), NOW(), NOW(), ?, 'DELIVERED', 'SALE', 'CASHIER')
       `,
-      [customerId, addressId, totalAmount, payment_method, totalQuantity]
+      [customerId, addressId, totalAmount, payment_method, totalQuantity],
     );
 
     const saleId = saleResult.insertId;
@@ -2372,7 +2576,14 @@ export const recordOfficeSale = async (req, res) => {
           (sale_id, product_id, quantity, price, status, delivered_qty, empty_cylinder_qty, empty_cylinder_status, defective_qty)
         VALUES (?, ?, ?, ?, 'DELIVERED', ?, ?, 'DELIVERED', 0)
         `,
-        [saleId, item.product_id, item.quantity, item.price, item.quantity, item.quantity]
+        [
+          saleId,
+          item.product_id,
+          item.quantity,
+          item.price,
+          item.quantity,
+          item.quantity,
+        ],
       );
 
       await connection.execute(
@@ -2398,7 +2609,7 @@ export const recordOfficeSale = async (req, res) => {
           item.quantity,
           saleId,
           cashierUserId,
-        ]
+        ],
       );
 
       // Auto-raise empty cylinder return request to godown manager with sold quantity.
@@ -2419,12 +2630,7 @@ export const recordOfficeSale = async (req, res) => {
         )
         VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, ?, NULL, 'godown', 0)
         `,
-        [
-          item.product_id,
-          item.quantity,
-          saleId,
-          cashierUserId,
-        ]
+        [item.product_id, item.quantity, saleId, cashierUserId],
       );
     }
 
@@ -2437,7 +2643,7 @@ export const recordOfficeSale = async (req, res) => {
         await connection.rollback();
         return res.status(400).json({
           success: false,
-          message: 'Sum of split payments must equal the total amount',
+          message: "Sum of split payments must equal the total amount",
         });
       }
 
@@ -2449,14 +2655,17 @@ export const recordOfficeSale = async (req, res) => {
               (sale_id, amount, method, status, type, created_at)
             VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW())
             `,
-            [saleId, Number(p.amount), p.method || 'CASH']
+            [saleId, Number(p.amount), p.method || "CASH"],
           );
         }
       }
-    } else if (payment_method === 'PART_PAYMENT') {
+    } else if (payment_method === "PART_PAYMENT") {
       // Split a part payment into two payment rows: cash portion + bank/UTR portion.
       const rawCash = Number(req.body.cash_amount);
-      const cashPart = Math.min(Math.max(Number.isFinite(rawCash) ? rawCash : 0, 0), totalAmount);
+      const cashPart = Math.min(
+        Math.max(Number.isFinite(rawCash) ? rawCash : 0, 0),
+        totalAmount,
+      );
       const bankPart = Math.max(totalAmount - cashPart, 0);
 
       if (cashPart > 0) {
@@ -2466,7 +2675,7 @@ export const recordOfficeSale = async (req, res) => {
             (sale_id, amount, method, status, type, created_at)
           VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW())
           `,
-          [saleId, cashPart]
+          [saleId, cashPart],
         );
       }
 
@@ -2477,7 +2686,7 @@ export const recordOfficeSale = async (req, res) => {
             (sale_id, amount, method, status, type, created_at)
           VALUES (?, ?, 'UPI', 'SUCCESS', 'COMPANY', NOW())
           `,
-          [saleId, bankPart]
+          [saleId, bankPart],
         );
       }
 
@@ -2489,14 +2698,16 @@ export const recordOfficeSale = async (req, res) => {
             (sale_id, amount, method, status, type, created_at)
           VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW())
           `,
-          [saleId, 0]
+          [saleId, 0],
         );
       }
     } else {
       // payments.method only supports CASH/UPI/CARD; map anything else to UPI.
-      const paymentMethodForRow = ['CASH', 'UPI', 'CARD'].includes(payment_method)
+      const paymentMethodForRow = ["CASH", "UPI", "CARD"].includes(
+        payment_method,
+      )
         ? payment_method
-        : 'UPI';
+        : "UPI";
 
       await connection.execute(
         `
@@ -2504,7 +2715,7 @@ export const recordOfficeSale = async (req, res) => {
           (sale_id, amount, method, status, type, created_at)
         VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW())
         `,
-        [saleId, totalAmount, paymentMethodForRow]
+        [saleId, totalAmount, paymentMethodForRow],
       );
     }
 
@@ -2512,7 +2723,7 @@ export const recordOfficeSale = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Office sale created successfully',
+      message: "Office sale created successfully",
       data: {
         saleId,
         totalAmount,
@@ -2521,10 +2732,10 @@ export const recordOfficeSale = async (req, res) => {
     });
   } catch (error) {
     await connection.rollback();
-    console.error('recordOfficeSale error:', error);
+    console.error("recordOfficeSale error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to create office sale',
+      message: "Failed to create office sale",
       error: error.message,
     });
   } finally {
@@ -2537,8 +2748,12 @@ export const getTodayOfficeSales = async (req, res) => {
 
   try {
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -2547,11 +2762,10 @@ export const getTodayOfficeSales = async (req, res) => {
       endDate = tmp;
     }
     const hasRange = Boolean(startDate && endDate);
-    const dateClause = hasRange ? 'AND DATE(s.created_at) BETWEEN ? AND ?' : 'AND DATE(s.created_at) = CURDATE()';
+    const dateClause = hasRange
+      ? "AND DATE(s.created_at) BETWEEN ? AND ?"
+      : "AND DATE(s.created_at) = CURDATE()";
     const queryParams = hasRange ? [startDate, endDate] : [];
-
-
-
 
     const [rows] = await connection.query(
       `
@@ -2569,8 +2783,9 @@ export const getTodayOfficeSales = async (req, res) => {
         ${dateClause}
       GROUP BY s.id, u.name, s.total_amount
       ORDER BY s.created_at DESC
-      `
-    , queryParams);
+      `,
+      queryParams,
+    );
 
     return res.status(200).json({
       success: true,
@@ -2582,10 +2797,10 @@ export const getTodayOfficeSales = async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('getTodayOfficeSales error:', error);
+    console.error("getTodayOfficeSales error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch today office sales',
+      message: "Failed to fetch today office sales",
       error: error.message,
     });
   } finally {
@@ -2610,36 +2825,52 @@ export const recordOfficeExpense = async (req, res) => {
     const adminId = 6;
 
     if (!adminId) {
-      return res.status(400).json({ success: false, message: 'admin_id is required' });
+      return res
+        .status(400)
+        .json({ success: false, message: "admin_id is required" });
     }
 
     if (!category || amount === undefined) {
-      return res.status(400).json({ success: false, message: 'category and amount are required' });
+      return res
+        .status(400)
+        .json({ success: false, message: "category and amount are required" });
     }
 
     const numericAmount = Number(amount);
     if (Number.isNaN(numericAmount) || numericAmount < 0) {
-      return res.status(400).json({ success: false, message: 'amount must be a non-negative number' });
+      return res.status(400).json({
+        success: false,
+        message: "amount must be a non-negative number",
+      });
     }
 
-    const validPaymentModes = ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER'];
-    const paymentMode = String(rawPaymentMode || rawPaymentMethod || 'CASH').trim().toUpperCase();
+    const validPaymentModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    const paymentMode = String(rawPaymentMode || rawPaymentMethod || "CASH")
+      .trim()
+      .toUpperCase();
     if (!validPaymentModes.includes(paymentMode)) {
-      return res.status(400).json({ success: false, message: 'Invalid payment mode' });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid payment mode" });
     }
 
-    const paymentReference = String(rawTransactionId || rawPaymentReference || '').trim();
-    if (paymentMode !== 'CASH' && !paymentReference) {
-      return res.status(400).json({ success: false, message: 'Transaction ID is required for non-cash payments' });
+    const paymentReference = String(
+      rawTransactionId || rawPaymentReference || "",
+    ).trim();
+    if (paymentMode !== "CASH" && !paymentReference) {
+      return res.status(400).json({
+        success: false,
+        message: "Transaction ID is required for non-cash payments",
+      });
     }
 
     // A cash payout can never exceed the cash currently in the drawer.
-    if (paymentMode === 'CASH') {
+    if (paymentMode === "CASH") {
       const availableCash = await getAvailableCashBalance(connection);
       if (numericAmount > availableCash) {
         return res.status(400).json({
           success: false,
-          message: `Insufficient cash balance. Available ₹${availableCash.toLocaleString('en-IN')}, expense ₹${numericAmount.toLocaleString('en-IN')}. Pay via UPI/Card/Bank Transfer or reduce the amount.`,
+          message: `Insufficient cash balance. Available ₹${availableCash.toLocaleString("en-IN")}, expense ₹${numericAmount.toLocaleString("en-IN")}. Pay via UPI/Card/Bank Transfer or reduce the amount.`,
           availableCash,
           requestedAmount: numericAmount,
         });
@@ -2648,23 +2879,28 @@ export const recordOfficeExpense = async (req, res) => {
 
     // Ensure a receipt column exists so the uploaded bill can be persisted.
     const [billColumns] = await connection.query(
-      `SHOW COLUMNS FROM office_expenses LIKE 'bill_url'`
+      `SHOW COLUMNS FROM office_expenses LIKE 'bill_url'`,
     );
     let hasBillUrl = billColumns.length > 0;
     if (!hasBillUrl && billUrl) {
       try {
-        await connection.query(`ALTER TABLE office_expenses ADD COLUMN bill_url TEXT NULL`);
+        await connection.query(
+          `ALTER TABLE office_expenses ADD COLUMN bill_url TEXT NULL`,
+        );
         hasBillUrl = true;
       } catch (alterError) {
-        console.warn('Could not add bill_url column to office_expenses:', alterError.message);
+        console.warn(
+          "Could not add bill_url column to office_expenses:",
+          alterError.message,
+        );
       }
     }
 
     // Ensure the payment columns exist so mode + reference can be persisted.
     await ensureOfficeExpensePaymentColumns(connection);
 
-    const extraCols = `${hasBillUrl ? ', bill_url' : ''}, payment_mode, payment_reference`;
-    const extraPlaceholder = `${hasBillUrl ? ', ?' : ''}, ?, ?`;
+    const extraCols = `${hasBillUrl ? ", bill_url" : ""}, payment_mode, payment_reference`;
+    const extraPlaceholder = `${hasBillUrl ? ", ?" : ""}, ?, ?`;
     const baseParams = [adminId, category, numericAmount, description || null];
     const billParams = hasBillUrl ? [billUrl || null] : [];
     const paymentParams = [paymentMode, paymentReference || null];
@@ -2677,10 +2913,10 @@ export const recordOfficeExpense = async (req, res) => {
         INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, status, created_at, updated_at)
         VALUES (?, ?, ?, ?${extraPlaceholder}, 'PENDING', NOW(), NOW())
         `,
-        [...baseParams, ...billParams, ...paymentParams]
+        [...baseParams, ...billParams, ...paymentParams],
       );
     } catch (queryError) {
-      if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
+      if (queryError?.code !== "ER_BAD_FIELD_ERROR") {
         throw queryError;
       }
 
@@ -2689,14 +2925,22 @@ export const recordOfficeExpense = async (req, res) => {
         INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, created_at, updated_at)
         VALUES (?, ?, ?, ?${extraPlaceholder}, NOW(), NOW())
         `,
-        [...baseParams, ...billParams, ...paymentParams]
+        [...baseParams, ...billParams, ...paymentParams],
       );
     }
 
-    return res.status(201).json({ success: true, message: 'Office expense recorded', expenseId: result.insertId });
+    return res.status(201).json({
+      success: true,
+      message: "Office expense recorded",
+      expenseId: result.insertId,
+    });
   } catch (error) {
-    console.error('recordOfficeExpense error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to record office expense', error: error.message });
+    console.error("recordOfficeExpense error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to record office expense",
+      error: error.message,
+    });
   } finally {
     connection.release();
   }
@@ -2725,10 +2969,10 @@ export const getTodayOfficeExpenses = async (req, res) => {
         LEFT JOIN users u ON u.id = o.admin_id
         WHERE DATE(o.created_at) = CURDATE()
         ORDER BY o.created_at DESC
-        `
+        `,
       );
     } catch (queryError) {
-      if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
+      if (queryError?.code !== "ER_BAD_FIELD_ERROR") {
         throw queryError;
       }
 
@@ -2745,17 +2989,31 @@ export const getTodayOfficeExpenses = async (req, res) => {
         LEFT JOIN users u ON u.id = o.admin_id
         WHERE DATE(o.created_at) = CURDATE()
         ORDER BY o.created_at DESC
-        `
+        `,
       );
     }
 
     return res.status(200).json({
       success: true,
-      data: rows.map((r) => ({ id: `OE-${String(r.id).padStart(3, '0')}`, category: r.category, description: r.description, amount: Number(r.amount || 0), paymentMode: r.payment_mode || null, paymentReference: r.payment_reference || null, date: r.date, by: r.createdBy, status: r.status || 'PENDING' })),
+      data: rows.map((r) => ({
+        id: `OE-${String(r.id).padStart(3, "0")}`,
+        category: r.category,
+        description: r.description,
+        amount: Number(r.amount || 0),
+        paymentMode: r.payment_mode || null,
+        paymentReference: r.payment_reference || null,
+        date: r.date,
+        by: r.createdBy,
+        status: r.status || "PENDING",
+      })),
     });
   } catch (error) {
-    console.error('getTodayOfficeExpenses error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to fetch today office expenses', error: error.message });
+    console.error("getTodayOfficeExpenses error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch today office expenses",
+      error: error.message,
+    });
   } finally {
     connection.release();
   }
@@ -2766,8 +3024,12 @@ export const getCashOutExpenseRequests = async (req, res) => {
 
   try {
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || '')) ? String(req.query.startDate) : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || '')) ? String(req.query.endDate) : null;
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
+      ? String(req.query.startDate)
+      : null;
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
+      ? String(req.query.endDate)
+      : null;
     if (startDate && !endDate) endDate = startDate;
     if (endDate && !startDate) startDate = endDate;
     if (startDate && endDate && startDate > endDate) {
@@ -2776,11 +3038,8 @@ export const getCashOutExpenseRequests = async (req, res) => {
       endDate = tmp;
     }
     const hasRange = Boolean(startDate && endDate);
-    const dateClause = hasRange ? 'AND DATE(e.created_at) BETWEEN ? AND ?' : '';
+    const dateClause = hasRange ? "AND DATE(e.created_at) BETWEEN ? AND ?" : "";
     const queryParams = hasRange ? [startDate, endDate] : [];
-
-
-
 
     const [summaryRows] = await connection.query(
       `
@@ -2790,8 +3049,9 @@ export const getCashOutExpenseRequests = async (req, res) => {
       FROM expenses e
       INNER JOIN users u ON u.id = e.created_by
       WHERE u.role = 'PURCHASE_MANAGER'
-      `
-    , queryParams);
+      `,
+      queryParams,
+    );
 
     const [rows] = await connection.query(
       `
@@ -2817,7 +3077,7 @@ export const getCashOutExpenseRequests = async (req, res) => {
       WHERE u.role = 'PURCHASE_MANAGER'
         AND e.status = 'PENDING'
       ORDER BY e.created_at DESC, e.id DESC
-      `
+      `,
     );
 
     return res.status(200).json({
@@ -2847,10 +3107,10 @@ export const getCashOutExpenseRequests = async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('getCashOutExpenseRequests error:', error);
+    console.error("getCashOutExpenseRequests error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch expense requests',
+      message: "Failed to fetch expense requests",
       error: error.message,
     });
   } finally {
@@ -2863,36 +3123,38 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
 
   try {
     const expenseId = Number(req.params.expenseId);
-    const status = String(req.body?.status || '').toUpperCase();
-    const rawPaymentMode = String(req.body?.paymentMode || req.body?.payment_method || '').trim().toUpperCase();
-    const rawTransactionId = String(req.body?.transactionId || req.body?.transaction_id || '').trim();
+    const status = String(req.body?.status || "").toUpperCase();
+    const rawPaymentMode = String(
+      req.body?.paymentMode || req.body?.payment_method || "",
+    )
+      .trim()
+      .toUpperCase();
+    const rawTransactionId = String(
+      req.body?.transactionId || req.body?.transaction_id || "",
+    ).trim();
 
-    if (!expenseId || !['APPROVED', 'REJECTED'].includes(status)) {
+    if (!expenseId || !["APPROVED", "REJECTED"].includes(status)) {
       return res.status(400).json({
         success: false,
-        message: 'expenseId and a valid status are required',
+        message: "expenseId and a valid status are required",
       });
     }
 
-    const validPaymentModes = ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER'];
-    const paymentMode = status === 'APPROVED'
-      ? (rawPaymentMode || 'CASH')
-      : null;
-    const transactionId = status === 'APPROVED'
-      ? rawTransactionId
-      : null;
+    const validPaymentModes = ["CASH", "UPI", "CARD", "BANK_TRANSFER"];
+    const paymentMode = status === "APPROVED" ? rawPaymentMode || "CASH" : null;
+    const transactionId = status === "APPROVED" ? rawTransactionId : null;
 
-    if (status === 'APPROVED' && !validPaymentModes.includes(paymentMode)) {
+    if (status === "APPROVED" && !validPaymentModes.includes(paymentMode)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid payment mode',
+        message: "Invalid payment mode",
       });
     }
 
-    if (status === 'APPROVED' && paymentMode !== 'CASH' && !transactionId) {
+    if (status === "APPROVED" && paymentMode !== "CASH" && !transactionId) {
       return res.status(400).json({
         success: false,
-        message: 'Transaction ID is required for non-cash payments',
+        message: "Transaction ID is required for non-cash payments",
       });
     }
 
@@ -2907,31 +3169,31 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
         AND u.role = 'PURCHASE_MANAGER'
       LIMIT 1
       `,
-      [expenseId]
+      [expenseId],
     );
 
     if (!rows.length) {
       return res.status(404).json({
         success: false,
-        message: 'Expense request not found',
+        message: "Expense request not found",
       });
     }
 
-    if (rows[0].status !== 'PENDING') {
+    if (rows[0].status !== "PENDING") {
       return res.status(400).json({
         success: false,
-        message: 'Only pending expense requests can be reviewed',
+        message: "Only pending expense requests can be reviewed",
       });
     }
 
     // A cash payout can never exceed the cash currently in the drawer.
-    if (status === 'APPROVED' && paymentMode === 'CASH') {
+    if (status === "APPROVED" && paymentMode === "CASH") {
       const expenseAmount = Number(rows[0].amount || 0);
       const availableCash = await getAvailableCashBalance(connection);
       if (expenseAmount > availableCash) {
         return res.status(400).json({
           success: false,
-          message: `Insufficient cash balance. Available ₹${availableCash.toLocaleString('en-IN')}, expense ₹${expenseAmount.toLocaleString('en-IN')}. Pay via UPI/Card/Bank Transfer or reduce the amount.`,
+          message: `Insufficient cash balance. Available ₹${availableCash.toLocaleString("en-IN")}, expense ₹${expenseAmount.toLocaleString("en-IN")}. Pay via UPI/Card/Bank Transfer or reduce the amount.`,
           availableCash,
           requestedAmount: expenseAmount,
         });
@@ -2941,7 +3203,7 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
     let savedViaColumns = false;
 
     try {
-      if (status === 'APPROVED') {
+      if (status === "APPROVED") {
         await connection.query(
           `
           UPDATE expenses
@@ -2950,7 +3212,7 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
               payment_reference = ?
           WHERE id = ?
           `,
-          [status, paymentMode, transactionId || null, expenseId]
+          [status, paymentMode, transactionId || null, expenseId],
         );
       } else {
         await connection.query(
@@ -2959,21 +3221,25 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
           SET status = ?
           WHERE id = ?
           `,
-          [status, expenseId]
+          [status, expenseId],
         );
       }
 
       savedViaColumns = true;
     } catch (queryError) {
       // Keep compatibility with environments where migration is not yet applied.
-      if (queryError?.code !== 'ER_BAD_FIELD_ERROR') {
+      if (queryError?.code !== "ER_BAD_FIELD_ERROR") {
         throw queryError;
       }
 
-      if (status === 'APPROVED') {
-        const existingDescription = rows[0]?.description ? String(rows[0].description).trim() : '';
-        const paymentTag = `[Payment: ${paymentMode}${transactionId ? ` | ${transactionId}` : ''}]`;
-        const nextDescription = [existingDescription, paymentTag].filter(Boolean).join(' ');
+      if (status === "APPROVED") {
+        const existingDescription = rows[0]?.description
+          ? String(rows[0].description).trim()
+          : "";
+        const paymentTag = `[Payment: ${paymentMode}${transactionId ? ` | ${transactionId}` : ""}]`;
+        const nextDescription = [existingDescription, paymentTag]
+          .filter(Boolean)
+          .join(" ");
 
         await connection.query(
           `
@@ -2982,7 +3248,7 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
               description = ?
           WHERE id = ?
           `,
-          [status, nextDescription, expenseId]
+          [status, nextDescription, expenseId],
         );
       } else {
         await connection.query(
@@ -2991,21 +3257,24 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
           SET status = ?
           WHERE id = ?
           `,
-          [status, expenseId]
+          [status, expenseId],
         );
       }
     }
 
     return res.status(200).json({
       success: true,
-      message: status === 'APPROVED' ? 'Expense approved successfully' : 'Expense rejected successfully',
+      message:
+        status === "APPROVED"
+          ? "Expense approved successfully"
+          : "Expense rejected successfully",
       paymentSavedInColumns: savedViaColumns,
     });
   } catch (error) {
-    console.error('reviewCashOutExpenseRequest error:', error);
+    console.error("reviewCashOutExpenseRequest error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to review expense request',
+      message: "Failed to review expense request",
       error: error.message,
     });
   } finally {
@@ -3017,12 +3286,13 @@ export const recordCashierReceipt = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const { customer_id, amount, payment_method, receipt_type, notes } = req.body;
+    const { customer_id, amount, payment_method, receipt_type, notes } =
+      req.body;
 
     if (!customer_id || !amount || !payment_method) {
       return res.status(400).json({
         success: false,
-        message: 'customer_id, amount and payment_method are required',
+        message: "customer_id, amount and payment_method are required",
       });
     }
 
@@ -3035,7 +3305,7 @@ export const recordCashierReceipt = async (req, res) => {
       VALUES
         (?, NULL, ?, ?, 'DELIVERED', NULL, NOW(), NOW(), NOW(), 'SALE', 'CASHIER')
       `,
-      [customer_id, amount, payment_method]
+      [customer_id, amount, payment_method],
     );
 
     const saleId = saleResult.insertId;
@@ -3047,22 +3317,22 @@ export const recordCashierReceipt = async (req, res) => {
       VALUES
         (?, ?, ?, 'SUCCESS', ?, NOW())
       `,
-      [saleId, amount, payment_method, receipt_type || 'COMPANY']
+      [saleId, amount, payment_method, receipt_type || "COMPANY"],
     );
 
     await connection.commit();
 
     return res.status(201).json({
       success: true,
-      message: 'Cashier receipt recorded successfully',
+      message: "Cashier receipt recorded successfully",
       saleId,
     });
   } catch (error) {
     await connection.rollback();
-    console.error('recordCashierReceipt error:', error);
+    console.error("recordCashierReceipt error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to record cashier receipt',
+      message: "Failed to record cashier receipt",
       error: error.message,
     });
   } finally {
@@ -3076,29 +3346,29 @@ export const recordCashierReceipt = async (req, res) => {
 // so they live in their own table rather than being faked as a sale.
 // ---------------------------------------------------------------------------
 
-const RECEIPT_TYPES = ['ADVANCE', 'DUE_COLLECTION', 'OTHER'];
-const RECEIPT_PAYMENT_MODES = ['CASH', 'UPI', 'BANK_TRANSFER', 'CARD'];
+const RECEIPT_TYPES = ["ADVANCE", "DUE_COLLECTION", "OTHER"];
+const RECEIPT_PAYMENT_MODES = ["CASH", "UPI", "BANK_TRANSFER", "CARD"];
 
 const RECEIPT_TYPE_LABELS = {
-  ADVANCE: 'ADVANCE',
-  DUE_COLLECTION: 'DUE COLLECTION',
-  OTHER: 'OTHER',
+  ADVANCE: "ADVANCE",
+  DUE_COLLECTION: "DUE COLLECTION",
+  OTHER: "OTHER",
 };
 
 const RECEIPT_PAYMENT_MODE_LABELS = {
-  CASH: 'Cash',
-  UPI: 'UPI',
-  BANK_TRANSFER: 'Bank Transfer',
-  CARD: 'Card',
+  CASH: "Cash",
+  UPI: "UPI",
+  BANK_TRANSFER: "Bank Transfer",
+  CARD: "Card",
 };
 
 // Accepts what the UI sends in any casing/spacing - "Due Collection",
 // "due-collection", "DUE_COLLECTION" all normalise to DUE_COLLECTION.
 const normalizeReceiptEnum = (value) =>
-  String(value || '')
+  String(value || "")
     .trim()
     .toUpperCase()
-    .replace(/[\s-]+/g, '_');
+    .replace(/[\s-]+/g, "_");
 
 const ensureCashierReceiptsTable = async (connection) => {
   await connection.query(`
@@ -3153,23 +3423,28 @@ export const createCashierReceipt = async (req, res) => {
   if (!RECEIPT_TYPES.includes(normalizedType)) {
     return res.status(400).json({
       success: false,
-      message: `type must be one of ${RECEIPT_TYPES.join(', ')}`,
+      message: `type must be one of ${RECEIPT_TYPES.join(", ")}`,
     });
   }
 
   const numericAmount = Number(amount);
 
-  if (amount === undefined || amount === null || amount === '' || Number.isNaN(numericAmount)) {
+  if (
+    amount === undefined ||
+    amount === null ||
+    amount === "" ||
+    Number.isNaN(numericAmount)
+  ) {
     return res.status(400).json({
       success: false,
-      message: 'amount is required and must be a valid number',
+      message: "amount is required and must be a valid number",
     });
   }
 
   if (numericAmount <= 0) {
     return res.status(400).json({
       success: false,
-      message: 'amount must be greater than 0',
+      message: "amount must be greater than 0",
     });
   }
 
@@ -3185,19 +3460,27 @@ export const createCashierReceipt = async (req, res) => {
     if (Math.abs(sum - Number(amount)) > 0.01) {
       return res.status(400).json({
         success: false,
-        message: 'Sum of split payments must equal the total amount',
+        message: "Sum of split payments must equal the total amount",
       });
     }
-    rawMode = 'SPLIT';
+    rawMode = "SPLIT";
     splitPaymentsJson = JSON.stringify(payments);
   }
 
-  const normalizedMode = rawMode === 'SPLIT' ? 'SPLIT' : (rawMode ? normalizeReceiptEnum(rawMode) : 'CASH');
+  const normalizedMode =
+    rawMode === "SPLIT"
+      ? "SPLIT"
+      : rawMode
+        ? normalizeReceiptEnum(rawMode)
+        : "CASH";
 
-  if (normalizedMode !== 'SPLIT' && !RECEIPT_PAYMENT_MODES.includes(normalizedMode)) {
+  if (
+    normalizedMode !== "SPLIT" &&
+    !RECEIPT_PAYMENT_MODES.includes(normalizedMode)
+  ) {
     return res.status(400).json({
       success: false,
-      message: `payment_mode must be one of ${RECEIPT_PAYMENT_MODES.join(', ')}`,
+      message: `payment_mode must be one of ${RECEIPT_PAYMENT_MODES.join(", ")}`,
     });
   }
 
@@ -3208,8 +3491,9 @@ export const createCashierReceipt = async (req, res) => {
     await ensureSplitPaymentsColumns(connection);
 
     const cashierId = req.user?.id || null;
-    const trimmedDescription = String(description || '').trim() || null;
-    const trimmedTransferId = String(transfer_id ?? transferId ?? '').trim() || null;
+    const trimmedDescription = String(description || "").trim() || null;
+    const trimmedTransferId =
+      String(transfer_id ?? transferId ?? "").trim() || null;
 
     const [result] = await connection.execute(
       `
@@ -3244,12 +3528,12 @@ export const createCashierReceipt = async (req, res) => {
         normalizedMode,
         splitPaymentsJson,
         trimmedTransferId,
-      ]
+      ],
     );
 
     return res.status(201).json({
       success: true,
-      message: 'Receipt added successfully',
+      message: "Receipt added successfully",
       data: {
         id: result.insertId,
         type: normalizedType,
@@ -3262,10 +3546,10 @@ export const createCashierReceipt = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('createCashierReceipt error:', error);
+    console.error("createCashierReceipt error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to add receipt',
+      message: "Failed to add receipt",
       error: error.message,
     });
   } finally {
@@ -3283,10 +3567,10 @@ export const getRecentCashierReceipts = async (req, res) => {
     await ensureCashierReceiptsTable(connection);
 
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    let startDate = DATE_ONLY.test(String(req.query.startDate || ''))
+    let startDate = DATE_ONLY.test(String(req.query.startDate || ""))
       ? String(req.query.startDate)
       : null;
-    let endDate = DATE_ONLY.test(String(req.query.endDate || ''))
+    let endDate = DATE_ONLY.test(String(req.query.endDate || ""))
       ? String(req.query.endDate)
       : null;
 
@@ -3300,8 +3584,8 @@ export const getRecentCashierReceipts = async (req, res) => {
 
     // No explicit range => today, which is what the panel shows by default.
     const whereClause = startDate
-      ? 'WHERE DATE(created_at) BETWEEN ? AND ?'
-      : 'WHERE ${dateClause}';
+      ? "WHERE DATE(created_at) BETWEEN ? AND ?"
+      : "WHERE ${dateClause}";
     const whereParams = startDate ? [startDate, endDate] : [];
 
     const requestedLimit = Number(req.query.limit);
@@ -3326,7 +3610,7 @@ export const getRecentCashierReceipts = async (req, res) => {
       ORDER BY created_at DESC, id DESC
       LIMIT ${limit}
       `,
-      whereParams
+      whereParams,
     );
 
     const receipts = rows.map(mapReceiptRow);
@@ -3340,10 +3624,10 @@ export const getRecentCashierReceipts = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('getRecentCashierReceipts error:', error);
+    console.error("getRecentCashierReceipts error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch recent receipts',
+      message: "Failed to fetch recent receipts",
       error: error.message,
     });
   } finally {
@@ -3361,7 +3645,10 @@ export const getTodaysCashFlow = async (req, res) => {
     // Everything for the current running day (resets to 0 at Close Day and at
     // Start Day, per spec), anchored at the latest of last close / last start.
     const anchorAt = await getCurrentDayAnchor(connection);
-    const ledger = await getCashLedger(connection, makeSinceCloseDateCond(anchorAt));
+    const ledger = await getCashLedger(
+      connection,
+      makeSinceCloseDateCond(anchorAt),
+    );
 
     // Inflow = CASH received for the current running day (cash only, per spec).
     const inflowCashTotal = ledger.cashIn.cash;
@@ -3381,8 +3668,16 @@ export const getTodaysCashFlow = async (req, res) => {
     return res.status(200).json({
       success: true,
       openingBalance,
-      inflow: { total: inflowTotal, count: inflowCount, cashTotal: inflowCashTotal },
-      outflow: { total: outflowTotal, count: outflowCount, cashTotal: outflowCashTotal },
+      inflow: {
+        total: inflowTotal,
+        count: inflowCount,
+        cashTotal: inflowCashTotal,
+      },
+      outflow: {
+        total: outflowTotal,
+        count: outflowCount,
+        cashTotal: outflowCashTotal,
+      },
       cashInflow: inflowCashTotal,
       cashOutflow: outflowCashTotal,
       currentBalance,
@@ -3393,10 +3688,10 @@ export const getTodaysCashFlow = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('getTodaysCashFlow error:', error);
+    console.error("getTodaysCashFlow error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch todays cash flow',
+      message: "Failed to fetch todays cash flow",
       error: error.message,
     });
   } finally {
@@ -3445,7 +3740,7 @@ export const findCustomerForCashierApp = async (req, res) => {
       `,
       !Number.isNaN(numericId)
         ? [likeValue, likeValue, numericId]
-        : [likeValue, likeValue]
+        : [likeValue, likeValue],
     );
 
     if (!rows.length) {
@@ -3482,24 +3777,32 @@ export const getCashFlowEntriesByDate = async (req, res) => {
   try {
     const { date } = req.query;
     if (!date) {
-      return res.status(400).json({ success: false, message: 'date query parameter is required' });
+      return res
+        .status(400)
+        .json({ success: false, message: "date query parameter is required" });
     }
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({ success: false, message: 'Invalid date format. Use YYYY-MM-DD' });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date format. Use YYYY-MM-DD",
+      });
     }
 
-    const summary = await getCashLedger(connection, makeRangeDateCond(date, date));
+    const summary = await getCashLedger(
+      connection,
+      makeRangeDateCond(date, date),
+    );
 
     const [expModeCol] = await connection.query(
       `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'expenses' AND COLUMN_NAME = 'payment_mode'`
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'expenses' AND COLUMN_NAME = 'payment_mode'`,
     );
     const ePaymentMode = expModeCol.length ? "e.payment_mode" : "NULL";
 
     const [oeModeCol] = await connection.query(
       `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'payment_mode'`
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'payment_mode'`,
     );
     const oePaymentMode = oeModeCol.length ? "oe.payment_mode" : "NULL";
 
@@ -3617,13 +3920,13 @@ export const getCashFlowEntriesByDate = async (req, res) => {
       success: true,
       date,
       summary,
-      entries
+      entries,
     });
   } catch (error) {
-    console.error('getCashFlowEntriesByDate error:', error);
+    console.error("getCashFlowEntriesByDate error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch cash flow entries by date',
+      message: "Failed to fetch cash flow entries by date",
       error: error.message,
     });
   } finally {
