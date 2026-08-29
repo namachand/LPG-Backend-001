@@ -65,14 +65,14 @@ const resolveDateRange = (query = {}) => {
   return { startDate: computedEndDate, endDate: computedStartDate };
 };
 
-const resolveDriverId = async (value) => {
+const resolveDriverId = async (value, queryRunner = db) => {
   const numericValue = Number(value);
 
   if (!numericValue || Number.isNaN(numericValue)) {
     return null;
   }
 
-  const [driverRows] = await db.execute(
+  const [driverRows] = await queryRunner.execute(
     `
     SELECT id
     FROM drivers
@@ -86,7 +86,7 @@ const resolveDriverId = async (value) => {
     return Number(driverRows[0].id);
   }
 
-  const [userMappedRows] = await db.execute(
+  const [userMappedRows] = await queryRunner.execute(
     `
     SELECT id
     FROM drivers
@@ -557,7 +557,8 @@ export const getDriverDeliveriesApp = async (req, res) => {
             SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS return_qty,
             SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS defective_qty
           FROM stock_transactions st
-          WHERE st.stock_from = 'driver'
+          WHERE st.driver_id = ?
+            AND st.stock_from = 'driver'
             AND st.type = 'PURCHASE_RETURN'
             AND st.isApproved IN (0, 1)
             AND st.allocation_sales_item_id IS NOT NULL
@@ -569,7 +570,7 @@ export const getDriverDeliveriesApp = async (req, res) => {
           AND DATE(COALESCE(a.assigned_at, a.created_at)) BETWEEN ? AND ?
       ) batch_stats
       `,
-      [numericDriverId, startDate, endDate],
+      [numericDriverId, numericDriverId, startDate, endDate],
     );
 
     // Delivered: actual DELIVERED sales in the date range — same source as the delivered list page
@@ -1084,7 +1085,7 @@ export const createDriverSale = async (req, res) => {
       customer_id = null,
     } = req.body;
 
-    const numericDriverId = await resolveDriverId(driver_id);
+    const numericDriverId = await resolveDriverId(driver_id, connection);
     const numericProductId = Number(product_id);
     const numericQuantity = Number(quantity || 1);
     const requestedAmount = Number(amount || 0);
@@ -1100,7 +1101,7 @@ export const createDriverSale = async (req, res) => {
     }
 
     // Fetch the driver's user_id so it can be used as created_by in stock_transactions
-    const [driverUserRows] = await db.execute(
+    const [driverUserRows] = await connection.execute(
       `SELECT user_id FROM drivers WHERE id = ? LIMIT 1`,
       [numericDriverId],
     );
@@ -1131,6 +1132,59 @@ export const createDriverSale = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "quantity must be greater than 0",
+      });
+    }
+
+    const normalizedOtp = String(otp || "").trim();
+
+    // Idempotency / Duplicate Check
+    // If the exact same driver creates a sale for the exact same product and quantity
+    // with the exact same allocation or OTP within the last 1 minute,
+    // we consider it a duplicate retry from a frontend timeout and safely return success.
+    let duplicateCheckRows = [];
+
+    if (allocation_sales_item_id) {
+      // Fast path: check by allocation_sales_item_id (no OTP table join needed)
+      [duplicateCheckRows] = await connection.execute(
+        `
+        SELECT s.id
+        FROM sales s
+        JOIN sales_items si ON s.id = si.sale_id
+        WHERE s.driver_id = ?
+          AND si.product_id = ?
+          AND si.quantity = ?
+          AND si.allocation_sales_item_id = ?
+          AND s.created_at >= NOW() - INTERVAL 1 MINUTE
+        LIMIT 1
+        `,
+        [numericDriverId, numericProductId, numericQuantity, Number(allocation_sales_item_id)]
+      );
+    } else if (normalizedOtp) {
+      // Fallback: check by OTP when no allocation
+      [duplicateCheckRows] = await connection.execute(
+        `
+        SELECT s.id
+        FROM sales s
+        JOIN sales_items si ON s.id = si.sale_id
+        JOIN driver_sale_otps dso ON dso.sale_id = s.id
+        WHERE s.driver_id = ?
+          AND si.product_id = ?
+          AND si.quantity = ?
+          AND si.allocation_sales_item_id IS NULL
+          AND dso.otp = ?
+          AND s.created_at >= NOW() - INTERVAL 1 MINUTE
+        LIMIT 1
+        `,
+        [numericDriverId, numericProductId, numericQuantity, normalizedOtp]
+      );
+    }
+
+    if (duplicateCheckRows.length) {
+      connection.release();
+      return res.status(200).json({
+        success: true,
+        message: "Sale created successfully (duplicate request handled)",
+        data: { saleId: duplicateCheckRows[0].id }
       });
     }
 
@@ -1181,7 +1235,7 @@ export const createDriverSale = async (req, res) => {
           FROM sales_items child
           INNER JOIN sales cs
             ON cs.id = child.sale_id
-          WHERE child.allocation_sales_item_id IS NOT NULL
+          WHERE child.allocation_sales_item_id = ?
             AND cs.status = 'DELIVERED'
           GROUP BY child.allocation_sales_item_id
         ) delivered_data
@@ -1193,10 +1247,10 @@ export const createDriverSale = async (req, res) => {
             SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS return_qty,
             SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS defective_qty
           FROM stock_transactions st
-          WHERE st.stock_from = 'driver'
+          WHERE st.allocation_sales_item_id = ?
+            AND st.stock_from = 'driver'
             AND st.type = 'PURCHASE_RETURN'
             AND st.isApproved IN (0, 1)
-            AND st.allocation_sales_item_id IS NOT NULL
           GROUP BY st.allocation_sales_item_id
         ) return_data
           ON return_data.allocation_sales_item_id = asi.id
@@ -1208,7 +1262,12 @@ export const createDriverSale = async (req, res) => {
         LIMIT 1
         FOR UPDATE
         `,
-        [Number(allocation_sales_item_id), numericDriverId],
+        [
+          Number(allocation_sales_item_id),
+          Number(allocation_sales_item_id),
+          Number(allocation_sales_item_id),
+          numericDriverId
+        ],
       );
 
       if (!batchRows.length) {
@@ -1359,8 +1418,6 @@ export const createDriverSale = async (req, res) => {
     );
 
     const saleId = saleResult.insertId;
-
-    const normalizedOtp = String(otp || "").trim();
 
     // Diagnostic: makes it visible in server logs whether the client actually
     // sent the OTP for this sale (the IOC OTP row is only created when it did).
@@ -1606,7 +1663,7 @@ export const createDriverReturn = async (req, res) => {
       otp = null,
     } = req.body;
 
-    const numericDriverId = await resolveDriverId(driver_id);
+    const numericDriverId = await resolveDriverId(driver_id, connection);
     const numericProductId = Number(product_id);
     const numericQuantity = Number(quantity || 0);
     const normalizedCategory = String(category || "").toUpperCase();

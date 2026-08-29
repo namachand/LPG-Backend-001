@@ -11,7 +11,7 @@ const connectionUrl = process.env.DATABASE_URL || process.env.MYSQL_URL;
 const MYSQL_TIMEZONE = process.env.DB_TIMEZONE || "+05:30";
 
 const db = connectionUrl
-  ? mysql.createPool({ uri: connectionUrl, timezone: MYSQL_TIMEZONE })
+  ? mysql.createPool({ uri: connectionUrl, timezone: MYSQL_TIMEZONE, connectionLimit: 20, queueLimit: 0 })
   : mysql.createPool({
       host: process.env.MYSQLHOST || process.env.DB_HOST || "localhost",
       user: process.env.MYSQLUSER || process.env.DB_USER || "root",
@@ -19,6 +19,8 @@ const db = connectionUrl
       database: process.env.MYSQLDATABASE || process.env.DB_NAME || "auth_db",
       port: Number(process.env.MYSQLPORT || process.env.DB_PORT || 3306),
       timezone: MYSQL_TIMEZONE,
+      connectionLimit: 20,
+      queueLimit: 0,
     });
 
 export default db;
