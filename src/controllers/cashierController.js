@@ -332,27 +332,43 @@ const getCashLedger = async (connection, makeDateCond) => {
     cnC.params,
   );
 
+  await ensureCashierReceiptsTable(connection);
+  const crC = makeDateCond("cr.created_at");
+  const [cr] = await connection.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN cr.payment_mode = 'CASH' THEN cr.amount ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN cr.payment_mode IN ('UPI','CARD') THEN cr.amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN cr.payment_mode = 'BANK_TRANSFER' THEN cr.amount ELSE 0 END), 0) AS bank,
+       COUNT(*) AS cnt
+     FROM cashier_receipts cr
+     WHERE 1=1 ${crC.sql}`,
+    crC.params,
+  );
+
   const cashIn = {
     cash:
       num(drv[0].cash) +
       num(off[0].cash) +
       num(pr[0].cash) +
       num(nc[0].cash) +
-      num(cn[0].cash),
+      num(cn[0].cash) +
+      num(cr[0].cash),
     online:
       num(drv[0].upi) +
       num(off[0].upi) +
       num(pr[0].upi) +
       num(nc[0].upi) +
-      num(cn[0].upi),
+      num(cn[0].upi) +
+      num(cr[0].upi),
     bank:
-      num(off[0].bank) + num(pr[0].bank) + num(nc[0].bank) + num(cn[0].bank),
+      num(off[0].bank) + num(pr[0].bank) + num(nc[0].bank) + num(cn[0].bank) + num(cr[0].bank),
     count:
       num(drv[0].cnt) +
       num(off[0].cnt) +
       num(pr[0].cnt) +
       num(nc[0].cnt) +
-      num(cn[0].cnt),
+      num(cn[0].cnt) +
+      num(cr[0].cnt),
   };
   cashIn.total = cashIn.cash + cashIn.online + cashIn.bank;
 
@@ -953,8 +969,10 @@ export const getCashierDriverCollections = async (req, res) => {
           pendingTotal:
             Number(driver.totalAssigned || 0) +
             Number(driver.totalPending || 0),
-          assignedCash: Number(driver.cashCollected || 0) - Number(driver.cashSettled || 0),
-          assignedUpi: Number(driver.upiCollected || 0) - Number(driver.upiSettled || 0),
+          assignedCash:
+            Number(driver.cashCollected || 0) - Number(driver.cashSettled || 0),
+          assignedUpi:
+            Number(driver.upiCollected || 0) - Number(driver.upiSettled || 0),
           assignedTotal: Number(driver.totalAssigned || 0),
           pendingCount: Number(driver.pendingCount || 0),
           assignedCount: Number(driver.assignedCount || 0),
@@ -2823,12 +2841,15 @@ export const recordOfficeExpense = async (req, res) => {
       transaction_id: rawTransactionId,
       payment_reference: rawPaymentReference,
     } = req.body;
-    const adminId = 6;
+    const adminId = req.user?.id;
 
     if (!adminId) {
       return res
         .status(400)
-        .json({ success: false, message: "admin_id is required" });
+        .json({
+          success: false,
+          message: "admin_id is required. Please ensure you are logged in.",
+        });
     }
 
     if (!category || amount === undefined) {
