@@ -141,13 +141,27 @@ export const getOwnerDashboard = async (req, res) => {
         p.type AS product_type,
         COALESCE(SUM(s.quantity), 0) AS total_quantity,
         COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity,
-        COALESCE(SUM(s.system_quantity), 0) AS otp_sent_quantity,
-        (COALESCE(SUM(s.quantity), 0) - COALESCE(SUM(s.system_quantity), 0)) AS system_quantity
+        COALESCE(SUM(s.system_quantity), 0) AS otp_sent_quantity
       FROM stock s
       INNER JOIN products p ON p.id = s.product_id
       WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
       GROUP BY p.type
       `,
+    );
+
+    // Total Approved Purchase Stock across all time (for system stock calculation)
+    const [purchaseStockRows] = await db.execute(
+      `
+      SELECT
+        p.type AS product_type,
+        COALESCE(SUM(st.quantity), 0) AS purchase_stock
+      FROM stock_transactions st
+      INNER JOIN products p ON p.id = st.product_id
+      WHERE st.type IN ('PURCHASE', 'NEW_VALUE', 'ADJUSTMENT_ADD')
+        AND COALESCE(st.isApproved, 0) = 1
+        AND COALESCE(st.is_defective, 0) = 0
+      GROUP BY p.type
+      `
     );
 
     let domesticStock = 0;
@@ -159,17 +173,28 @@ export const getOwnerDashboard = async (req, res) => {
     let otpSentDomestic = 0;
     let otpSentCommercial = 0;
 
+    let purchaseDomestic = 0;
+    let purchaseCommercial = 0;
+
+    purchaseStockRows.forEach((row) => {
+      if (row.product_type === "DOMESTIC") {
+        purchaseDomestic = Number(row.purchase_stock || 0);
+      } else if (row.product_type === "COMMERCIAL") {
+        purchaseCommercial = Number(row.purchase_stock || 0);
+      }
+    });
+
     stockRows.forEach((row) => {
       if (row.product_type === "DOMESTIC") {
         domesticStock = Number(row.total_quantity || 0);
         emptyDomestic = Number(row.empty_quantity || 0);
-        systemDomestic = Number(row.system_quantity || 0);
         otpSentDomestic = Number(row.otp_sent_quantity || 0);
+        systemDomestic = Math.max(purchaseDomestic - otpSentDomestic, 0);
       } else if (row.product_type === "COMMERCIAL") {
         commercialStock = Number(row.total_quantity || 0);
         emptyCommercial = Number(row.empty_quantity || 0);
-        systemCommercial = Number(row.system_quantity || 0);
         otpSentCommercial = Number(row.otp_sent_quantity || 0);
+        systemCommercial = Math.max(purchaseCommercial - otpSentCommercial, 0);
       }
     });
 
