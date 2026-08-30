@@ -43,7 +43,7 @@ export const bulkUploadCustomers = async (req, res) => {
         
         const consumerName = row["Consumer Name"] || row["Consumer_Name"] || "Unknown Customer";
         
-        userValues.push([consumerName, 'CUSTOMER', 'ACTIVE', consumerId, consumerNumber]);
+        userValues.push([consumerName, 'CUSTOMER', 'ACTIVE', consumerId, consumerNumber, req.user.agency_id]);
         consumerNumbers.push(consumerNumber);
         
         rowDataMap[consumerNumber] = {
@@ -57,14 +57,14 @@ export const bulkUploadCustomers = async (req, res) => {
         try {
           // 1. Bulk insert users
           await db.query(
-            `INSERT INTO users (name, role, status, consumer_id, consumer_number) VALUES ?`,
+            `INSERT INTO users (name, role, status, consumer_id, consumer_number, agency_id) VALUES ?`,
             [userValues]
           );
           
           // 2. Fetch inserted user IDs to map to addresses and connections
           const [users] = await db.query(
-            `SELECT id, consumer_number FROM users WHERE consumer_number IN (?)`,
-            [consumerNumbers]
+            `SELECT id, consumer_number FROM users WHERE consumer_number IN (?) AND agency_id = ?`,
+            [consumerNumbers, req.user.agency_id]
           );
           
           const addressValues = [];

@@ -8,7 +8,7 @@ const parseConsumerNumberToId = (consumerNumber = "") => {
   return Number.parseInt(digits, 10);
 };
 
-const lookupCustomer = async (connection, { consumerNumber, existingName }) => {
+const lookupCustomer = async (connection, { consumerNumber, existingName, agencyId }) => {
   const consumerId = parseConsumerNumberToId(consumerNumber);
 
   if (consumerId) {
@@ -22,10 +22,10 @@ const lookupCustomer = async (connection, { consumerNumber, existingName }) => {
         COALESCE(a.address, '') AS address
       FROM users u
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
-      WHERE u.id = ? AND u.role = 'CUSTOMER'
+      WHERE u.id = ? AND u.role = 'CUSTOMER' AND u.agency_id = ?
       LIMIT 1
       `,
-      [consumerId]
+      [consumerId, agencyId]
     );
 
     return rows[0] || null;
@@ -45,11 +45,11 @@ const lookupCustomer = async (connection, { consumerNumber, existingName }) => {
       COALESCE(a.address, '') AS address
     FROM users u
     LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
-    WHERE u.role = 'CUSTOMER' AND u.name LIKE ?
+    WHERE u.role = 'CUSTOMER' AND u.name LIKE ? AND u.agency_id = ?
     ORDER BY u.created_at DESC, u.id DESC
     LIMIT 1
     `,
-    [`%${String(existingName).trim()}%`]
+    [`%${String(existingName).trim()}%`, agencyId]
   );
 
   return rows[0] || null;
@@ -69,7 +69,8 @@ export const lookupNameChangeCustomer = async (req, res) => {
       });
     }
 
-    const customer = await lookupCustomer(connection, { consumerNumber, existingName });
+    const agencyId = req.user.agency_id;
+    const customer = await lookupCustomer(connection, { consumerNumber, existingName, agencyId });
 
     if (!customer) {
       return res.status(404).json({
@@ -128,9 +129,11 @@ export const createNameChangeRequest = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     const [customerRows] = await connection.query(
-      "SELECT id, name FROM users WHERE id = ? AND role = 'CUSTOMER' LIMIT 1",
-      [Number(customerId)]
+      "SELECT id, name FROM users WHERE id = ? AND role = 'CUSTOMER' AND agency_id = ? LIMIT 1",
+      [Number(customerId), agencyId]
     );
 
     if (!customerRows.length) {
@@ -160,8 +163,9 @@ export const createNameChangeRequest = async (req, res) => {
         new_name_requested,
         service_fee,
         document_url,
-        status
-      ) VALUES (?, ?, ?, ?, ?, 'PENDING')
+        status,
+        agency_id
+      ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
       `,
       [
         Number(customerId),
@@ -169,6 +173,7 @@ export const createNameChangeRequest = async (req, res) => {
         String(newName).trim(),
         Number(amount.toFixed(2)),
         String(documentUrl || "").trim() || null,
+        agencyId,
       ]
     );
 
@@ -211,9 +216,11 @@ export const getRecentNameChangeRequests = async (_req, res) => {
         DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
       FROM customer_name_change_requests r
       INNER JOIN users u ON u.id = r.customer_id
+      WHERE r.agency_id = ?
       ORDER BY r.created_at DESC, r.id DESC
       LIMIT 8
-      `
+      `,
+      [req.user.agency_id]
     );
 
     return res.status(200).json({
@@ -251,11 +258,11 @@ export const approveNameChangeRequest = async (req, res) => {
       `
       SELECT id, customer_id, new_name_requested, status
       FROM customer_name_change_requests
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       LIMIT 1
       FOR UPDATE
       `,
-      [requestId]
+      [requestId, req.user.agency_id]
     );
 
     if (!requestRows.length) {
@@ -277,17 +284,17 @@ export const approveNameChangeRequest = async (req, res) => {
     }
 
     await connection.query(
-      "UPDATE users SET name = ? WHERE id = ? AND role = 'CUSTOMER'",
-      [requestRow.new_name_requested, requestRow.customer_id]
+      "UPDATE users SET name = ? WHERE id = ? AND role = 'CUSTOMER' AND agency_id = ?",
+      [requestRow.new_name_requested, requestRow.customer_id, req.user.agency_id]
     );
 
     await connection.query(
       `
       UPDATE customer_name_change_requests
       SET status = 'APPROVED', approved_at = NOW()
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       `,
-      [requestId]
+      [requestId, req.user.agency_id]
     );
 
     await connection.commit();

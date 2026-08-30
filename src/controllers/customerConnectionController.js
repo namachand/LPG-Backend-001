@@ -158,9 +158,11 @@ export const createCustomerConnection = async (req, res) => {
       productRows = productIds.map((id) => rowMap.get(Number(id))).filter(Boolean);
     }
 
+    const agencyId = req.user.agency_id;
+
     const [existingUserRows] = await connection.query(
-      "SELECT id FROM users WHERE phone = ? LIMIT 1",
-      [String(mobileNumber).trim()]
+      "SELECT id FROM users WHERE phone = ? AND agency_id = ? LIMIT 1",
+      [String(mobileNumber).trim(), agencyId]
     );
 
     if (existingUserRows.length) {
@@ -175,10 +177,10 @@ export const createCustomerConnection = async (req, res) => {
 
     const [userResult] = await connection.query(
       `
-      INSERT INTO users (name, phone, role, status)
-      VALUES (?, ?, 'CUSTOMER', 'ACTIVE')
+      INSERT INTO users (name, phone, role, status, agency_id)
+      VALUES (?, ?, 'CUSTOMER', 'ACTIVE', ?)
       `,
-      [String(customerName).trim(), String(mobileNumber).trim()]
+      [String(customerName).trim(), String(mobileNumber).trim(), agencyId]
     );
 
     const userId = Number(userResult.insertId);
@@ -202,8 +204,9 @@ export const createCustomerConnection = async (req, res) => {
         deposit_amount,
         gst_amount,
         total_amount,
-        payment_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_PAYMENT')
+        payment_status,
+        agency_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_PAYMENT', ?)
       `,
       [
         userId,
@@ -216,6 +219,7 @@ export const createCustomerConnection = async (req, res) => {
         parsedDepositAmount,
         parsedGstAmount,
         parsedTotalAmount,
+        agencyId,
       ]
     );
 
@@ -301,6 +305,7 @@ export const getRecentCustomerConnections = async (_req, res) => {
       LEFT JOIN products p ON p.id = cnc.product_id
       LEFT JOIN customer_new_connection_products ncp ON ncp.connection_id = cnc.id
       LEFT JOIN products p2 ON p2.id = ncp.product_id
+      WHERE cnc.agency_id = ?
       GROUP BY
         cnc.id,
         cnc.user_id,
@@ -316,7 +321,8 @@ export const getRecentCustomerConnections = async (_req, res) => {
         cnc.created_at
       ORDER BY cnc.created_at DESC, cnc.id DESC
       LIMIT 8
-      `
+      `,
+      [req.user.agency_id]
     );
 
     return res.status(200).json({

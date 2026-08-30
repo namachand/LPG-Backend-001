@@ -71,7 +71,7 @@ const resolveBoundary = (asOfDate) => {
  */
 export const getDriverCarryForward = async (
   executor,
-  { driverId = null, asOfDate = null, openingBalance = true } = {}
+  { driverId = null, asOfDate = null, openingBalance = true, agencyId = null } = {}
 ) => {
   const boundary = resolveBoundary(asOfDate);
 
@@ -88,9 +88,14 @@ export const getDriverCarryForward = async (
   const driverFilter = driverId ? "AND a.driver_id = ?" : "";
 
   const params = [
+    ...(agencyId ? [agencyId] : []),
     ...(openingBalance ? boundary.params : []), // delivery cutoff
+
+    ...(agencyId ? [agencyId] : []),
     ...(openingBalance ? boundary.params : []), // return cutoff
+
     ...(driverId ? [Number(driverId)] : []),
+    ...(agencyId ? [agencyId] : []),
     ...boundary.params, // allocation date boundary
   ];
 
@@ -126,6 +131,7 @@ export const getDriverCarryForward = async (
         ON cs.id = child.sale_id
       WHERE child.allocation_sales_item_id IS NOT NULL
         AND cs.status = 'DELIVERED'
+        ${agencyId ? "AND cs.agency_id = ?" : ""}
         ${deliveryCutoff}
       GROUP BY child.allocation_sales_item_id
     ) delivered_data
@@ -141,6 +147,7 @@ export const getDriverCarryForward = async (
         AND st.type = 'PURCHASE_RETURN'
         AND st.isApproved IN (0, 1)
         AND st.allocation_sales_item_id IS NOT NULL
+        ${agencyId ? "AND st.agency_id = ?" : ""}
         ${returnCutoff}
       GROUP BY st.allocation_sales_item_id
     ) return_data
@@ -149,6 +156,7 @@ export const getDriverCarryForward = async (
     WHERE a.status = 'ASSIGNED'
       AND asi.allocation_sales_item_id IS NULL
       ${driverFilter}
+      ${agencyId ? "AND a.agency_id = ?" : ""}
       AND DATE(COALESCE(a.assigned_at, a.created_at)) < ${boundary.expr}
     `,
     params

@@ -12,8 +12,10 @@ export const getCashSettlementDashboard = async (req, res) => {
     const startDate = req.query.startDate || null;
     const endDate = req.query.endDate || null;
 
-    const driverFilters = [];
-    const driverParams = [];
+    const agencyId = req.user.agency_id;
+
+    const driverFilters = [`d.agency_id = ?`];
+    const driverParams = [agencyId];
 
     if (search) {
       driverFilters.push(`u.name LIKE ?`);
@@ -78,6 +80,7 @@ export const getCashSettlementDashboard = async (req, res) => {
           INNER JOIN sales sa ON sa.id = p.sale_id
           WHERE sa.status = 'DELIVERED'
             AND p.status = 'SUCCESS'
+            AND sa.agency_id = ?
             ${paymentDateWhereClause}
           GROUP BY sa.driver_id
         ) pay ON pay.driver_id = d.id
@@ -86,13 +89,13 @@ export const getCashSettlementDashboard = async (req, res) => {
             s.driver_id,
             SUM(s.amount) AS settled
           FROM settlements s
-          WHERE 1 = 1
+          WHERE s.agency_id = ?
             ${settlementDateWhereClause}
           GROUP BY s.driver_id
         ) sett ON sett.driver_id = d.id
       ) x
       `,
-      [...paymentDateParams, ...settlementDateParams]
+      [agencyId, ...paymentDateParams, agencyId, ...settlementDateParams]
     );
 
     const [countRows] = await connection.query(
@@ -134,6 +137,7 @@ export const getCashSettlementDashboard = async (req, res) => {
         INNER JOIN sales sa ON sa.id = p.sale_id
         WHERE sa.status = 'DELIVERED'
           AND p.status = 'SUCCESS'
+          AND sa.agency_id = ?
           ${paymentDateWhereClause}
         GROUP BY sa.driver_id
       ) pay ON pay.driver_id = d.id
@@ -144,7 +148,7 @@ export const getCashSettlementDashboard = async (req, res) => {
           SUM(s.amount) AS settled,
           MAX(s.settlement_date) AS lastSettlementDate
         FROM settlements s
-        WHERE 1 = 1
+        WHERE s.agency_id = ?
           ${settlementDateWhereClause}
         GROUP BY s.driver_id
       ) sett ON sett.driver_id = d.id
@@ -155,7 +159,9 @@ export const getCashSettlementDashboard = async (req, res) => {
       OFFSET ?
       `,
       [
+        agencyId,
         ...paymentDateParams,
+        agencyId,
         ...settlementDateParams,
         ...driverParams,
         limit,
@@ -211,20 +217,23 @@ export const upsertSettlement = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     await connection.query(
       `
       INSERT INTO settlements (
         driver_id,
         amount,
         status,
-        settlement_date
+        settlement_date,
+        agency_id
       )
-      VALUES (?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         amount = VALUES(amount),
         status = VALUES(status)
       `,
-      [driver_id, amount, status, settlement_date]
+      [driver_id, amount, status, settlement_date, agencyId]
     );
 
     return res.status(200).json({

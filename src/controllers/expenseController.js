@@ -28,12 +28,14 @@ export const createExpense = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     const [result] = await connection.query(
       `
-      INSERT INTO expenses (category, description, amount, bill_url, created_by, status)
-      VALUES (?, ?, ?, ?, ?, 'PENDING')
+      INSERT INTO expenses (category, description, amount, bill_url, created_by, status, agency_id)
+      VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
       `,
-      [category, description, parsedAmount, billUrl, createdBy]
+      [category, description, parsedAmount, billUrl, createdBy, agencyId]
     );
 
     return res.status(201).json({
@@ -72,8 +74,10 @@ export const getExpensesDashboard = async (req, res) => {
     const startDate = req.query.startDate || null;
     const endDate = req.query.endDate || null;
 
-    const filters = [];
-    const params = [];
+    const agencyId = req.user.agency_id;
+
+    const filters = [`e.agency_id = ?`];
+    const params = [agencyId];
 
     if (search) {
       filters.push(`

@@ -49,8 +49,9 @@ export const getComplaintCustomers = async (req, res) => {
     const search = (req.query.search || "").trim();
     const limit = Math.max(parseInt(req.query.limit, 10) || 4, 1);
 
-    const params = ["CUSTOMER"];
-    let whereClause = "WHERE role = ?";
+    const agencyId = req.user.agency_id;
+    const params = ["CUSTOMER", agencyId];
+    let whereClause = "WHERE role = ? AND agency_id = ?";
 
     if (search) {
       whereClause += " AND (name LIKE ? OR phone LIKE ? OR email LIKE ?)";
@@ -106,8 +107,10 @@ export const getCustomerComplaints = async (req, res) => {
     const offset = (page - 1) * limit;
     const search = (req.query.search || "").trim();
 
-    const filters = [];
-    const params = [];
+    const agencyId = req.user.agency_id;
+
+    const filters = [`cc.agency_id = ?`];
+    const params = [agencyId];
 
     if (search) {
       filters.push(
@@ -211,9 +214,11 @@ export const createCustomerComplaint = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     const [customerRows] = await connection.query(
-      "SELECT id FROM users WHERE id = ? AND role = 'CUSTOMER' LIMIT 1",
-      [customerId]
+      "SELECT id FROM users WHERE id = ? AND role = 'CUSTOMER' AND agency_id = ? LIMIT 1",
+      [customerId, agencyId]
     );
 
     if (!customerRows.length) {
@@ -233,10 +238,11 @@ export const createCustomerComplaint = async (req, res) => {
         description,
         priority,
         approval_status,
-        status
-      ) VALUES (?, ?, ?, ?, 'PENDING', 'OPEN')
+        status,
+        agency_id
+      ) VALUES (?, ?, ?, ?, 'PENDING', 'OPEN', ?)
       `,
-      [customerId, normalizedIssueType, description.trim(), priority]
+      [customerId, normalizedIssueType, description.trim(), priority, agencyId]
     );
 
     return res.status(201).json({
@@ -282,9 +288,11 @@ export const assignComplaintToDeliveryBoy = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     const [complaintRows] = await connection.query(
-      "SELECT id FROM customer_complaints WHERE id = ? LIMIT 1",
-      [complaintId]
+      "SELECT id FROM customer_complaints WHERE id = ? AND agency_id = ? LIMIT 1",
+      [complaintId, agencyId]
     );
 
     if (!complaintRows.length) {
@@ -299,10 +307,10 @@ export const assignComplaintToDeliveryBoy = async (req, res) => {
       SELECT d.id AS driver_id, d.user_id, u.name
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
-      WHERE d.id = ? AND u.role = 'DRIVER' AND u.status = 'ACTIVE'
+      WHERE d.id = ? AND d.agency_id = ? AND u.role = 'DRIVER' AND u.status = 'ACTIVE'
       LIMIT 1
       `,
-      [driverId]
+      [driverId, agencyId]
     );
 
     if (!driverRows.length) {
@@ -364,9 +372,11 @@ export const updateComplaintStatus = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     const [result] = await connection.query(
-      "UPDATE customer_complaints SET status = ? WHERE id = ?",
-      [nextStatus, complaintId]
+      "UPDATE customer_complaints SET status = ? WHERE id = ? AND agency_id = ?",
+      [nextStatus, complaintId, agencyId]
     );
 
     if (!result.affectedRows) {

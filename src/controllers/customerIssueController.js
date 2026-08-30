@@ -27,8 +27,8 @@ export const getCustomerIssuesDashboard = async (req, res) => {
     const startDate = req.query.startDate || null;
     const endDate = req.query.endDate || null;
 
-    const filters = [];
-    const params = [];
+    const filters = ["cc.agency_id = ?"];
+    const params = [req.user.agency_id];
 
     if (search) {
       filters.push(`

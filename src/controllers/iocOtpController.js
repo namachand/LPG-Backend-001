@@ -56,7 +56,9 @@ export const getIocOtpSummary = async (_req, res) => {
         COUNT(CASE WHEN DATE(dso.created_at) = CURDATE() AND dso.status = 'SENT' THEN 1 END) AS today_sent,
         COUNT(CASE WHEN dso.status = 'PENDING' THEN 1 END) AS all_pending
       FROM driver_sale_otps dso
-    `);
+      INNER JOIN sales s ON s.id = dso.sale_id
+      WHERE s.agency_id = ?
+    `, [req.user.agency_id]);
 
     const summary = rows[0] || {};
 
@@ -89,8 +91,8 @@ export const listIocOtps = async (req, res) => {
     const date = String(req.query.date || "").trim();
     const driverId = Number(req.query.driverId) || null;
 
-    const filters = [];
-    const params = [];
+    const filters = ["s.agency_id = ?"];
+    const params = [req.user.agency_id];
 
     if (status && status !== "ALL") {
       filters.push("dso.status = ?");
@@ -185,8 +187,11 @@ export const markIocOtpSent = async (req, res) => {
     // The PENDING guard makes this transition (and the stock update below)
     // fire exactly once per OTP, so system_quantity is never double-counted.
     const [result] = await connection.query(
-      "UPDATE driver_sale_otps SET status = 'SENT' WHERE id = ? AND status = 'PENDING' AND sale_id IS NOT NULL",
-      [otpId]
+      `UPDATE driver_sale_otps dso 
+       INNER JOIN sales s ON s.id = dso.sale_id 
+       SET dso.status = 'SENT' 
+       WHERE dso.id = ? AND dso.status = 'PENDING' AND s.agency_id = ?`,
+      [otpId, req.user.agency_id]
     );
 
     if (!result.affectedRows) {
@@ -257,8 +262,8 @@ export const addIocOtp = async (req, res) => {
     }
 
     const [saleRows] = await connection.query(
-      "SELECT id FROM sales WHERE id = ? LIMIT 1",
-      [saleId]
+      "SELECT id FROM sales WHERE id = ? AND agency_id = ? LIMIT 1",
+      [saleId, req.user.agency_id]
     );
 
     if (!saleRows.length) {

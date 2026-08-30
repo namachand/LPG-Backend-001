@@ -46,7 +46,8 @@ const increaseStock = async (
     returnQuantity = 0,
     emptyQuantity = 0,
     defectiveQuantity = 0,
-  }
+  },
+  agencyId
 ) => {
   const qty = Number(quantity || 0);
   const returnQty = Number(returnQuantity || 0);
@@ -61,12 +62,12 @@ const increaseStock = async (
     `
     SELECT id
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     LIMIT 1
     FOR UPDATE
     `,
-    [productId, DEFAULT_STOCK_AREA_ID]
+    [productId, agencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   if (rows.length) {
@@ -95,29 +96,30 @@ const increaseStock = async (
       quantity,
       quantity_return,
       empty_quantity,
-      defective_quantity
+      defective_quantity,
+      agency_id
     )
-    VALUES (?, NULL, ?, ?, ?, ?)
+    VALUES (?, NULL, ?, ?, ?, ?, ?)
     `,
-    [productId, qty, returnQty, emptyQty, defectiveQty]
+    [productId, qty, returnQty, emptyQty, defectiveQty, agencyId]
   );
 };
 
-const getAvailableStockForUpdate = async (connection, productId) => {
+const getAvailableStockForUpdate = async (connection, productId, agencyId) => {
   const [rows] = await connection.execute(
     `
     SELECT COALESCE(SUM(quantity), 0) AS quantity
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     FOR UPDATE
     `,
-    [productId]
+    [productId, agencyId]
   );
 
   return Number(rows[0]?.quantity || 0);
 };
 
-const consumeStockQuantity = async (connection, productId, requiredQty) => {
+const consumeStockQuantity = async (connection, productId, requiredQty, agencyId) => {
   let remaining = Number(requiredQty || 0);
 
   if (remaining <= 0) {
@@ -128,11 +130,11 @@ const consumeStockQuantity = async (connection, productId, requiredQty) => {
     `
     SELECT id, COALESCE(quantity, 0) AS quantity
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     FOR UPDATE
     `,
-    [productId, DEFAULT_STOCK_AREA_ID]
+    [productId, agencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   for (const row of rows) {
@@ -165,7 +167,8 @@ const consumeStockQuantity = async (connection, productId, requiredQty) => {
 const getStockMetricTotalForUpdate = async (
   connection,
   productId,
-  metricColumn
+  metricColumn,
+  agencyId
 ) => {
   const safeColumn =
     metricColumn === "empty_quantity" || metricColumn === "defective_quantity"
@@ -180,10 +183,10 @@ const getStockMetricTotalForUpdate = async (
     `
     SELECT COALESCE(SUM(${safeColumn}), 0) AS total
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     FOR UPDATE
     `,
-    [Number(productId)]
+    [Number(productId), agencyId]
   );
 
   return Number(rows[0]?.total || 0);
@@ -193,7 +196,8 @@ const consumeStockMetric = async (
   connection,
   productId,
   metricColumn,
-  requiredQty
+  requiredQty,
+  agencyId
 ) => {
   const safeColumn =
     metricColumn === "empty_quantity" || metricColumn === "defective_quantity"
@@ -214,11 +218,11 @@ const consumeStockMetric = async (
     `
     SELECT id, COALESCE(${safeColumn}, 0) AS metric_qty
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), agencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   for (const row of rows) {
@@ -263,10 +267,10 @@ export const getGodownDashboardData = async (req, res) => {
         COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity,
         COALESCE(SUM(s.defective_quantity), 0) AS defective_quantity
       FROM products p
-      LEFT JOIN stock s ON s.product_id = p.id
+      LEFT JOIN stock s ON s.product_id = p.id AND s.agency_id = ?
       LEFT JOIN categories c ON c.id = p.category_id
       GROUP BY p.id, p.name, p.type, c.name
-    `);
+    `, [req.user.agency_id]);
 
     const [allocatedTodayRows] = await db.execute(`
       SELECT
@@ -275,8 +279,9 @@ export const getGodownDashboardData = async (req, res) => {
       WHERE st.type = 'ADJUSTMENT_SUBTRACT'
         AND st.stock_from = 'godown'
         AND COALESCE(st.isApproved, 0) = 1
+        AND st.agency_id = ?
         AND DATE(st.created_at) BETWEEN ? AND ?
-    `, [startDate, endDate]);
+    `, [req.user.agency_id, startDate, endDate]);
 
     // Stock in (approved full cylinders received into the godown) per product,
     // used to derive System = opening stock (IOC baseline) + stock in.
@@ -288,8 +293,9 @@ export const getGodownDashboardData = async (req, res) => {
       WHERE st.type IN ('PURCHASE', 'NEW_VALUE', 'ADJUSTMENT_ADD')
         AND COALESCE(st.isApproved, 0) = 1
         AND COALESCE(st.is_defective, 0) = 0
+        AND st.agency_id = ?
       GROUP BY st.product_id
-    `);
+    `, [req.user.agency_id]);
     const stockInByProduct = {};
     stockInRows.forEach((r) => {
       stockInByProduct[Number(r.product_id)] = Number(r.stock_in || 0);
@@ -304,13 +310,14 @@ export const getGodownDashboardData = async (req, res) => {
        AND linked_sale.driver_id = st.driver_id
       WHERE st.driver_id IS NOT NULL
         AND COALESCE(st.isApproved, 0) = 0
+        AND st.agency_id = ?
         AND DATE(st.created_at) BETWEEN ? AND ?
         AND st.type IN ('EMPTY_RETURN', 'PURCHASE_RETURN')
         AND (
           st.type <> 'EMPTY_RETURN'
           OR linked_sale.id IS NULL
         )
-    `, [startDate, endDate]);
+    `, [req.user.agency_id, startDate, endDate]);
 
     const [recentActivityRows] = await db.execute(
       `
@@ -328,11 +335,11 @@ export const getGodownDashboardData = async (req, res) => {
       LEFT JOIN drivers d ON d.id = st.driver_id
       LEFT JOIN users u ON u.id = d.user_id
       LEFT JOIN users cu ON cu.id = st.created_by
-      WHERE DATE(st.created_at) BETWEEN ? AND ?
+      WHERE st.agency_id = ? AND DATE(st.created_at) BETWEEN ? AND ?
       ORDER BY st.created_at DESC
       LIMIT 10
       `,
-      [startDate, endDate]
+      [req.user.agency_id, startDate, endDate]
     );
 
     // Count cashier sales (office sales)
@@ -340,8 +347,9 @@ export const getGodownDashboardData = async (req, res) => {
       SELECT COUNT(*) AS cashier_sale_count
       FROM sales s
       WHERE s.sales_from = 'CASHIER'
+        AND s.agency_id = ?
         AND DATE(s.created_at) BETWEEN ? AND ?
-    `, [startDate, endDate]);
+    `, [req.user.agency_id, startDate, endDate]);
 
     const normalizeType = (row) => {
       return String(row.product_type || "").toUpperCase() === "COMMERCIAL"
@@ -510,12 +518,12 @@ export const getStockDetailByType = async (req, res) => {
         COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity,
         COALESCE(SUM(s.defective_quantity), 0) AS defective_quantity
       FROM products p
-      LEFT JOIN stock s ON s.product_id = p.id
+      LEFT JOIN stock s ON s.product_id = p.id AND s.agency_id = ?
       WHERE p.type = ?
       GROUP BY p.id, p.name, p.type
       ORDER BY p.name ASC
       `,
-      [normalizedType]
+      [req.user.agency_id, normalizedType]
     );
 
     // For empty view:
@@ -531,12 +539,13 @@ export const getStockDetailByType = async (req, res) => {
         FROM sales s
         INNER JOIN sales_items si ON si.sale_id = s.id
         WHERE s.status = 'DELIVERED'
+          AND s.agency_id = ?
           AND si.empty_cylinder_status IN ('DELIVERED', 'PARTIAL_DELIVERED')
           AND COALESCE(si.empty_cylinder_qty, 0) > 0
           AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
         GROUP BY si.product_id
         `,
-        [startDate, endDate]
+        [req.user.agency_id, startDate, endDate]
       );
       emptyTxRows.forEach((r) => {
         emptyReturnByProduct[Number(r.product_id)] = Number(r.total_returned || 0);
@@ -571,6 +580,7 @@ export const getStockDetailByType = async (req, res) => {
           INNER JOIN sales cs ON cs.id = child.sale_id
           WHERE child.allocation_sales_item_id IS NOT NULL
             AND cs.status = 'DELIVERED'
+            AND cs.agency_id = ?
           GROUP BY child.allocation_sales_item_id
         ) delivered_data ON delivered_data.allocation_sales_item_id = asi.id
         LEFT JOIN (
@@ -581,13 +591,16 @@ export const getStockDetailByType = async (req, res) => {
           WHERE st.stock_from = 'driver'
             AND st.type = 'PURCHASE_RETURN'
             AND st.isApproved IN (0, 1)
+            AND st.agency_id = ?
             AND st.allocation_sales_item_id IS NOT NULL
           GROUP BY st.allocation_sales_item_id
         ) return_data ON return_data.allocation_sales_item_id = asi.id
         WHERE a.status = 'ASSIGNED'
+          AND a.agency_id = ?
           AND asi.allocation_sales_item_id IS NULL
         GROUP BY asi.product_id
-        `
+        `,
+        [req.user.agency_id, req.user.agency_id, req.user.agency_id]
       );
       inHandRows.forEach((r) => {
         driverInHandByProduct[Number(r.product_id)] = Number(r.in_hand || 0);
@@ -602,12 +615,14 @@ export const getStockDetailByType = async (req, res) => {
         INNER JOIN sales s ON s.id = si.sale_id
         WHERE si.allocation_sales_item_id IS NOT NULL
           AND s.status = 'DELIVERED'
+          AND s.agency_id = ?
           AND EXISTS (
             SELECT 1 FROM driver_sale_otps dso
             WHERE dso.sale_id = s.id AND dso.status = 'PENDING'
           )
         GROUP BY si.product_id
-        `
+        `,
+        [req.user.agency_id]
       );
       pendingOtpRows.forEach((r) => {
         pendingOtpByProduct[Number(r.product_id)] = Number(r.pending_otp || 0);
@@ -739,7 +754,7 @@ export const getStockInLoads = async (req, res) => {
       LEFT JOIN purchase_loads pl ON pl.id = st.reference_id
       LEFT JOIN purchase_trips pt ON pt.id = pl.trip_id
       LEFT JOIN users pu ON pu.id = pt.purchase_manager_id
-      WHERE st.type = 'PURCHASE'
+      WHERE st.type = 'PURCHASE' AND st.agency_id = ?
       GROUP BY
         COALESCE(st.reference_id, st.driver_id),
         DATE(st.created_at),
@@ -748,7 +763,7 @@ export const getStockInLoads = async (req, res) => {
         u.name,
         pu.name
       ORDER BY created_at DESC
-    `);
+    `, [req.user.agency_id]);
 
     return res.json({
       success: true,
@@ -813,9 +828,10 @@ export const getStockInLoadDetail = async (req, res) => {
       LEFT JOIN users pu ON pu.id = pt.purchase_manager_id
       WHERE st.type = 'PURCHASE'
         AND COALESCE(st.reference_id, st.driver_id) = ?
+        AND st.agency_id = ?
       ORDER BY st.id ASC
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
     if (!rows.length) {
@@ -882,8 +898,9 @@ export const approveStockInLoad = async (req, res) => {
       WHERE type = 'PURCHASE'
         AND COALESCE(reference_id, driver_id) = ?
         AND isApproved = 2
+        AND agency_id = ?
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
     if (!rows.length) {
@@ -898,7 +915,7 @@ export const approveStockInLoad = async (req, res) => {
       await increaseStock(connection, {
         productId: Number(row.product_id),
         quantity: Number(row.quantity || 0),
-      });
+      }, req.user.agency_id);
     }
 
     await connection.execute(
@@ -908,11 +925,12 @@ export const approveStockInLoad = async (req, res) => {
       WHERE type = 'PURCHASE'
         AND COALESCE(reference_id, driver_id) = ?
         AND isApproved = 2
+        AND agency_id = ?
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
-    await syncPurchaseApprovalState(connection, loadId);
+    await syncPurchaseApprovalState(connection, loadId, req.user.agency_id);
 
     await connection.commit();
 
@@ -942,8 +960,9 @@ export const getDriverLists = async (req, res) => {
         u.name AS driver_name
       FROM drivers d
       JOIN users u ON u.id = d.user_id
+      WHERE u.agency_id = ?
       ORDER BY u.name ASC
-    `);
+    `, [req.user.agency_id]);
 
     return res.json({
       success: true,
@@ -978,12 +997,13 @@ export const getCylinderProducts = async (req, res) => {
           COALESCE(SUM(s.defective_quantity), 0) AS defective_available
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
-        LEFT JOIN stock s ON s.product_id = p.id
+        LEFT JOIN stock s ON s.product_id = p.id AND s.agency_id = ?
         GROUP BY p.id, p.name, p.type, c.name
         HAVING COALESCE(SUM(s.empty_quantity), 0) > 0
            OR COALESCE(SUM(s.defective_quantity), 0) > 0
         ORDER BY p.type ASC, p.name ASC
-        `
+        `,
+        [req.user.agency_id]
       );
 
       return res.json({
@@ -1026,10 +1046,10 @@ export const getCylinderProducts = async (req, res) => {
         COALESCE(SUM(s.quantity), 0) AS available_quantity
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
-      LEFT JOIN stock s ON s.product_id = p.id
+      LEFT JOIN stock s ON s.product_id = p.id AND s.agency_id = ?
       GROUP BY p.id, p.name, p.type, c.name
       ORDER BY p.type ASC, p.name ASC
-    `);
+    `, [req.user.agency_id]);
 
     return res.json({
       success: true,
@@ -1096,7 +1116,7 @@ export const getStockOutLoads = async (req, res) => {
           AND st.is_defective = 1
           AND st.stock_from = 'stock_out'
         )
-      )
+      ) AND st.agency_id = ?
       GROUP BY
         COALESCE(st.reference_id, st.driver_id),
         DATE(st.created_at),
@@ -1104,7 +1124,7 @@ export const getStockOutLoads = async (req, res) => {
         d.vehicle_number,
         u.name
       ORDER BY created_at DESC
-    `);
+    `, [req.user.agency_id]);
 
     return res.json({
       success: true,
@@ -1183,7 +1203,8 @@ export const createStockOutLoad = async (req, res) => {
         const availableEmpty = await getStockMetricTotalForUpdate(
           connection,
           productId,
-          "empty_quantity"
+          "empty_quantity",
+          req.user.agency_id
         );
 
         if (emptyQty > availableEmpty) {
@@ -1199,7 +1220,8 @@ export const createStockOutLoad = async (req, res) => {
         const availableDefective = await getStockMetricTotalForUpdate(
           connection,
           productId,
-          "defective_quantity"
+          "defective_quantity",
+          req.user.agency_id
         );
 
         if (defectiveQty > availableDefective) {
@@ -1225,9 +1247,10 @@ export const createStockOutLoad = async (req, res) => {
             driver_id,
             created_by,
             is_defective,
-            stock_from
+            stock_from,
+            agency_id
           )
-          VALUES (?, ?, 'EMPTY_RETURN', ?, 1, ?, ?, ?, 0, 'godown')
+          VALUES (?, ?, 'EMPTY_RETURN', ?, 1, ?, ?, ?, 0, 'godown', ?)
           `,
           [
             productId,
@@ -1236,10 +1259,11 @@ export const createStockOutLoad = async (req, res) => {
             finalReferenceId,
             driver_id,
             createdBy,
+            req.user.agency_id,
           ]
         );
 
-        await consumeStockMetric(connection, productId, "empty_quantity", emptyQty);
+        await consumeStockMetric(connection, productId, "empty_quantity", emptyQty, req.user.agency_id);
       }
 
       if (defectiveQty > 0) {
@@ -1256,9 +1280,10 @@ export const createStockOutLoad = async (req, res) => {
             driver_id,
             created_by,
             is_defective,
-            stock_from
+            stock_from,
+            agency_id
           )
-          VALUES (?, ?, 'PURCHASE_RETURN', ?, 1, ?, ?, ?, 1, 'stock_out')
+          VALUES (?, ?, 'PURCHASE_RETURN', ?, 1, ?, ?, ?, 1, 'stock_out', ?)
           `,
           [
             productId,
@@ -1267,6 +1292,7 @@ export const createStockOutLoad = async (req, res) => {
             finalReferenceId,
             driver_id,
             createdBy,
+            req.user.agency_id,
           ]
         );
 
@@ -1274,7 +1300,8 @@ export const createStockOutLoad = async (req, res) => {
           connection,
           productId,
           "defective_quantity",
-          defectiveQty
+          defectiveQty,
+          req.user.agency_id
         );
       }
     }
@@ -1332,6 +1359,7 @@ export const getStockOutLoadDetail = async (req, res) => {
       LEFT JOIN drivers d ON d.id = st.driver_id
       LEFT JOIN users u ON u.id = d.user_id
       WHERE COALESCE(st.reference_id, st.driver_id) = ?
+        AND st.agency_id = ?
         AND (
           (st.type = 'EMPTY_RETURN' AND st.stock_from = 'godown')
           OR (
@@ -1342,7 +1370,7 @@ export const getStockOutLoadDetail = async (req, res) => {
         )
       ORDER BY st.id ASC
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
     if (!rows.length) {
@@ -1440,12 +1468,13 @@ export const approveStockOutLoad = async (req, res) => {
       WHERE COALESCE(reference_id, driver_id) = ?
         AND stock_from IN ('godown', 'stock_out')
         AND isApproved = 0
+        AND agency_id = ?
         AND (
           type = 'EMPTY_RETURN'
           OR (type = 'PURCHASE_RETURN' AND is_defective = 1)
         )
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
     if (!rows.length) {
@@ -1461,14 +1490,14 @@ export const approveStockOutLoad = async (req, res) => {
         await increaseStock(connection, {
           productId: Number(row.product_id),
           emptyQuantity: Number(row.quantity || 0),
-        });
+        }, req.user.agency_id);
       }
 
       if (row.type === "PURCHASE_RETURN" && Number(row.is_defective) === 1) {
         await increaseStock(connection, {
           productId: Number(row.product_id),
           defectiveQuantity: Number(row.quantity || 0),
-        });
+        }, req.user.agency_id);
       }
     }
 
@@ -1479,12 +1508,13 @@ export const approveStockOutLoad = async (req, res) => {
       WHERE COALESCE(reference_id, driver_id) = ?
         AND stock_from IN ('godown', 'stock_out')
         AND isApproved = 0
+        AND agency_id = ?
         AND (
           type = 'EMPTY_RETURN'
           OR (type = 'PURCHASE_RETURN' AND is_defective = 1)
         )
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
     await connection.commit();
@@ -1531,6 +1561,7 @@ export const getDefectiveLoads = async (req, res) => {
       WHERE st.type = 'PURCHASE_RETURN'
         AND COALESCE(st.is_defective, 0) = 1
         AND st.stock_from != 'stock_out'
+        AND st.agency_id = ?
         AND DATE(st.created_at) BETWEEN ? AND ?
       GROUP BY
         COALESCE(st.reference_id, st.id),
@@ -1542,7 +1573,7 @@ export const getDefectiveLoads = async (req, res) => {
         u.name
       ORDER BY created_at DESC
       `,
-      [startDate, endDate]
+      [req.user.agency_id, startDate, endDate]
     );
 
     const loads = rows.map((row) => {
@@ -1668,7 +1699,7 @@ export const createDefectiveLoad = async (req, res) => {
       // When marking cylinders from godown stock as defective, check and
       // consume from available (sellable) quantity first
       if (stock_from === "godown") {
-        const availableQty = await getAvailableStockForUpdate(connection, productId);
+        const availableQty = await getAvailableStockForUpdate(connection, productId, req.user.agency_id);
 
         if (availableQty < qty) {
           await connection.rollback();
@@ -1678,7 +1709,7 @@ export const createDefectiveLoad = async (req, res) => {
           });
         }
 
-        await consumeStockQuantity(connection, productId, qty);
+        await consumeStockQuantity(connection, productId, qty, req.user.agency_id);
       }
 
       await connection.execute(
@@ -1694,9 +1725,10 @@ export const createDefectiveLoad = async (req, res) => {
           reference_id,
           driver_id,
           created_by,
-          stock_from
+          stock_from,
+          agency_id
         )
-        VALUES (?, ?, 'PURCHASE_RETURN', ?, 1, 1, ?, ?, ?, ?)
+        VALUES (?, ?, 'PURCHASE_RETURN', ?, 1, 1, ?, ?, ?, ?, ?)
         `,
         [
           productId,
@@ -1706,13 +1738,14 @@ export const createDefectiveLoad = async (req, res) => {
           stock_from === "driver" ? driver_id : null,
           req.user?.id || null,
           stock_from,
+          req.user.agency_id,
         ]
       );
 
       await increaseStock(connection, {
         productId,
         defectiveQuantity: qty,
-      });
+      }, req.user.agency_id);
     }
 
     await connection.commit();
@@ -1817,8 +1850,9 @@ export const getDeliveryDrivers = async (req, res) => {
       FROM sales s
       JOIN sales_items si ON si.sale_id = s.id
       WHERE (${dateSalesCondition} OR ${dateAllocationCondition})
+        AND s.agency_id = ?
       GROUP BY s.driver_id
-    `);
+    `, [req.user.agency_id]);
 
     // In-hand returns for each driver within date range. Requests awaiting
     // approval count too (isApproved IN (0, 1)) so this figure - and therefore
@@ -1838,8 +1872,9 @@ export const getDeliveryDrivers = async (req, res) => {
         AND st.type = 'PURCHASE_RETURN'
         AND st.isApproved IN (0, 1)
         AND ${dateReturnCondition}
+        AND st.agency_id = ?
       GROUP BY st.driver_id
-    `);
+    `, [req.user.agency_id]);
 
     // Cylinders left in hand from before the reported period. They are added to
     // the period's allocated figure instead of blocking the next allocation.
@@ -1847,6 +1882,7 @@ export const getDeliveryDrivers = async (req, res) => {
       driverId: null,
       asOfDate: carryForwardBoundary,
       openingBalance: true,
+      agencyId: req.user.agency_id,
     });
 
     // Create maps for faster lookup
@@ -1925,9 +1961,10 @@ export const getDriverDayWiseSummary = async (req, res) => {
       JOIN sales_items si ON si.sale_id = s.id
       WHERE s.driver_id = ?
         AND s.status = 'ASSIGNED'
+        AND s.agency_id = ?
         AND si.allocation_sales_item_id IS NULL
       GROUP BY DATE(COALESCE(s.assigned_at, s.created_at))
-    `, [driverId]);
+    `, [driverId, req.user.agency_id]);
 
     // Day-wise deliveries made out of those batches. Dated by the delivery
     // itself, so a cylinder allocated yesterday and delivered today reduces
@@ -1940,9 +1977,10 @@ export const getDriverDayWiseSummary = async (req, res) => {
       INNER JOIN sales cs ON cs.id = child.sale_id
       WHERE cs.driver_id = ?
         AND cs.status = 'DELIVERED'
+        AND cs.agency_id = ?
         AND child.allocation_sales_item_id IS NOT NULL
       GROUP BY DATE(COALESCE(cs.delivered_at, cs.created_at))
-    `, [driverId]);
+    `, [driverId, req.user.agency_id]);
 
     // Day-wise returns to the godown. Pending requests count too (isApproved
     // IN (0, 1)) so the ledger matches the in-hand figure shown to the driver.
@@ -1960,9 +1998,10 @@ export const getDriverDayWiseSummary = async (req, res) => {
         AND st.stock_from = 'driver'
         AND st.type = 'PURCHASE_RETURN'
         AND st.isApproved IN (0, 1)
+        AND st.agency_id = ?
         AND st.allocation_sales_item_id IS NOT NULL
       GROUP BY DATE(st.created_at)
-    `, [driverId]);
+    `, [driverId, req.user.agency_id]);
 
     const normalizeDateKey = (rawValue) => {
       if (!rawValue) {
@@ -2100,6 +2139,7 @@ export const createDriverAllocation = async (req, res) => {
       driverId: driver_id,
       asOfDate: CARRY_FORWARD_DATE_EXPR.TODAY,
       openingBalance: true,
+      agencyId: req.user.agency_id,
     });
 
     const carriedForwardQty = carryForward.total;
@@ -2147,7 +2187,7 @@ export const createDriverAllocation = async (req, res) => {
     });
 
     for (const [productId, requiredQty] of requiredByProduct.entries()) {
-      const availableQty = await getAvailableStockForUpdate(connection, productId);
+      const availableQty = await getAvailableStockForUpdate(connection, productId, req.user.agency_id);
 
       if (availableQty < requiredQty) {
         await connection.rollback();
@@ -2178,11 +2218,12 @@ export const createDriverAllocation = async (req, res) => {
         sales_from,
         created_at,
         updated_at,
-        assigned_at
+        assigned_at,
+        agency_id
       )
-      VALUES (?, ?, 'ONLINE', 'ASSIGNED', 'SALE', 'DRIVER', NOW(), NOW(), NOW())
+      VALUES (?, ?, 'ONLINE', 'ASSIGNED', 'SALE', 'DRIVER', NOW(), NOW(), NOW(), ?)
       `,
-      [driver_id, totalAmount]
+      [driver_id, totalAmount, req.user.agency_id]
     );
 
     const saleId = saleResult.insertId;
@@ -2214,7 +2255,7 @@ export const createDriverAllocation = async (req, res) => {
         [saleId, productId, quantity, batchNo, saleId]
       );
 
-      await consumeStockQuantity(connection, productId, quantity);
+      await consumeStockQuantity(connection, productId, quantity, req.user.agency_id);
 
       await connection.execute(
         `
@@ -2232,9 +2273,10 @@ export const createDriverAllocation = async (req, res) => {
           is_defective,
           batch_no,
           allocation_sale_id,
-          allocation_sales_item_id
+          allocation_sales_item_id,
+          agency_id
         )
-        VALUES (?, ?, 'ADJUSTMENT_SUBTRACT', ?, 1, ?, ?, ?, 'godown', 0, ?, ?, ?)
+        VALUES (?, ?, 'ADJUSTMENT_SUBTRACT', ?, 1, ?, ?, ?, 'godown', 0, ?, ?, ?, ?)
         `,
         [
           productId,
@@ -2246,6 +2288,7 @@ export const createDriverAllocation = async (req, res) => {
           batchNo,
           saleId,
           salesItemResult.insertId,
+          req.user.agency_id,
         ]
       );
     }

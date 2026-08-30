@@ -8,7 +8,7 @@ const parseConsumerNumberToId = (consumerNumber = "") => {
   return Number.parseInt(digits, 10);
 };
 
-const getCustomerByLookup = async (connection, { consumerNumber, existingName }) => {
+const getCustomerByLookup = async (connection, { consumerNumber, existingName, agencyId }) => {
   const consumerId = parseConsumerNumberToId(consumerNumber);
 
   if (consumerId) {
@@ -22,10 +22,10 @@ const getCustomerByLookup = async (connection, { consumerNumber, existingName })
         COALESCE(a.address, '') AS address
       FROM users u
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
-      WHERE u.id = ? AND u.role = 'CUSTOMER'
+      WHERE u.id = ? AND u.role = 'CUSTOMER' AND u.agency_id = ?
       LIMIT 1
       `,
-      [consumerId]
+      [consumerId, agencyId]
     );
 
     return rows[0] || null;
@@ -45,11 +45,11 @@ const getCustomerByLookup = async (connection, { consumerNumber, existingName })
       COALESCE(a.address, '') AS address
     FROM users u
     LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
-    WHERE u.role = 'CUSTOMER' AND u.name LIKE ?
+    WHERE u.role = 'CUSTOMER' AND u.name LIKE ? AND u.agency_id = ?
     ORDER BY u.created_at DESC, u.id DESC
     LIMIT 1
     `,
-    [`%${String(existingName).trim()}%`]
+    [`%${String(existingName).trim()}%`, agencyId]
   );
 
   return rows[0] || null;
@@ -196,7 +196,8 @@ export const lookupTransferCustomer = async (req, res) => {
       });
     }
 
-    const customer = await getCustomerByLookup(connection, { consumerNumber, existingName });
+    const agencyId = req.user.agency_id;
+    const customer = await getCustomerByLookup(connection, { consumerNumber, existingName, agencyId });
 
     if (!customer) {
       return res.status(404).json({
@@ -298,9 +299,11 @@ export const createCustomerTransfer = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     const [existingCustomerRows] = await connection.query(
-      "SELECT id, name FROM users WHERE id = ? AND role = 'CUSTOMER' LIMIT 1",
-      [Number(existingCustomerId)]
+      "SELECT id, name FROM users WHERE id = ? AND role = 'CUSTOMER' AND agency_id = ? LIMIT 1",
+      [Number(existingCustomerId), agencyId]
     );
 
     if (!existingCustomerRows.length) {
@@ -342,8 +345,9 @@ export const createCustomerTransfer = async (req, res) => {
         deposit_liability,
         reason,
         is_regulator_received,
-        status
-      ) VALUES (?, NULL, ?, ?, ?, ?, 'PENDING_MANAGER')
+        status,
+        agency_id
+      ) VALUES (?, NULL, ?, ?, ?, ?, 'PENDING_MANAGER', ?)
       `,
       [
         Number(existingCustomerId),
@@ -351,6 +355,7 @@ export const createCustomerTransfer = async (req, res) => {
         parsedDepositLiability,
         String(reason).trim(),
         regulatorReceivedValue,
+        agencyId,
       ]
     );
 
@@ -365,8 +370,9 @@ export const createCustomerTransfer = async (req, res) => {
         existing_customer_id,
         agency_name,
         agency_phone,
-        agency_address
-      ) VALUES (?, ?, ?, ?, ?)
+        agency_address,
+        agency_id
+      ) VALUES (?, ?, ?, ?, ?, ?)
       `,
       [
         transferId,
@@ -374,6 +380,7 @@ export const createCustomerTransfer = async (req, res) => {
         agencyName,
         agencyPhone || null,
         agencyAddress || null,
+        agencyId,
       ]
     );
 
@@ -385,10 +392,10 @@ export const createCustomerTransfer = async (req, res) => {
       await connection.query(
         `
         INSERT INTO stock_transactions
-          (product_id, stock_area_id, type, quantity, isApproved, reference_id, created_by, driver_id, stock_from, is_defective)
-        VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, NULL, NULL, 'default', 0)
+          (product_id, stock_area_id, type, quantity, isApproved, reference_id, created_by, driver_id, stock_from, is_defective, agency_id)
+        VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, NULL, NULL, 'default', 0, ?)
         `,
-        [parsedEmptyProductId, parsedEmptyQty, transferId]
+        [parsedEmptyProductId, parsedEmptyQty, transferId, agencyId]
       );
     }
 
@@ -451,9 +458,11 @@ export const getRecentCustomerTransfers = async (_req, res) => {
       INNER JOIN users old_user ON old_user.id = t.existing_customer_id
       LEFT JOIN users new_user ON new_user.id = t.new_customer_id
       LEFT JOIN customer_transfer_agencies cta ON cta.transfer_id = t.id
+      WHERE t.agency_id = ?
       ORDER BY t.created_at DESC, t.id DESC
       LIMIT 8
-      `
+      `,
+      [req.user.agency_id]
     );
 
     return res.status(200).json({

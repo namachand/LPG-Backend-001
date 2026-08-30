@@ -45,14 +45,15 @@ export const getStockDashboard = async (req, res) => {
           SELECT 1
           FROM stock stk_area
           WHERE stk_area.product_id = p.id
+            AND stk_area.agency_id = ?
             AND stk_area.stock_area_id = ?
         )
       `
       : "";
-    const stockAreaProductParams = stockAreaId ? [stockAreaId] : [];
+    const stockAreaProductParams = stockAreaId ? [req.user.agency_id, stockAreaId] : [];
 
-    const stockSubAreaFilter = stockAreaId ? `WHERE s.stock_area_id = ?` : "";
-    const stockSubAreaParams = stockAreaId ? [stockAreaId] : [];
+    const stockSubAreaFilter = stockAreaId ? `WHERE s.agency_id = ? AND s.stock_area_id = ?` : `WHERE s.agency_id = ?`;
+    const stockSubAreaParams = stockAreaId ? [req.user.agency_id, stockAreaId] : [req.user.agency_id];
 
     const salesDateFilter =
       startDate && endDate
@@ -69,20 +70,22 @@ export const getStockDashboard = async (req, res) => {
         ? [`${startDate} 00:00:00`, `${endDate} 23:59:59`]
         : [];
 
-    const txAreaFilter = stockAreaId ? `AND st.stock_area_id = ?` : "";
-    const txAreaParams = stockAreaId ? [stockAreaId] : [];
+    const txAreaFilter = stockAreaId ? `AND st.agency_id = ? AND st.stock_area_id = ?` : `AND st.agency_id = ?`;
+    const txAreaParams = stockAreaId ? [req.user.agency_id, stockAreaId] : [req.user.agency_id];
 
     const salesAreaFilter = stockAreaId
       ? `
+        AND s.agency_id = ?
         AND EXISTS (
           SELECT 1
           FROM stock stk
           WHERE stk.product_id = p.id
+            AND stk.agency_id = ?
             AND stk.stock_area_id = ?
         )
       `
-      : "";
-    const salesAreaParams = stockAreaId ? [stockAreaId] : [];
+      : "AND s.agency_id = ?";
+    const salesAreaParams = stockAreaId ? [req.user.agency_id, req.user.agency_id, stockAreaId] : [req.user.agency_id];
 
     const [summaryRows] = await connection.query(
       `
@@ -408,8 +411,9 @@ export const getStockAreas = async (req, res) => {
         sa.address,
         sa.manager_id
       FROM stock_areas sa
+      WHERE sa.agency_id = ?
       ORDER BY sa.name ASC
-    `);
+    `, [req.user.agency_id]);
 
     return res.status(200).json({
       success: true,
@@ -562,10 +566,10 @@ export const getOwnerStockItemContext = async (req, res) => {
       `
       SELECT quantity
       FROM stock
-      WHERE product_id = ? AND stock_area_id = ?
+      WHERE product_id = ? AND stock_area_id = ? AND agency_id = ?
       LIMIT 1
       `,
-      [itemId, stockAreaId]
+      [itemId, stockAreaId, req.user.agency_id]
     );
 
     return res.status(200).json({
@@ -793,8 +797,8 @@ export const upsertOwnerStockEntry = async (req, res) => {
     }
 
     const [[existingArea]] = await connection.query(
-      `SELECT id FROM stock_areas WHERE id = ? LIMIT 1`,
-      [stockAreaId]
+      `SELECT id FROM stock_areas WHERE id = ? AND agency_id = ? LIMIT 1`,
+      [stockAreaId, req.user.agency_id]
     );
     if (!existingArea) {
       await connection.rollback();
@@ -808,11 +812,11 @@ export const upsertOwnerStockEntry = async (req, res) => {
 
     await connection.query(
       `
-      INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity)
-      VALUES (?, ?, ?, 0, 0, 0)
+      INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity, agency_id)
+      VALUES (?, ?, ?, 0, 0, 0, ?)
       ON DUPLICATE KEY UPDATE quantity = VALUES(quantity), updated_at = CURRENT_TIMESTAMP
       `,
-      [itemId, stockAreaId, Math.floor(quantity)]
+      [itemId, stockAreaId, Math.floor(quantity), req.user.agency_id]
     );
 
     await connection.query(
@@ -827,10 +831,11 @@ export const upsertOwnerStockEntry = async (req, res) => {
         created_by,
         stock_from,
         is_defective,
-        batch_no
-      ) VALUES (?, ?, 'NEW_VALUE', ?, 1, NULL, NULL, 'default', 0, ?)
+        batch_no,
+        agency_id
+      ) VALUES (?, ?, 'NEW_VALUE', ?, 1, NULL, NULL, 'default', 0, ?, ?)
       `,
-      [itemId, stockAreaId, Math.floor(quantity), note || null]
+      [itemId, stockAreaId, Math.floor(quantity), note || null, req.user.agency_id]
     );
 
     await connection.commit();

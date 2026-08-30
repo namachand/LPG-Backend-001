@@ -19,36 +19,36 @@ const TXN_VOID = 2;
 // --- Small stock helpers (replicated from godownController's private helpers so
 // this parallel flow does not have to modify the existing controller). ---
 
-const getAvailableEmptyForUpdate = async (connection, productId) => {
+const getAvailableEmptyForUpdate = async (connection, productId, agencyId) => {
   const [rows] = await connection.execute(
     `
     SELECT COALESCE(SUM(empty_quantity), 0) AS total
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     FOR UPDATE
     `,
-    [Number(productId)]
+    [Number(productId), agencyId]
   );
 
   return Number(rows[0]?.total || 0);
 };
 
-const getAvailableDefectiveForUpdate = async (connection, productId) => {
+const getAvailableDefectiveForUpdate = async (connection, productId, agencyId) => {
   const [rows] = await connection.execute(
     `
     SELECT COALESCE(SUM(defective_quantity), 0) AS total
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     FOR UPDATE
     `,
-    [Number(productId)]
+    [Number(productId), agencyId]
   );
 
   return Number(rows[0]?.total || 0);
 };
 
 // Reserve (deduct) empty cylinders from the godown's available empty stock.
-const consumeEmptyStock = async (connection, productId, requiredQty) => {
+const consumeEmptyStock = async (connection, productId, requiredQty, agencyId) => {
   let remaining = Number(requiredQty || 0);
 
   if (remaining <= 0) {
@@ -59,11 +59,11 @@ const consumeEmptyStock = async (connection, productId, requiredQty) => {
     `
     SELECT id, COALESCE(empty_quantity, 0) AS metric_qty
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), agencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   for (const row of rows) {
@@ -94,7 +94,7 @@ const consumeEmptyStock = async (connection, productId, requiredQty) => {
 };
 
 // Reserve (deduct) defective cylinders from the godown's available defective stock.
-const consumeDefectiveStock = async (connection, productId, requiredQty) => {
+const consumeDefectiveStock = async (connection, productId, requiredQty, agencyId) => {
   let remaining = Number(requiredQty || 0);
 
   if (remaining <= 0) {
@@ -105,11 +105,11 @@ const consumeDefectiveStock = async (connection, productId, requiredQty) => {
     `
     SELECT id, COALESCE(defective_quantity, 0) AS metric_qty
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), agencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   for (const row of rows) {
@@ -141,7 +141,7 @@ const consumeDefectiveStock = async (connection, productId, requiredQty) => {
 
 // Restore empty cylinders back into godown empty stock (used when a load is
 // rejected). Mirrors the add-back path in godownController.
-const restoreEmptyStock = async (connection, productId, qty) => {
+const restoreEmptyStock = async (connection, productId, qty, agencyId) => {
   const quantity = Number(qty || 0);
 
   if (!quantity || quantity <= 0) {
@@ -152,12 +152,12 @@ const restoreEmptyStock = async (connection, productId, qty) => {
     `
     SELECT id
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     LIMIT 1
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), agencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   if (rows.length) {
@@ -175,14 +175,14 @@ const restoreEmptyStock = async (connection, productId, qty) => {
 
   await connection.execute(
     `
-    INSERT INTO stock (product_id, stock_area_id, quantity, empty_quantity, defective_quantity)
-    VALUES (?, NULL, 0, ?, 0)
+    INSERT INTO stock (product_id, stock_area_id, quantity, empty_quantity, defective_quantity, agency_id)
+    VALUES (?, NULL, 0, ?, 0, ?)
     `,
-    [Number(productId), quantity]
+    [Number(productId), quantity, agencyId]
   );
 };
 
-const restoreDefectiveStock = async (connection, productId, qty) => {
+const restoreDefectiveStock = async (connection, productId, qty, agencyId) => {
   const quantity = Number(qty || 0);
 
   if (!quantity || quantity <= 0) {
@@ -193,12 +193,12 @@ const restoreDefectiveStock = async (connection, productId, qty) => {
     `
     SELECT id
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     LIMIT 1
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID]
+    [Number(productId), agencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   if (rows.length) {
@@ -216,10 +216,10 @@ const restoreDefectiveStock = async (connection, productId, qty) => {
 
   await connection.execute(
     `
-    INSERT INTO stock (product_id, stock_area_id, quantity, empty_quantity, defective_quantity)
-    VALUES (?, NULL, 0, 0, ?)
+    INSERT INTO stock (product_id, stock_area_id, quantity, empty_quantity, defective_quantity, agency_id)
+    VALUES (?, NULL, 0, 0, ?, ?)
     `,
-    [Number(productId), quantity]
+    [Number(productId), quantity, agencyId]
   );
 };
 
@@ -238,6 +238,7 @@ export const ensureEmptyCylinderLoadTables = async (connection) => {
       id BIGINT NOT NULL AUTO_INCREMENT,
       assigned_by INT NULL,
       purchase_manager_id INT NOT NULL,
+      agency_id INT NOT NULL DEFAULT 1,
       vehicle_number VARCHAR(50) NULL,
       erv_number VARCHAR(50) NULL,
       status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
@@ -285,6 +286,16 @@ export const ensureEmptyCylinderLoadTables = async (connection) => {
 
   try {
     await connection.execute(
+      `ALTER TABLE empty_cylinder_loads ADD COLUMN agency_id INT NOT NULL DEFAULT 1 AFTER purchase_manager_id`
+    );
+  } catch (error) {
+    if (error?.code !== "ER_DUP_FIELDNAME") {
+      throw error;
+    }
+  }
+
+  try {
+    await connection.execute(
       `ALTER TABLE empty_cylinder_load_items ADD COLUMN defective_quantity INT NOT NULL DEFAULT 0 AFTER quantity`
     );
   } catch (error) {
@@ -313,9 +324,10 @@ export const getPurchaseManagers = async (req, res) => {
       `
       SELECT id, name, phone
       FROM users
-      WHERE role = 'PURCHASE_MANAGER'
+      WHERE role = 'PURCHASE_MANAGER' AND agency_id = ?
       ORDER BY name ASC
-      `
+      `,
+      [req.user.agency_id]
     );
 
     return res.json({
@@ -377,10 +389,12 @@ export const createEmptyCylinderLoad = async (req, res) => {
     await ensureEmptyCylinderLoadTables(connection);
     await connection.beginTransaction();
 
+    const agencyId = req.user.agency_id;
+
     // Confirm the assignee is actually a purchase manager.
     const [pmRows] = await connection.execute(
-      `SELECT id FROM users WHERE id = ? AND role = 'PURCHASE_MANAGER' LIMIT 1`,
-      [numericPmId]
+      `SELECT id FROM users WHERE id = ? AND role = 'PURCHASE_MANAGER' AND agency_id = ? LIMIT 1`,
+      [numericPmId, agencyId]
     );
 
     if (!pmRows.length) {
@@ -410,7 +424,8 @@ export const createEmptyCylinderLoad = async (req, res) => {
 
       const availableEmpty = await getAvailableEmptyForUpdate(
         connection,
-        item.product_id
+        item.product_id,
+        agencyId
       );
 
       if (item.quantity > availableEmpty) {
@@ -423,7 +438,8 @@ export const createEmptyCylinderLoad = async (req, res) => {
 
       const availableDefective = await getAvailableDefectiveForUpdate(
         connection,
-        item.product_id
+        item.product_id,
+        agencyId
       );
 
       if (item.defective_quantity > availableDefective) {
@@ -441,10 +457,10 @@ export const createEmptyCylinderLoad = async (req, res) => {
     const [loadResult] = await connection.execute(
       `
       INSERT INTO empty_cylinder_loads
-      (assigned_by, purchase_manager_id, vehicle_number, erv_number, status, dispatched_at, created_at)
-      VALUES (?, ?, ?, ?, 'PENDING', NOW(), NOW())
+      (assigned_by, purchase_manager_id, agency_id, vehicle_number, erv_number, status, dispatched_at, created_at)
+      VALUES (?, ?, ?, ?, ?, 'PENDING', NOW(), NOW())
       `,
-      [createdBy, numericPmId, vehicle_number || null, erv_number || null]
+      [createdBy, numericPmId, agencyId, vehicle_number || null, erv_number || null]
     );
 
     const loadId = loadResult.insertId;
@@ -455,31 +471,31 @@ export const createEmptyCylinderLoad = async (req, res) => {
 
       if (item.quantity > 0) {
         // Reserve the empties out of available godown stock.
-        await consumeEmptyStock(connection, item.product_id, item.quantity);
+        await consumeEmptyStock(connection, item.product_id, item.quantity, agencyId);
 
         // Pending stock movement — finalized on accept, voided on reject.
         const [txnResult] = await connection.execute(
           `
           INSERT INTO stock_transactions
-          (product_id, stock_area_id, type, quantity, isApproved, reference_id, driver_id, created_by, is_defective, stock_from)
-          VALUES (?, NULL, 'EMPTY_RETURN', ?, ?, ?, NULL, ?, 0, 'godown')
+          (product_id, stock_area_id, type, quantity, isApproved, reference_id, driver_id, created_by, is_defective, stock_from, agency_id)
+          VALUES (?, NULL, 'EMPTY_RETURN', ?, ?, ?, NULL, ?, 0, 'godown', ?)
           `,
-          [item.product_id, item.quantity, TXN_PENDING, loadId, createdBy]
+          [item.product_id, item.quantity, TXN_PENDING, loadId, createdBy, agencyId]
         );
         txnId = txnResult.insertId;
       }
 
       if (item.defective_quantity > 0) {
         // Reserve the defectives out of available godown stock.
-        await consumeDefectiveStock(connection, item.product_id, item.defective_quantity);
+        await consumeDefectiveStock(connection, item.product_id, item.defective_quantity, agencyId);
 
         const [defTxnResult] = await connection.execute(
           `
           INSERT INTO stock_transactions
-          (product_id, stock_area_id, type, quantity, isApproved, reference_id, driver_id, created_by, is_defective, stock_from)
-          VALUES (?, NULL, 'EMPTY_RETURN', ?, ?, ?, NULL, ?, 1, 'godown')
+          (product_id, stock_area_id, type, quantity, isApproved, reference_id, driver_id, created_by, is_defective, stock_from, agency_id)
+          VALUES (?, NULL, 'EMPTY_RETURN', ?, ?, ?, NULL, ?, 1, 'godown', ?)
           `,
-          [item.product_id, item.defective_quantity, TXN_PENDING, loadId, createdBy]
+          [item.product_id, item.defective_quantity, TXN_PENDING, loadId, createdBy, agencyId]
         );
         defTxnId = defTxnResult.insertId;
       }
@@ -548,8 +564,8 @@ export const getEmptyCylinderLoads = async (req, res) => {
     const purchaseManagerId = Number(req.query.purchaseManagerId);
     const status = String(req.query.status || "").toUpperCase();
 
-    const filters = [];
-    const params = [];
+    const filters = [`ecl.agency_id = ?`];
+    const params = [req.user.agency_id];
 
     if (purchaseManagerId && !Number.isNaN(purchaseManagerId)) {
       filters.push("ecl.purchase_manager_id = ?");
@@ -670,10 +686,10 @@ export const getEmptyCylinderLoadDetail = async (req, res) => {
       FROM empty_cylinder_loads ecl
       LEFT JOIN users assigner ON assigner.id = ecl.assigned_by
       LEFT JOIN users pm ON pm.id = ecl.purchase_manager_id
-      WHERE ecl.id = ?
+      WHERE ecl.id = ? AND ecl.agency_id = ?
       LIMIT 1
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
     if (!loadRows.length) {
@@ -780,8 +796,8 @@ export const acceptEmptyCylinderLoad = async (req, res) => {
     await connection.beginTransaction();
 
     const [rows] = await connection.execute(
-      `SELECT id, status FROM empty_cylinder_loads WHERE id = ? LIMIT 1 FOR UPDATE`,
-      [loadId]
+      `SELECT id, status FROM empty_cylinder_loads WHERE id = ? AND agency_id = ? LIMIT 1 FOR UPDATE`,
+      [loadId, req.user.agency_id]
     );
 
     if (!rows.length) {
@@ -862,8 +878,8 @@ export const rejectEmptyCylinderLoad = async (req, res) => {
     await connection.beginTransaction();
 
     const [rows] = await connection.execute(
-      `SELECT id, status FROM empty_cylinder_loads WHERE id = ? LIMIT 1 FOR UPDATE`,
-      [loadId]
+      `SELECT id, status FROM empty_cylinder_loads WHERE id = ? AND agency_id = ? LIMIT 1 FOR UPDATE`,
+      [loadId, req.user.agency_id]
     );
 
     if (!rows.length) {
@@ -892,14 +908,16 @@ export const rejectEmptyCylinderLoad = async (req, res) => {
         await restoreEmptyStock(
           connection,
           Number(item.product_id),
-          Number(item.quantity || 0)
+          Number(item.quantity || 0),
+          req.user.agency_id
         );
       }
       if (item.defective_quantity > 0) {
         await restoreDefectiveStock(
           connection,
           Number(item.product_id),
-          Number(item.defective_quantity || 0)
+          Number(item.defective_quantity || 0),
+          req.user.agency_id
         );
       }
     }
@@ -947,11 +965,12 @@ export const rejectEmptyCylinderLoad = async (req, res) => {
 export const completeEmptyLoadInTransaction = async (
   connection,
   loadId,
-  invoiceUrl = null
+  invoiceUrl = null,
+  agencyId
 ) => {
   const [rows] = await connection.execute(
-    `SELECT id, status FROM empty_cylinder_loads WHERE id = ? LIMIT 1 FOR UPDATE`,
-    [Number(loadId)]
+    `SELECT id, status FROM empty_cylinder_loads WHERE id = ? AND agency_id = ? LIMIT 1 FOR UPDATE`,
+    [Number(loadId), agencyId]
   );
 
   if (!rows.length) {
@@ -999,7 +1018,8 @@ export const completeEmptyCylinderLoad = async (req, res) => {
     const completion = await completeEmptyLoadInTransaction(
       connection,
       loadId,
-      invoiceUrl
+      invoiceUrl,
+      req.user.agency_id
     );
 
     if (!completion.ok) {

@@ -87,29 +87,30 @@ const formatTripStatus = (status) => {
   }
 };
 
-const getFirstPurchaseManager = async (connection) => {
+const getFirstPurchaseManager = async (connection, agencyId) => {
   const [rows] = await connection.query(
     `
     SELECT id, name, company_name, phone
     FROM users
-    WHERE role = 'PURCHASE_MANAGER'
+    WHERE role = 'PURCHASE_MANAGER' AND agency_id = ?
     ORDER BY id ASC
     LIMIT 1
     `,
+    [agencyId]
   );
 
   return rows[0] || null;
 };
 
-const getDefaultStockArea = async (connection) => {
+const getDefaultStockArea = async (connection, agencyId) => {
   const [preferredRows] = await connection.query(
     `
     SELECT id, name
     FROM stock_areas
-    WHERE id = ?
+    WHERE id = ? AND agency_id = ?
     LIMIT 1
     `,
-    [DEFAULT_PURCHASE_STOCK_AREA_ID],
+    [DEFAULT_PURCHASE_STOCK_AREA_ID, agencyId],
   );
 
   if (preferredRows.length) {
@@ -120,9 +121,11 @@ const getDefaultStockArea = async (connection) => {
     `
     SELECT id, name
     FROM stock_areas
+    WHERE agency_id = ?
     ORDER BY id ASC
     LIMIT 1
     `,
+    [agencyId]
   );
 
   return rows[0] || null;
@@ -138,7 +141,7 @@ const derivePurchaseLoadType = (productRows) => {
   return "MIXED";
 };
 
-const getTripOverview = async (connection, tripId) => {
+const getTripOverview = async (connection, tripId, agencyId) => {
   const hasEndOdometerReading = await hasPurchaseTripColumn(
     connection,
     "end_odometer_reading",
@@ -173,9 +176,9 @@ const getTripOverview = async (connection, tripId) => {
     FROM purchase_trips pt
     JOIN users u ON u.id = pt.purchase_manager_id
     LEFT JOIN stock_areas sa ON sa.id = pt.stock_area_id
-    WHERE pt.id = ?
+    WHERE pt.id = ? AND pt.agency_id = ?
     `,
-    [tripId],
+    [tripId, agencyId],
   );
 
   if (!tripRows.length) {
@@ -326,8 +329,8 @@ export const getPurchaseBootstrap = async (req, res) => {
 
   try {
     const [manager, stockArea, productRows] = await Promise.all([
-      getFirstPurchaseManager(connection),
-      getDefaultStockArea(connection),
+      getFirstPurchaseManager(connection, req.user.agency_id),
+      getDefaultStockArea(connection, req.user.agency_id),
       connection.query(
         `
         SELECT
@@ -414,7 +417,7 @@ export const getPurchaseDashboard = async (req, res) => {
           SELECT COALESCE(COUNT(*), 0)
           FROM purchase_loads pl
           JOIN purchase_trips pt ON pt.id = pl.trip_id
-          WHERE pt.purchase_manager_id = ?
+          WHERE pt.purchase_manager_id = ? AND pt.agency_id = ?
             AND pl.status = 'PENDING'
         ) AS pendingLoadApproval,
         (
@@ -426,13 +429,13 @@ export const getPurchaseDashboard = async (req, res) => {
         (
           SELECT COALESCE(COUNT(*), 0)
           FROM purchase_trips pt
-          WHERE pt.purchase_manager_id = ?
+          WHERE pt.purchase_manager_id = ? AND pt.agency_id = ?
             AND pt.status IN ('APPROVED', 'COMPLETED')
             AND YEAR(pt.started_at) = YEAR(CURDATE())
             AND MONTH(pt.started_at) = MONTH(CURDATE())
         ) AS completedTrips
       `,
-      [userId, userId, userId],
+      [userId, req.user.agency_id, userId, userId, req.user.agency_id],
     );
 
     const [recentRows] = await connection.query(
@@ -455,27 +458,27 @@ export const getPurchaseDashboard = async (req, res) => {
             AND (pt.ended_at IS NULL OR e.created_at <= pt.ended_at)
         ) AS expenses_count
       FROM purchase_trips pt
-      WHERE pt.purchase_manager_id = ?
+      WHERE pt.purchase_manager_id = ? AND pt.agency_id = ?
       ORDER BY pt.started_at DESC, pt.id DESC
       LIMIT 10
       `,
-      [userId],
+      [userId, req.user.agency_id],
     );
 
     const [activeRows] = await connection.query(
       `
       SELECT id
       FROM purchase_trips
-      WHERE purchase_manager_id = ?
+      WHERE purchase_manager_id = ? AND agency_id = ?
         AND status = 'IN_PROGRESS'
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [userId],
+      [userId, req.user.agency_id],
     );
 
     const activeTrip = activeRows.length
-      ? await getTripOverview(connection, activeRows[0].id)
+      ? await getTripOverview(connection, activeRows[0].id, req.user.agency_id)
       : null;
 
     return res.json({
@@ -526,7 +529,7 @@ export const startPurchaseTrip = async (req, res) => {
     if (stockAreaId) {
       parsedStockAreaId = Number(stockAreaId);
     } else {
-      const defaultArea = await getDefaultStockArea(connection);
+      const defaultArea = await getDefaultStockArea(connection, req.user.agency_id);
       if (defaultArea) {
         parsedStockAreaId = defaultArea.id;
       }
@@ -547,34 +550,34 @@ export const startPurchaseTrip = async (req, res) => {
       `
       SELECT id
       FROM purchase_trips
-      WHERE purchase_manager_id = ?
+      WHERE purchase_manager_id = ? AND agency_id = ?
         AND status = 'IN_PROGRESS'
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [parsedUserId],
+      [parsedUserId, req.user.agency_id],
     );
 
     if (existingRows.length) {
       return res.status(409).json({
         success: false,
         message: "An active purchase trip already exists",
-        data: await getTripOverview(connection, existingRows[0].id),
+        data: await getTripOverview(connection, existingRows[0].id, req.user.agency_id),
       });
     }
 
     const [result] = await connection.query(
       `
-      INSERT INTO purchase_trips (purchase_manager_id, stock_area_id, odometer_reading, odometer_image_url, status)
-      VALUES (?, ?, ?, ?, 'IN_PROGRESS')
+      INSERT INTO purchase_trips (purchase_manager_id, stock_area_id, odometer_reading, odometer_image_url, status, agency_id)
+      VALUES (?, ?, ?, ?, 'IN_PROGRESS', ?)
       `,
-      [parsedUserId, parsedStockAreaId, parsedOdometer, odometerImageUrl],
+      [parsedUserId, parsedStockAreaId, parsedOdometer, odometerImageUrl, req.user.agency_id],
     );
 
     return res.status(201).json({
       success: true,
       message: "Purchase trip started successfully",
-      data: await getTripOverview(connection, result.insertId),
+      data: await getTripOverview(connection, result.insertId, req.user.agency_id),
     });
   } catch (error) {
     console.error("startPurchaseTrip error:", error);
@@ -633,16 +636,16 @@ export const startEmptyCylinderTrip = async (req, res) => {
       `
       SELECT id
       FROM purchase_trips
-      WHERE purchase_manager_id = ?
+      WHERE purchase_manager_id = ? AND agency_id = ?
         AND status = 'IN_PROGRESS'
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [parsedUserId]
+      [parsedUserId, req.user.agency_id]
     );
 
     if (existingRows.length) {
-      const overview = await getTripOverview(connection, existingRows[0].id);
+      const overview = await getTripOverview(connection, existingRows[0].id, req.user.agency_id);
       await connection.rollback();
       return res.status(409).json({
         success: false,
@@ -699,7 +702,7 @@ export const startEmptyCylinderTrip = async (req, res) => {
     );
 
     if (duplicateRows.length) {
-      const overview = await getTripOverview(connection, duplicateRows[0].id);
+      const overview = await getTripOverview(connection, duplicateRows[0].id, req.user.agency_id);
       await connection.rollback();
       return res.status(409).json({
         success: false,
@@ -711,8 +714,8 @@ export const startEmptyCylinderTrip = async (req, res) => {
     const [result] = await connection.query(
       `
       INSERT INTO purchase_trips
-        (purchase_manager_id, stock_area_id, odometer_reading, odometer_image_url, status, trip_type, empty_load_id)
-      VALUES (?, ?, ?, ?, 'IN_PROGRESS', 'EMPTY', ?)
+        (purchase_manager_id, stock_area_id, odometer_reading, odometer_image_url, status, trip_type, empty_load_id, agency_id)
+      VALUES (?, ?, ?, ?, 'IN_PROGRESS', 'EMPTY', ?, ?)
       `,
       [
         parsedUserId,
@@ -720,6 +723,7 @@ export const startEmptyCylinderTrip = async (req, res) => {
         parsedOdometer,
         odometerImageUrl,
         parsedLoadId,
+        req.user.agency_id,
       ]
     );
 
@@ -728,7 +732,7 @@ export const startEmptyCylinderTrip = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "Empty cylinder trip started successfully",
-      data: await getTripOverview(connection, result.insertId),
+      data: await getTripOverview(connection, result.insertId, req.user.agency_id),
     });
   } catch (error) {
     await connection.rollback();
@@ -760,17 +764,17 @@ export const getActivePurchaseTrip = async (req, res) => {
       `
       SELECT id
       FROM purchase_trips
-      WHERE purchase_manager_id = ?
+      WHERE purchase_manager_id = ? AND agency_id = ?
         AND status = 'IN_PROGRESS'
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [userId],
+      [userId, req.user.agency_id],
     );
 
     return res.json({
       success: true,
-      data: rows.length ? await getTripOverview(connection, rows[0].id) : null,
+      data: rows.length ? await getTripOverview(connection, rows[0].id, req.user.agency_id) : null,
     });
   } catch (error) {
     console.error("getActivePurchaseTrip error:", error);
@@ -806,17 +810,17 @@ export const getEmptyCylinderLoadTrip = async (req, res) => {
       `
       SELECT id
       FROM purchase_trips
-      WHERE empty_load_id = ?
+      WHERE empty_load_id = ? AND agency_id = ?
         AND status <> 'CANCELLED'
       ORDER BY started_at DESC, id DESC
       LIMIT 1
       `,
-      [loadId]
+      [loadId, req.user.agency_id]
     );
 
     return res.json({
       success: true,
-      data: rows.length ? await getTripOverview(connection, rows[0].id) : null,
+      data: rows.length ? await getTripOverview(connection, rows[0].id, req.user.agency_id) : null,
     });
   } catch (error) {
     console.error("getEmptyCylinderLoadTrip error:", error);
@@ -898,10 +902,10 @@ export const getPurchaseTrips = async (req, res) => {
             AND (pt.ended_at IS NULL OR e.created_at <= pt.ended_at)
         ) AS total_expenses
       FROM purchase_trips pt
-      WHERE pt.purchase_manager_id = ?
+      WHERE pt.purchase_manager_id = ? AND pt.agency_id = ?
       ORDER BY pt.started_at DESC, pt.id DESC
       `,
-      [userId],
+      [userId, req.user.agency_id],
     );
 
     return res.json({
@@ -966,11 +970,11 @@ export const getPurchaseLoads = async (req, res) => {
       FROM purchase_loads pl
       JOIN purchase_trips pt ON pt.id = pl.trip_id
       LEFT JOIN purchase_load_items pli ON pli.load_id = pl.id
-      WHERE pt.purchase_manager_id = ?
+      WHERE pt.purchase_manager_id = ? AND pt.agency_id = ?
       GROUP BY pl.id, pl.trip_id, pl.product_type, pl.invoice_url, pl.invoice_source, pl.invoice_number, pl.total_quantity, pl.status, pl.created_at, pt.status
       ORDER BY pl.created_at DESC, pl.id DESC
       `,
-      [userId],
+      [userId, req.user.agency_id],
     );
 
     return res.json({
@@ -1037,10 +1041,10 @@ export const getPurchaseLoadDetail = async (req, res) => {
       LEFT JOIN purchase_load_items pli ON pli.load_id = pl.id
       LEFT JOIN products p ON p.id = pli.product_id
       LEFT JOIN categories c ON c.id = p.category_id
-      WHERE pl.id = ?
+      WHERE pl.id = ? AND pt.agency_id = ?
       ORDER BY pli.id ASC
       `,
-      [loadId],
+      [loadId, req.user.agency_id],
     );
 
     if (!rows.length) {
@@ -1134,9 +1138,9 @@ export const createPurchaseLoad = async (req, res) => {
       `
       SELECT id, status, stock_area_id, trip_type
       FROM purchase_trips
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       `,
-      [parsedTripId],
+      [parsedTripId, req.user.agency_id],
     );
 
     if (!tripRows.length) {
@@ -1165,7 +1169,7 @@ export const createPurchaseLoad = async (req, res) => {
       if (tripRows[0].stock_area_id) {
         effectiveStockAreaId = Number(tripRows[0].stock_area_id);
       } else {
-        const defaultArea = await getDefaultStockArea(connection);
+        const defaultArea = await getDefaultStockArea(connection, req.user.agency_id);
         effectiveStockAreaId = defaultArea ? defaultArea.id : null;
       }
     }
@@ -1217,8 +1221,8 @@ export const createPurchaseLoad = async (req, res) => {
 
     const [loadResult] = await connection.query(
       `
-      INSERT INTO purchase_loads (trip_id, created_by, stock_area_id, product_type, total_quantity, status)
-      VALUES (?, ?, ?, ?, ?, 'DRAFT')
+      INSERT INTO purchase_loads (trip_id, created_by, stock_area_id, product_type, total_quantity, status, agency_id)
+      VALUES (?, ?, ?, ?, ?, 'DRAFT', ?)
       `,
       [
         parsedTripId,
@@ -1226,6 +1230,7 @@ export const createPurchaseLoad = async (req, res) => {
         effectiveStockAreaId,
         loadProductType,
         totalQuantity,
+        req.user.agency_id,
       ],
     );
 
@@ -1251,9 +1256,10 @@ export const createPurchaseLoad = async (req, res) => {
             isApproved,
             reference_id,
             created_by,
-            stock_from
+            stock_from,
+            agency_id
           )
-          VALUES (?, ?, 'PURCHASE', ?, 0, ?, ?, 'depot')
+          VALUES (?, ?, 'PURCHASE', ?, 0, ?, ?, 'depot', ?)
           `,
           [
             item.productId,
@@ -1261,16 +1267,17 @@ export const createPurchaseLoad = async (req, res) => {
             item.quantity,
             loadId,
             parsedCreatedBy,
+            req.user.agency_id,
           ],
         );
 
         await connection.query(
           `
-          INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity)
-          VALUES (?, ?, 0, 0, 0, 0)
+          INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity, agency_id)
+          VALUES (?, ?, 0, 0, 0, 0, ?)
           ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
           `,
-          [item.productId, effectiveStockAreaId],
+          [item.productId, effectiveStockAreaId, req.user.agency_id],
         );
       }
     }
@@ -1280,7 +1287,7 @@ export const createPurchaseLoad = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "Purchase load created successfully",
-      data: await getPurchaseLoadDetailData(connection, loadId),
+      data: await getPurchaseLoadDetailData(connection, loadId, req.user.agency_id),
     });
   } catch (error) {
     await connection.rollback();
@@ -1369,7 +1376,7 @@ export const updatePurchaseLoad = async (req, res) => {
       } else if (loadRows[0].stock_area_id) {
         effectiveStockAreaId = Number(loadRows[0].stock_area_id);
       } else {
-        const defaultArea = await getDefaultStockArea(connection);
+        const defaultArea = await getDefaultStockArea(connection, req.user.agency_id);
         effectiveStockAreaId = defaultArea ? defaultArea.id : null;
       }
     }
@@ -1379,10 +1386,10 @@ export const updatePurchaseLoad = async (req, res) => {
         `
         SELECT id
         FROM stock_areas
-        WHERE id = ?
+        WHERE id = ? AND agency_id = ?
         LIMIT 1
         `,
-        [effectiveStockAreaId],
+        [effectiveStockAreaId, req.user.agency_id],
       );
 
       if (!stockAreaRows.length) {
@@ -1466,9 +1473,10 @@ export const updatePurchaseLoad = async (req, res) => {
             isApproved,
             reference_id,
             created_by,
-            stock_from
+            stock_from,
+            agency_id
           )
-          VALUES (?, ?, 'PURCHASE', ?, 0, ?, ?, 'depot')
+          VALUES (?, ?, 'PURCHASE', ?, 0, ?, ?, 'depot', ?)
           `,
           [
             item.productId,
@@ -1476,16 +1484,17 @@ export const updatePurchaseLoad = async (req, res) => {
             item.quantity,
             loadId,
             Number(loadRows[0].created_by),
+            req.user.agency_id,
           ],
         );
 
         await connection.query(
           `
-          INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity)
-          VALUES (?, ?, 0, 0, 0, 0)
+          INSERT INTO stock (product_id, stock_area_id, quantity, quantity_return, empty_quantity, defective_quantity, agency_id)
+          VALUES (?, ?, 0, 0, 0, 0, ?)
           ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
           `,
-          [item.productId, effectiveStockAreaId],
+          [item.productId, effectiveStockAreaId, req.user.agency_id],
         );
       }
     }
@@ -1495,7 +1504,7 @@ export const updatePurchaseLoad = async (req, res) => {
     return res.json({
       success: true,
       message: "Purchase load updated successfully",
-      data: await getPurchaseLoadDetailData(connection, loadId),
+      data: await getPurchaseLoadDetailData(connection, loadId, req.user.agency_id),
     });
   } catch (error) {
     await connection.rollback();
@@ -1510,7 +1519,7 @@ export const updatePurchaseLoad = async (req, res) => {
   }
 };
 
-const getPurchaseLoadDetailData = async (connection, loadId) => {
+const getPurchaseLoadDetailData = async (connection, loadId, agencyId) => {
   const [rows] = await connection.query(
     `
     SELECT
@@ -1534,10 +1543,10 @@ const getPurchaseLoadDetailData = async (connection, loadId) => {
     LEFT JOIN purchase_load_items pli ON pli.load_id = pl.id
     LEFT JOIN products p ON p.id = pli.product_id
     LEFT JOIN categories c ON c.id = p.category_id
-    WHERE pl.id = ?
+    WHERE pl.id = ? AND pt.agency_id = ?
     ORDER BY pli.id ASC
     `,
-    [loadId],
+    [loadId, agencyId],
   );
 
   if (!rows.length) {
@@ -1681,9 +1690,9 @@ export const attachPurchaseLoadInvoice = async (req, res) => {
       SELECT pl.id, pl.status, pt.status AS trip_status
       FROM purchase_loads pl
       JOIN purchase_trips pt ON pt.id = pl.trip_id
-      WHERE pl.id = ?
+      WHERE pl.id = ? AND pt.agency_id = ?
       `,
-      [loadId],
+      [loadId, req.user.agency_id],
     );
 
     if (!rows.length) {
@@ -1762,9 +1771,9 @@ export const cancelPurchaseLoad = async (req, res) => {
       SELECT pl.id, pl.status, pt.status AS trip_status
       FROM purchase_loads pl
       JOIN purchase_trips pt ON pt.id = pl.trip_id
-      WHERE pl.id = ?
+      WHERE pl.id = ? AND pt.agency_id = ?
       `,
-      [loadId],
+      [loadId, req.user.agency_id],
     );
 
     if (!rows.length) {
@@ -1875,9 +1884,9 @@ export const submitPurchaseTrip = async (req, res) => {
       `
       SELECT id, status, trip_type
       FROM purchase_trips
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       `,
-      [tripId],
+      [tripId, req.user.agency_id],
     );
 
     if (!tripRows.length) {
@@ -1912,8 +1921,8 @@ export const submitPurchaseTrip = async (req, res) => {
     // 2. ADD THIS ENTIRE BLOCK: Handle Empty Cylinder Trips
     if (parsedEmptyLoadId) {
       const [emptyLoadRows] = await connection.query(
-        `SELECT id, status FROM empty_cylinder_loads WHERE id = ?`,
-        [parsedEmptyLoadId]
+        `SELECT id, status FROM empty_cylinder_loads WHERE id = ? AND agency_id = ?`,
+        [parsedEmptyLoadId, req.user.agency_id]
       );
       if (!emptyLoadRows.length) {
         await connection.rollback();
@@ -2077,11 +2086,11 @@ export const submitEmptyCylinderTrip = async (req, res) => {
       `
       SELECT id, status, trip_type, empty_load_id, odometer_reading
       FROM purchase_trips
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       LIMIT 1
       FOR UPDATE
       `,
-      [tripId]
+      [tripId, req.user.agency_id]
     );
 
     if (!tripRows.length) {
@@ -2210,17 +2219,17 @@ export const getPurchaseExpenses = async (req, res) => {
         (
           SELECT pt.id
           FROM purchase_trips pt
-          WHERE pt.purchase_manager_id = e.created_by
+          WHERE pt.purchase_manager_id = e.created_by AND pt.agency_id = ?
             AND e.created_at >= pt.started_at
             AND (pt.ended_at IS NULL OR e.created_at <= pt.ended_at)
           ORDER BY pt.started_at DESC
           LIMIT 1
         ) AS trip_id
       FROM expenses e
-      WHERE e.created_by = ?
+      WHERE e.created_by = ? AND e.agency_id = ?
       ORDER BY e.created_at DESC, e.id DESC
       `,
-      [userId],
+      [req.user.agency_id, userId, req.user.agency_id],
     );
 
     return res.json({
@@ -2248,7 +2257,7 @@ export const getPurchaseExpenses = async (req, res) => {
   }
 };
 
-export const syncPurchaseApprovalState = async (connection, loadId) => {
+export const syncPurchaseApprovalState = async (connection, loadId, agencyId) => {
   if (!loadId) {
     return;
   }
@@ -2257,9 +2266,9 @@ export const syncPurchaseApprovalState = async (connection, loadId) => {
     `
     SELECT id, trip_id
     FROM purchase_loads
-    WHERE id = ?
+    WHERE id = ? AND agency_id = ?
     `,
-    [loadId],
+    [loadId, agencyId],
   );
 
   if (!loadRows.length) {

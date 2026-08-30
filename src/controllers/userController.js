@@ -18,10 +18,10 @@ export const getUserSettings = async (req, res) => {
         status,
         created_at
       FROM users
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       LIMIT 1
       `,
-      [userId]
+      [userId, req.user.agency_id]
     );
 
     if (!rows.length) {
@@ -69,8 +69,8 @@ export const updateUserSettings = async (req, res) => {
     }
 
     const [existingUsers] = await connection.query(
-      `SELECT id FROM users WHERE id = ? LIMIT 1`,
-      [userId]
+      `SELECT id FROM users WHERE id = ? AND agency_id = ? LIMIT 1`,
+      [userId, req.user.agency_id]
     );
 
     if (!existingUsers.length) {
@@ -112,9 +112,9 @@ export const updateUserSettings = async (req, res) => {
         company_name = ?,
         email = ?,
         phone = ?
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       `,
-      [name, company_name, email, phone, userId]
+      [name, company_name, email, phone, userId, req.user.agency_id]
     );
 
     const [updatedUserRows] = await connection.query(
@@ -129,10 +129,10 @@ export const updateUserSettings = async (req, res) => {
         status,
         created_at
       FROM users
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       LIMIT 1
       `,
-      [userId]
+      [userId, req.user.agency_id]
     );
 
     return res.status(200).json({

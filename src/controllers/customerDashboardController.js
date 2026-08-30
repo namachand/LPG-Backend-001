@@ -16,8 +16,9 @@ export const searchCustomersDashboard = async (req, res) => {
   try {
     const search = String(req.query.search || "").trim();
 
-    const params = [];
-    let whereClause = "WHERE u.role = 'CUSTOMER'";
+    const agencyId = req.user.agency_id;
+    const params = [agencyId];
+    let whereClause = "WHERE u.role = 'CUSTOMER' AND u.agency_id = ?";
 
     if (search) {
       const digits = search.replace(/\D/g, "");
@@ -87,10 +88,10 @@ export const getCustomerDashboardDetails = async (req, res) => {
         COALESCE(a.address, '') AS address
       FROM users u
       LEFT JOIN addresses a ON a.user_id = u.id AND a.is_default = 1
-      WHERE u.id = ? AND u.role = 'CUSTOMER'
+      WHERE u.id = ? AND u.role = 'CUSTOMER' AND u.agency_id = ?
       LIMIT 1
       `,
-      [customerId]
+      [customerId, req.user.agency_id]
     );
 
     if (!customerRows.length) {

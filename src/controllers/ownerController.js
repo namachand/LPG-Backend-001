@@ -97,9 +97,10 @@ export const getOwnerDashboard = async (req, res) => {
       SELECT COALESCE(SUM(total_amount), 0) AS total_sales
       FROM sales
       WHERE status = 'DELIVERED'
+        AND agency_id = ?
         AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const totalSales = Number(salesRows[0]?.total_sales || 0);
@@ -112,9 +113,10 @@ export const getOwnerDashboard = async (req, res) => {
       INNER JOIN sales_items si ON si.sale_id = s.id
       WHERE s.status = 'DELIVERED'
         AND s.driver_id IS NOT NULL
+        AND s.agency_id = ?
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const cylindersDelivered = Number(deliveredRows[0]?.delivered_qty || 0);
@@ -125,9 +127,10 @@ export const getOwnerDashboard = async (req, res) => {
       SELECT COALESCE(SUM(amount), 0) AS pending_amount
       FROM settlement_history
       WHERE status IN ('ASSIGNED', 'PENDING')
+        AND agency_id = ?
         AND DATE(created_at) BETWEEN ? AND ?
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const cashPendingWithDrivers = Number(
@@ -145,8 +148,10 @@ export const getOwnerDashboard = async (req, res) => {
       FROM stock s
       INNER JOIN products p ON p.id = s.product_id
       WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
+        AND s.agency_id = ?
       GROUP BY p.type
       `,
+      [req.user.agency_id]
     );
 
     // Total Approved Purchase Stock across all time (for system stock calculation)
@@ -160,8 +165,10 @@ export const getOwnerDashboard = async (req, res) => {
       WHERE st.type IN ('PURCHASE', 'NEW_VALUE', 'ADJUSTMENT_ADD')
         AND COALESCE(st.isApproved, 0) = 1
         AND COALESCE(st.is_defective, 0) = 0
+        AND st.agency_id = ?
       GROUP BY p.type
-      `
+      `,
+      [req.user.agency_id]
     );
 
     let domesticStock = 0;
@@ -211,18 +218,20 @@ export const getOwnerDashboard = async (req, res) => {
       INNER JOIN users u ON u.id = e.created_by
       WHERE u.role = 'DRIVER'
         AND e.status = 'APPROVED'
+        AND e.agency_id = ?
         AND DATE(e.created_at) BETWEEN ? AND ?
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const [officeExpenseRows] = await db.execute(
       `
       SELECT COALESCE(SUM(amount), 0) AS office_expense
       FROM office_expenses
-      WHERE DATE(created_at) BETWEEN ? AND ?
+      WHERE agency_id = ?
+        AND DATE(created_at) BETWEEN ? AND ?
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const driverExpense = Number(driverExpenseRows[0]?.driver_expense || 0);
@@ -239,9 +248,10 @@ export const getOwnerDashboard = async (req, res) => {
       FROM payments p
       INNER JOIN sales s ON s.id = p.sale_id
       WHERE s.status = 'DELIVERED'
+        AND s.agency_id = ?
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const paymentSummary = {
@@ -265,13 +275,15 @@ export const getOwnerDashboard = async (req, res) => {
       LEFT JOIN sales s
         ON s.driver_id = d.id
        AND s.status = 'DELIVERED'
+       AND s.agency_id = ?
        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       LEFT JOIN payments p ON p.sale_id = s.id
+      WHERE u.agency_id = ?
       GROUP BY d.id, u.name
       HAVING deliveries > 0 OR total_sales > 0
       ORDER BY total_sales DESC
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate, req.user.agency_id],
     );
 
     const driverCollectionBreakdown = driverBreakdownRows.map((row) => ({
@@ -318,12 +330,13 @@ export const getOwnerDashboard = async (req, res) => {
       LEFT JOIN sales_items si ON si.sale_id = s.id
       LEFT JOIN products pr ON pr.id = si.product_id
       LEFT JOIN payments p ON p.sale_id = s.id
-      WHERE DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      WHERE s.agency_id = ?
+        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       GROUP BY s.id, c.name, du.name, s.status, s.total_amount
       ORDER BY COALESCE(s.delivered_at, s.created_at) DESC, s.id DESC
       LIMIT 8
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const recentSales = recentSalesRows.map((row) => {
@@ -442,10 +455,11 @@ export const getOwnerDashboardInsights = async (req, res) => {
              COALESCE(SUM(total_amount), 0) AS sales
       FROM sales
       WHERE status = 'DELIVERED'
+        AND agency_id = ?
         AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
       GROUP BY day
       `,
-      [trendStart, trendEnd],
+      [req.user.agency_id, trendStart, trendEnd],
     );
 
     const [deliveredTrendRows] = await db.execute(
@@ -456,10 +470,11 @@ export const getOwnerDashboardInsights = async (req, res) => {
       INNER JOIN sales_items si ON si.sale_id = s.id
       WHERE s.status = 'DELIVERED'
         AND s.driver_id IS NOT NULL
+        AND s.agency_id = ?
         AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
       GROUP BY day
       `,
-      [trendStart, trendEnd],
+      [req.user.agency_id, trendStart, trendEnd],
     );
 
     const salesByDay = {};
@@ -500,7 +515,9 @@ export const getOwnerDashboardInsights = async (req, res) => {
       FROM stock s
       INNER JOIN products p ON p.id = s.product_id
       WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
+        AND s.agency_id = ?
       `,
+      [req.user.agency_id]
     );
 
     const sr = stockRows[0] || {};
@@ -548,6 +565,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         FROM sales s
         INNER JOIN sales_items si ON si.sale_id = s.id
         WHERE s.status = 'DELIVERED'
+          AND s.agency_id = ?
           AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
         GROUP BY s.driver_id
       ) dc ON dc.driver_id = d.id
@@ -556,6 +574,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         FROM sales s
         INNER JOIN payments p ON p.sale_id = s.id
         WHERE s.status = 'DELIVERED' AND p.type = 'DRIVER' AND p.status = 'SUCCESS'
+          AND s.agency_id = ?
           AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
         GROUP BY s.driver_id
       ) pc ON pc.driver_id = d.id
@@ -563,13 +582,15 @@ export const getOwnerDashboardInsights = async (req, res) => {
         SELECT driver_id, SUM(amount) AS settled
         FROM settlement_history
         WHERE status = 'SETTLED'
+          AND agency_id = ?
           AND DATE(created_at) BETWEEN ? AND ?
         GROUP BY driver_id
       ) st ON st.driver_id = d.id
+      WHERE u.agency_id = ?
       HAVING cylinders > 0 OR collected > 0 OR settled > 0
       ORDER BY collected DESC
       `,
-      [startDate, endDate, startDate, endDate, startDate, endDate],
+      [req.user.agency_id, startDate, endDate, req.user.agency_id, startDate, endDate, req.user.agency_id, startDate, endDate, req.user.agency_id],
     );
 
     const driverCashTracking = driverCashRows.map((row) => {
@@ -600,7 +621,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         FROM settlement_history sh
         INNER JOIN drivers d ON d.id = sh.driver_id
         INNER JOIN users u ON u.id = d.user_id
-        WHERE sh.status = 'SETTLED'
+        WHERE sh.status = 'SETTLED' AND sh.agency_id = ?
         ORDER BY sh.created_at DESC
         LIMIT 6
       )
@@ -609,6 +630,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         SELECT 'STOCK' AS kind, p.name AS actor, NULL AS amount, stt.quantity AS qty, stt.type AS extra, stt.created_at AS ts
         FROM stock_transactions stt
         LEFT JOIN products p ON p.id = stt.product_id
+        WHERE stt.agency_id = ?
         ORDER BY stt.created_at DESC
         LIMIT 6
       )
@@ -618,7 +640,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         FROM sales s
         INNER JOIN drivers d ON d.id = s.driver_id
         INNER JOIN users u ON u.id = d.user_id
-        WHERE s.status = 'DELIVERED' AND s.delivered_at IS NOT NULL
+        WHERE s.status = 'DELIVERED' AND s.delivered_at IS NOT NULL AND s.agency_id = ?
         ORDER BY s.delivered_at DESC
         LIMIT 6
       )
@@ -627,6 +649,7 @@ export const getOwnerDashboardInsights = async (req, res) => {
         SELECT 'EXPENSE' AS kind, u.name AS actor, e.amount AS amount, NULL AS qty, e.category AS extra, e.created_at AS ts
         FROM expenses e
         LEFT JOIN users u ON u.id = e.created_by
+        WHERE e.agency_id = ?
         ORDER BY e.created_at DESC
         LIMIT 6
       )
@@ -635,12 +658,14 @@ export const getOwnerDashboardInsights = async (req, res) => {
         SELECT 'ORDER' AS kind, c.name AS actor, NULL AS amount, NULL AS qty, NULL AS extra, s.created_at AS ts
         FROM sales s
         INNER JOIN users c ON c.id = s.customer_id
+        WHERE s.agency_id = ?
         ORDER BY s.created_at DESC
         LIMIT 6
       )
       ORDER BY ts DESC
       LIMIT 10
       `,
+      [req.user.agency_id, req.user.agency_id, req.user.agency_id, req.user.agency_id, req.user.agency_id]
     );
 
     const formatInr = (value) => Number(value || 0).toLocaleString("en-IN");
@@ -686,11 +711,12 @@ export const getOwnerDashboardInsights = async (req, res) => {
              COALESCE(SUM(amount), 0) AS amount
       FROM expenses
       WHERE status = 'APPROVED'
+        AND agency_id = ?
         AND DATE(created_at) BETWEEN ? AND ?
       GROUP BY COALESCE(NULLIF(TRIM(category), ''), 'Other')
       ORDER BY amount DESC
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const expenseItems = expenseRows.map((row) => ({
@@ -714,13 +740,15 @@ export const getOwnerDashboardInsights = async (req, res) => {
       LEFT JOIN sales s
         ON s.driver_id = d.id
        AND s.status = 'DELIVERED'
+       AND s.agency_id = ?
        AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
+      WHERE u.agency_id = ?
       GROUP BY d.id, u.name
       HAVING deliveries > 0
       ORDER BY deliveries DESC, u.name ASC
       LIMIT 5
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate, req.user.agency_id],
     );
 
     const topDrivers = topDriverRows.map((row) => ({
@@ -831,6 +859,7 @@ export const getOwnerExpensesDashboard = async (req, res) => {
       FROM expenses e
       LEFT JOIN users u ON u.id = e.created_by
       WHERE u.role = 'PURCHASE_MANAGER'
+        AND e.agency_id = ?
 
       UNION ALL
 
@@ -848,10 +877,11 @@ export const getOwnerExpensesDashboard = async (req, res) => {
         'CASHIER_OFFICE' AS source
       FROM office_expenses o
       LEFT JOIN users u ON u.id = o.admin_id
+      WHERE o.agency_id = ?
     `;
 
     const filters = [];
-    const params = [];
+    const params = [req.user.agency_id, req.user.agency_id];
 
     if (search) {
       filters.push(`(
@@ -900,9 +930,10 @@ export const getOwnerExpensesDashboard = async (req, res) => {
       SELECT COALESCE(SUM(total_amount), 0) AS monthlyTotalSales
       FROM sales
       WHERE status = 'DELIVERED'
+        AND agency_id = ?
         AND DATE(COALESCE(delivered_at, created_at)) BETWEEN ? AND ?
       `,
-      [startDate, endDate],
+      [req.user.agency_id, startDate, endDate],
     );
 
     const [countRows] = await connection.query(
@@ -1015,10 +1046,10 @@ export const approveOwnerOfficeExpense = async (req, res) => {
       `
       SELECT id, COALESCE(status, 'PENDING') AS status
       FROM office_expenses
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       LIMIT 1
       `,
-      [expenseId],
+      [expenseId, req.user.agency_id],
     );
 
     if (!rows.length) {
@@ -1040,9 +1071,9 @@ export const approveOwnerOfficeExpense = async (req, res) => {
       UPDATE office_expenses
       SET status = 'APPROVED',
           updated_at = NOW()
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       `,
-      [expenseId],
+      [expenseId, req.user.agency_id],
     );
 
     return res.status(200).json({
@@ -1101,8 +1132,10 @@ export const getOwnerJobAssignmentUsers = async (req, res) => {
       FROM users u
       ${hasProfileTable ? "LEFT JOIN user_job_profiles up ON up.user_id = u.id" : ""}
       WHERE u.role IN ('GODOWN_MANAGER', 'PURCHASE_MANAGER', 'DRIVER', 'CASHIER', 'SUPPORT')
+        AND u.agency_id = ?
       ORDER BY u.created_at DESC, u.id DESC
       `,
+      [req.user.agency_id]
     );
 
     return res.status(200).json({
@@ -1249,8 +1282,9 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           bank_account_holder_name,
           bank_name,
           bank_account_number,
-          bank_ifsc_code
-        ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)
+          bank_ifsc_code,
+          agency_id
+        ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?)
         `,
         [
           String(fullName).trim(),
@@ -1263,6 +1297,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           bankName ? String(bankName).trim() : null,
           bankAccountNumber ? String(bankAccountNumber).trim() : null,
           bankIfscCode ? String(bankIfscCode).trim().toUpperCase() : null,
+          req.user.agency_id,
         ],
       );
     } catch (insertError) {
@@ -1278,8 +1313,9 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           phone,
           password,
           role,
-          status
-        ) VALUES (?, ?, ?, ?, ?, 'ACTIVE')
+          status,
+          agency_id
+        ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)
         `,
         [
           String(fullName).trim(),
@@ -1287,6 +1323,7 @@ export const createOwnerJobAssignmentUser = async (req, res) => {
           normalizedPhone,
           hashedDefaultPassword,
           systemRole,
+          req.user.agency_id,
         ],
       );
     }
@@ -1402,8 +1439,9 @@ export const updateOwnerJobAssignmentUserStatus = async (req, res) => {
       SET status = ?
       WHERE id = ?
         AND role IN ('GODOWN_MANAGER', 'PURCHASE_MANAGER', 'DRIVER', 'CASHIER', 'SUPPORT')
+        AND agency_id = ?
       `,
-      [status, userId],
+      [status, userId, req.user.agency_id],
     );
 
     if (!result.affectedRows) {
@@ -1474,7 +1512,7 @@ export const updateOwnerJobAssignmentUser = async (req, res) => {
         bank_name = COALESCE(?, bank_name),
         bank_account_number = COALESCE(?, bank_account_number),
         bank_ifsc_code = COALESCE(?, bank_ifsc_code)
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
     `;
 
     await connection.query(updateUsersQuery, [
@@ -1519,6 +1557,7 @@ export const updateOwnerJobAssignmentUser = async (req, res) => {
           : null
         : null,
       userId,
+      req.user.agency_id,
     ]);
 
     // Check if profile exists

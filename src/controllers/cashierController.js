@@ -20,19 +20,21 @@ const ensureCashierClosingPettyCashColumn = async (connection) => {
   }
 };
 
-const getLatestClosingBalance = async (connection) => {
+const getLatestClosingBalance = async (connection, agency_id) => {
   const [rows] = await connection.query(
-    `SELECT total_cash FROM cashier_closings ORDER BY id DESC LIMIT 1`,
+    `SELECT total_cash FROM cashier_closings WHERE agency_id = ? ORDER BY id DESC LIMIT 1`,
+    [agency_id]
   );
   return rows.length ? Number(rows[0].total_cash || 0) : null;
 };
 
 // The most recent closing row, including the petty cash carried over from it.
-const getLatestClosing = async (connection) => {
+const getLatestClosing = async (connection, agency_id) => {
   await ensureCashierClosingPettyCashColumn(connection);
 
   const [rows] = await connection.query(
-    `SELECT total_cash, petty_cash, created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`,
+    `SELECT total_cash, petty_cash, created_at FROM cashier_closings WHERE agency_id = ? ORDER BY id DESC LIMIT 1`,
+    [agency_id]
   );
 
   if (!rows.length) {
@@ -47,9 +49,10 @@ const getLatestClosing = async (connection) => {
 };
 
 // created_at of the most recent day-close. Null if the day was never closed.
-const getLastClosingAt = async (connection) => {
+const getLastClosingAt = async (connection, agency_id) => {
   const [rows] = await connection.query(
-    `SELECT created_at FROM cashier_closings ORDER BY id DESC LIMIT 1`,
+    `SELECT created_at FROM cashier_closings WHERE agency_id = ? ORDER BY id DESC LIMIT 1`,
+    [agency_id]
   );
   return rows.length ? rows[0].created_at : null;
 };
@@ -63,6 +66,7 @@ const ensureCashierOpeningsTable = async (connection) => {
       opening_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
       denominations JSON NULL,
       started_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      agency_id INT NOT NULL DEFAULT 1,
       PRIMARY KEY (id),
       KEY idx_cashier_openings_started_at (started_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
@@ -70,10 +74,11 @@ const ensureCashierOpeningsTable = async (connection) => {
 };
 
 // started_at of the most recent Start Day. Null if a day was never started.
-const getLastOpeningAt = async (connection) => {
+const getLastOpeningAt = async (connection, agency_id) => {
   await ensureCashierOpeningsTable(connection);
   const [rows] = await connection.query(
-    `SELECT started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`,
+    `SELECT started_at FROM cashier_openings WHERE agency_id = ? ORDER BY id DESC LIMIT 1`,
+    [agency_id]
   );
   return rows.length ? rows[0].started_at : null;
 };
@@ -85,9 +90,9 @@ const getLastOpeningAt = async (connection) => {
 //     again and only accumulate from the freshly opened day.
 // Null only when the cashier has never closed nor started a day (=> falls back
 // to "today" in makeSinceCloseDateCond).
-const getCurrentDayAnchor = async (connection) => {
-  const closeAt = await getLastClosingAt(connection);
-  const openAt = await getLastOpeningAt(connection);
+const getCurrentDayAnchor = async (connection, agency_id) => {
+  const closeAt = await getLastClosingAt(connection, agency_id);
+  const openAt = await getLastOpeningAt(connection, agency_id);
   if (!closeAt && !openAt) return null;
   if (!closeAt) return openAt;
   if (!openAt) return closeAt;
@@ -100,11 +105,12 @@ const getCurrentDayAnchor = async (connection) => {
 // Returns 0 when the day is closed — i.e. no Start Day has happened since the
 // last Close Day — so figures anchored on this reset to 0 right after a close
 // and pick the opening balance back up only once the next day is started.
-const getCurrentDayOpeningBalance = async (connection) => {
+const getCurrentDayOpeningBalance = async (connection, agency_id) => {
   await ensureCashierOpeningsTable(connection);
-  const closeAt = await getLastClosingAt(connection);
+  const closeAt = await getLastClosingAt(connection, agency_id);
   const [openRows] = await connection.query(
-    `SELECT opening_amount, started_at FROM cashier_openings ORDER BY id DESC LIMIT 1`,
+    `SELECT opening_amount, started_at FROM cashier_openings WHERE agency_id = ? ORDER BY id DESC LIMIT 1`,
+    [agency_id]
   );
   if (!openRows.length) return 0;
   const openAt = openRows[0].started_at;
@@ -238,7 +244,7 @@ const makeSinceCloseDateCond = (anchorAt) => (dateExpr) => {
 //                  expenses (cash) + approved transfer-voucher payouts (cash).
 //                  A transfer voucher is a CASH OUT (deposit refunded to the
 //                  customer), so it lowers the drawer when paid in cash.
-const getCashLedger = async (connection, makeDateCond) => {
+const getCashLedger = async (connection, makeDateCond, agency_id) => {
   await ensureNewConnectionCashierTables(connection);
   await ensureSplitPaymentsColumns(connection);
   await ensureTransferVoucherPaymentColumns(connection);
@@ -279,8 +285,8 @@ const getCashLedger = async (connection, makeDateCond) => {
        COALESCE(SUM(CASE WHEN sh.method = 'UPI'  THEN sh.amount ELSE 0 END), 0) AS upi,
        COUNT(*) AS cnt
      FROM settlement_history sh
-     WHERE sh.status = 'SETTLED' ${drvC.sql}`,
-    drvC.params,
+     WHERE sh.status = 'SETTLED' AND sh.agency_id = ? ${drvC.sql}`,
+    [agency_id, ...drvC.params],
   );
 
   const offC = makeDateCond("p.created_at");
@@ -292,8 +298,8 @@ const getCashLedger = async (connection, makeDateCond) => {
        COUNT(*) AS cnt
      FROM payments p
      INNER JOIN sales s ON s.id = p.sale_id
-     WHERE p.status = 'SUCCESS' AND s.sales_from = 'CASHIER' ${offC.sql}`,
-    offC.params,
+     WHERE p.status = 'SUCCESS' AND s.sales_from = 'CASHIER' AND s.agency_id = ? ${offC.sql}`,
+    [agency_id, ...offC.params],
   );
 
   const prC = makeDateCond("pr.paid_at");
@@ -304,8 +310,8 @@ const getCashLedger = async (connection, makeDateCond) => {
        COALESCE(SUM(CASE WHEN pr.payment_mode = 'BANK_TRANSFER' THEN pr.penalty_amount ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM customer_pr_penalties pr
-     WHERE pr.payment_status = 'PAID' ${prC.sql}`,
-    prC.params,
+     WHERE pr.payment_status = 'PAID' AND pr.agency_id = ? ${prC.sql}`,
+    [agency_id, ...prC.params],
   );
 
   const ncC = makeDateCond("nc.approved_at");
@@ -316,8 +322,8 @@ const getCashLedger = async (connection, makeDateCond) => {
        COALESCE(SUM(CASE WHEN nc.payment_mode = 'BANK_TRANSFER' THEN nc.service_fee ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM customer_name_change_requests nc
-     WHERE nc.status = 'APPROVED' ${ncC.sql}`,
-    ncC.params,
+     WHERE nc.status = 'APPROVED' AND nc.agency_id = ? ${ncC.sql}`,
+    [agency_id, ...ncC.params],
   );
 
   const cnC = makeDateCond("cnc.paid_at");
@@ -328,8 +334,8 @@ const getCashLedger = async (connection, makeDateCond) => {
        COALESCE(SUM(CASE WHEN cnc.payment_mode = 'BANK_TRANSFER' THEN cnc.total_amount ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM customer_new_connections cnc
-     WHERE cnc.payment_status = 'PAID' ${cnC.sql}`,
-    cnC.params,
+     WHERE cnc.payment_status = 'PAID' AND cnc.agency_id = ? ${cnC.sql}`,
+    [agency_id, ...cnC.params],
   );
 
   await ensureCashierReceiptsTable(connection);
@@ -341,8 +347,8 @@ const getCashLedger = async (connection, makeDateCond) => {
        COALESCE(SUM(CASE WHEN cr.payment_mode = 'BANK_TRANSFER' THEN cr.amount ELSE 0 END), 0) AS bank,
        COUNT(*) AS cnt
      FROM cashier_receipts cr
-     WHERE 1=1 ${crC.sql}`,
-    crC.params,
+     WHERE cr.agency_id = ? ${crC.sql}`,
+    [agency_id, ...crC.params],
   );
 
   const cashIn = {
@@ -379,8 +385,8 @@ const getCashLedger = async (connection, makeDateCond) => {
             COALESCE(${expenseCashOnly}, 0) AS cash,
             COUNT(*) AS cnt
      FROM expenses e
-     WHERE e.status = 'APPROVED' ${expC.sql}`,
-    expC.params,
+     WHERE e.status = 'APPROVED' AND e.agency_id = ? ${expC.sql}`,
+    [agency_id, ...expC.params],
   );
 
   let office = { total: 0, cash: 0, cnt: 0 };
@@ -391,8 +397,8 @@ const getCashLedger = async (connection, makeDateCond) => {
               COALESCE(${officeCashOnly}, 0) AS cash,
               COUNT(*) AS cnt
        FROM office_expenses oe
-       WHERE oe.status = 'APPROVED' ${oeC.sql}`,
-      oeC.params,
+       WHERE oe.status = 'APPROVED' AND oe.agency_id = ? ${oeC.sql}`,
+      [agency_id, ...oeC.params],
     );
     office = oe[0];
   }
@@ -406,8 +412,8 @@ const getCashLedger = async (connection, makeDateCond) => {
             COALESCE(SUM(CASE WHEN t.payment_mode = 'CASH' THEN t.deposit_liability ELSE 0 END), 0) AS cash,
             COUNT(*) AS cnt
      FROM customer_connection_transfers t
-     WHERE t.status = 'APPROVED' ${tvC.sql}`,
-    tvC.params,
+     WHERE t.status = 'APPROVED' AND t.agency_id = ? ${tvC.sql}`,
+    [agency_id, ...tvC.params],
   );
 
   const cashOut = {
@@ -424,14 +430,15 @@ const getCashLedger = async (connection, makeDateCond) => {
 // all since the last Close Day. This is the same figure the Live Position /
 // dashboard shows as "Current Balance", and it is the ceiling for any new cash
 // payout: you can never pay out more cash than you are holding.
-const getAvailableCashBalance = async (connection) => {
+const getAvailableCashBalance = async (connection, agency_id) => {
   const openingBalance = Number(
-    (await getLatestClosingBalance(connection)) ?? 0,
+    (await getLatestClosingBalance(connection, agency_id)) ?? 0,
   );
-  const anchorAt = await getCurrentDayAnchor(connection);
+  const anchorAt = await getCurrentDayAnchor(connection, agency_id);
   const ledger = await getCashLedger(
     connection,
     makeSinceCloseDateCond(anchorAt),
+    agency_id
   );
   return (
     openingBalance +
@@ -465,6 +472,7 @@ const consumeStockForCashierSale = async (
   connection,
   productId,
   requiredQty,
+  agencyId
 ) => {
   let remaining = Number(requiredQty || 0);
   let sourceStockAreaId = null;
@@ -477,10 +485,10 @@ const consumeStockForCashierSale = async (
     `
     SELECT COALESCE(SUM(quantity), 0) AS available_qty
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     FOR UPDATE
     `,
-    [Number(productId)],
+    [Number(productId), agencyId],
   );
 
   const availableQty = Number(availableRows[0]?.available_qty || 0);
@@ -495,11 +503,11 @@ const consumeStockForCashierSale = async (
     `
     SELECT id, stock_area_id, COALESCE(quantity, 0) AS quantity
     FROM stock
-    WHERE product_id = ?
+    WHERE product_id = ? AND agency_id = ?
     ORDER BY (stock_area_id = ?) DESC, id ASC
     FOR UPDATE
     `,
-    [Number(productId), DEFAULT_STOCK_AREA_ID],
+    [Number(productId), agencyId, DEFAULT_STOCK_AREA_ID],
   );
 
   for (const row of rows) {
@@ -616,7 +624,7 @@ export const getCashierDashboard = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const lastClosing = await getLatestClosingBalance(connection);
+    const lastClosing = await getLatestClosingBalance(connection, req.user.agency_id);
 
     // Optional date-range filter (YYYY-MM-DD). No range => all-time (default).
     const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -640,14 +648,17 @@ export const getCashierDashboard = async (req, res) => {
       ? "AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?"
       : "";
     const expenseWhereClause = hasRange
-      ? "WHERE DATE(e.created_at) BETWEEN ? AND ?"
-      : "";
+      ? "WHERE e.agency_id = ? AND DATE(e.created_at) BETWEEN ? AND ?"
+      : "WHERE e.agency_id = ?";
     const pendingExpenseDateClause = hasRange
-      ? "AND DATE(e.created_at) BETWEEN ? AND ?"
-      : "";
+      ? "AND e.agency_id = ? AND DATE(e.created_at) BETWEEN ? AND ?"
+      : "AND e.agency_id = ?";
     const settlementDateClause = hasRange
-      ? "AND DATE(sh.created_at) BETWEEN ? AND ?"
-      : "";
+      ? "AND sh.agency_id = ? AND DATE(sh.created_at) BETWEEN ? AND ?"
+      : "AND sh.agency_id = ?";
+    const driverWhereClause = "WHERE u.agency_id = ?";
+    
+    const queryParams = [req.user.agency_id, ...rangeParams];
 
     const [expenseRows] = await connection.query(
       `
@@ -657,7 +668,7 @@ export const getCashierDashboard = async (req, res) => {
       FROM expenses e
       ${expenseWhereClause}
       `,
-      rangeParams,
+      queryParams,
     );
 
     const [pendingExpenses] = await connection.query(
@@ -677,7 +688,7 @@ export const getCashierDashboard = async (req, res) => {
       ORDER BY e.created_at DESC
       LIMIT 2
       `,
-      rangeParams,
+      queryParams,
     );
 
     const [driverRows] = await connection.query(
@@ -701,11 +712,12 @@ export const getCashierDashboard = async (req, res) => {
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
       LEFT JOIN settlement_history sh ON sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') ${settlementDateClause}
+      ${driverWhereClause}
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
       LIMIT 4
       `,
-      rangeParams,
+      [...queryParams, req.user.agency_id],
     );
 
     const expenseSummary = expenseRows[0] || {
@@ -728,9 +740,9 @@ export const getCashierDashboard = async (req, res) => {
     }
     const useRunningDay = !hasRange || requestIsTodayOnly;
     const ledgerCond = useRunningDay
-      ? makeSinceCloseDateCond(await getCurrentDayAnchor(connection))
+      ? makeSinceCloseDateCond(await getCurrentDayAnchor(connection, req.user.agency_id))
       : makeRangeDateCond(startDate, endDate);
-    const ledger = await getCashLedger(connection, ledgerCond);
+    const ledger = await getCashLedger(connection, ledgerCond, req.user.agency_id);
     const openingBalance = Number(lastClosing ?? 0);
     const totalCashIn = ledger.cashIn.cash;
     const totalCashOut = ledger.cashOut.cash;
@@ -881,17 +893,19 @@ export const getCashierDriverCollections = async (req, res) => {
     const hasRange = Boolean(startDate && endDate);
 
     let joinCondition =
-      "sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED')";
-    const queryParams = [];
+      "sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') AND sh.agency_id = ?";
+    const queryParams = [req.user.agency_id];
     if (hasRange) {
       joinCondition += " AND DATE(sh.created_at) BETWEEN ? AND ?";
       queryParams.push(startDate, endDate); // for settlement_history JOIN
     }
     // The iocOnlineCount correlated subquery also needs date params when range is set.
     // These must come AFTER the JOIN params but BEFORE limit/offset.
+    queryParams.push(req.user.agency_id);
     if (hasRange) {
       queryParams.push(startDate, endDate); // for iocOnlineCount subquery
     }
+    queryParams.push(req.user.agency_id); // for u.agency_id = ?
     queryParams.push(limit, offset);
     const [rows] = await connection.query(
       `
@@ -923,6 +937,7 @@ export const getCashierDriverCollections = async (req, res) => {
           WHERE s2.driver_id = d.id
             AND s2.payment_method = 'ONLINE'
             AND s2.status = 'DELIVERED'
+            AND s2.agency_id = ?
             ${hasRange ? "AND DATE(COALESCE(s2.delivered_at, s2.created_at)) BETWEEN ? AND ?" : ""}
         ), 0) AS iocOnlineCount,
         CASE
@@ -935,6 +950,7 @@ export const getCashierDriverCollections = async (req, res) => {
       INNER JOIN users u ON u.id = d.user_id
       LEFT JOIN settlement_history sh ON ${joinCondition}
       LEFT JOIN sales s ON s.id = sh.sale_id
+      WHERE u.agency_id = ?
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
       LIMIT ?
@@ -1018,14 +1034,17 @@ export const getCashierPenaltyRequests = async (req, res) => {
     }
     const hasRange = Boolean(startDate && endDate);
     const dateClause = hasRange ? "AND DATE(p.created_at) BETWEEN ? AND ?" : "";
-    const queryParams = hasRange ? [startDate, endDate] : [];
+    const queryParams = [req.user.agency_id];
+    if (hasRange) {
+      queryParams.push(startDate, endDate);
+    }
 
     const status = String(req.query.status || "ALL").toUpperCase();
     const whereClause =
       status === "PENDING"
-        ? "WHERE p.payment_status = 'UNPAID'"
+        ? "AND p.payment_status = 'UNPAID'"
         : status === "PAID"
-          ? "WHERE p.payment_status = 'PAID'"
+          ? "AND p.payment_status = 'PAID'"
           : "";
 
     const [rows] = await connection.query(
@@ -1048,6 +1067,7 @@ export const getCashierPenaltyRequests = async (req, res) => {
       FROM customer_pr_penalties p
       LEFT JOIN users u ON u.id = p.customer_id
       LEFT JOIN addresses a ON a.user_id = p.customer_id AND a.is_default = 1
+      WHERE p.agency_id = ?
       ${whereClause}
       ${dateClause}
       ORDER BY p.created_at DESC, p.id DESC
@@ -1146,7 +1166,7 @@ export const collectCashierPenaltyRequest = async (req, res) => {
         cashier_remarks = ?,
         payment_status = 'PAID',
         paid_at = NOW()
-      WHERE id = ? AND payment_status = 'UNPAID'
+      WHERE id = ? AND payment_status = 'UNPAID' AND agency_id = ?
       `,
       [
         paymentMode,
@@ -1154,6 +1174,7 @@ export const collectCashierPenaltyRequest = async (req, res) => {
         splitPaymentsJson,
         remarks || null,
         requestId,
+        req.user.agency_id,
       ],
     );
 
@@ -1200,14 +1221,17 @@ export const getCashierNameChangeRequests = async (req, res) => {
     }
     const hasRange = Boolean(startDate && endDate);
     const dateClause = hasRange ? "AND DATE(r.created_at) BETWEEN ? AND ?" : "";
-    const queryParams = hasRange ? [startDate, endDate] : [];
+    const queryParams = [req.user.agency_id];
+    if (hasRange) {
+      queryParams.push(startDate, endDate);
+    }
 
     const status = String(req.query.status || "ALL").toUpperCase();
     const whereClause =
       status === "PENDING"
-        ? "WHERE r.status = 'PENDING'"
+        ? "AND r.status = 'PENDING'"
         : status === "APPROVED"
-          ? "WHERE r.status = 'APPROVED'"
+          ? "AND r.status = 'APPROVED'"
           : "";
 
     const [rows] = await connection.query(
@@ -1230,6 +1254,7 @@ export const getCashierNameChangeRequests = async (req, res) => {
       FROM customer_name_change_requests r
       LEFT JOIN users u ON u.id = r.customer_id
       LEFT JOIN addresses a ON a.user_id = r.customer_id AND a.is_default = 1
+      WHERE r.agency_id = ?
       ${whereClause}
       ${dateClause}
       ORDER BY r.created_at DESC, r.id DESC
@@ -1322,8 +1347,8 @@ export const collectCashierNameChangeRequest = async (req, res) => {
     await connection.beginTransaction();
 
     const [requests] = await connection.query(
-      `SELECT customer_id, new_name_requested FROM customer_name_change_requests WHERE id = ? AND status = 'PENDING' FOR UPDATE`,
-      [requestId],
+      `SELECT customer_id, new_name_requested FROM customer_name_change_requests WHERE id = ? AND status = 'PENDING' AND agency_id = ? FOR UPDATE`,
+      [requestId, req.user.agency_id],
     );
 
     if (!requests.length) {
@@ -1346,7 +1371,7 @@ export const collectCashierNameChangeRequest = async (req, res) => {
         cashier_remarks = ?,
         status = 'APPROVED',
         approved_at = NOW()
-      WHERE id = ?
+      WHERE id = ? AND agency_id = ?
       `,
       [
         paymentMode,
@@ -1354,6 +1379,7 @@ export const collectCashierNameChangeRequest = async (req, res) => {
         splitPaymentsJson,
         remarks || null,
         requestId,
+        req.user.agency_id,
       ],
     );
 
@@ -1974,8 +2000,9 @@ export const recordOtherPayment = async (req, res) => {
         note,
         status,
         created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        updated_at,
+        agency_id
+      ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
       `,
       [
         cashierId,
@@ -1984,6 +2011,7 @@ export const recordOtherPayment = async (req, res) => {
         transfer_id?.trim() || null,
         numericAmount,
         note?.trim() || null,
+        req.user.agency_id,
       ],
     );
 
@@ -2006,7 +2034,7 @@ export const recordOtherPayment = async (req, res) => {
 
 // Optional [startDate,endDate] (YYYY-MM-DD) filter on other_payments.created_at.
 // No valid range => no filter (caller/UI decides the default window).
-const buildOtherPaymentsDateFilter = (query = {}) => {
+const buildOtherPaymentsDateFilter = (query = {}, agencyId) => {
   const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
   let startDate = DATE_ONLY.test(String(query.startDate || ""))
     ? String(query.startDate)
@@ -2023,18 +2051,18 @@ const buildOtherPaymentsDateFilter = (query = {}) => {
   }
   if (startDate && endDate) {
     return {
-      whereClause: "WHERE DATE(created_at) BETWEEN ? AND ?",
-      params: [startDate, endDate],
+      whereClause: "WHERE agency_id = ? AND DATE(created_at) BETWEEN ? AND ?",
+      params: [agencyId, startDate, endDate],
     };
   }
-  return { whereClause: "", params: [] };
+  return { whereClause: "WHERE agency_id = ?", params: [agencyId] };
 };
 
 export const getOtherPayments = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const { whereClause, params } = buildOtherPaymentsDateFilter(req.query);
+    const { whereClause, params } = buildOtherPaymentsDateFilter(req.query, req.user.agency_id);
 
     const [rows] = await connection.query(
       `
@@ -2075,7 +2103,7 @@ export const getOtherPaymentsSummary = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const { whereClause, params } = buildOtherPaymentsDateFilter(req.query);
+    const { whereClause, params } = buildOtherPaymentsDateFilter(req.query, req.user.agency_id);
 
     const [rows] = await connection.query(
       `
@@ -2144,9 +2172,10 @@ export const verifyDriverCollections = async (req, res) => {
       FROM settlement_history
       WHERE driver_id = ?
         AND status = 'PENDING'
+        AND agency_id = ?
       FOR UPDATE
       `,
-      [driverId],
+      [driverId, req.user.agency_id],
     );
 
     if (!rows.length) {
@@ -2170,8 +2199,9 @@ export const verifyDriverCollections = async (req, res) => {
           settled_at = NOW()
       WHERE driver_id = ?
         AND status = 'PENDING'
+        AND agency_id = ?
       `,
-      [driverId],
+      [driverId, req.user.agency_id],
     );
 
     for (const [settlementDate, amount] of Object.entries(totalsByDate)) {
@@ -2181,13 +2211,14 @@ export const verifyDriverCollections = async (req, res) => {
           driver_id,
           amount,
           status,
-          settlement_date
-        ) VALUES (?, ?, 'SETTLED', ?)
+          settlement_date,
+          agency_id
+        ) VALUES (?, ?, 'SETTLED', ?, ?)
         ON DUPLICATE KEY UPDATE
           amount = VALUES(amount),
           status = VALUES(status)
         `,
-        [driverId, amount, settlementDate],
+        [driverId, amount, settlementDate, req.user.agency_id],
       );
     }
 
@@ -2220,7 +2251,7 @@ export const getLastClosingBalance = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const latest = await getLatestClosing(connection);
+    const latest = await getLatestClosing(connection, req.user.agency_id);
 
     return res.status(200).json({
       success: true,
@@ -2257,12 +2288,13 @@ export const getClosingSummary = async (req, res) => {
     // Right after Close Day: opening = 0 and the running window is empty, so it
     // is 0. Right after Start Day: cash in/out are 0, so it equals the opening
     // balance. Then it moves as new billing/expenses happen.
-    const anchorAt = await getCurrentDayAnchor(connection);
+    const anchorAt = await getCurrentDayAnchor(connection, req.user.agency_id);
     const ledger = await getCashLedger(
       connection,
       makeSinceCloseDateCond(anchorAt),
+      req.user.agency_id
     );
-    const openingBalance = await getCurrentDayOpeningBalance(connection);
+    const openingBalance = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
     const cashTotal =
       openingBalance +
       Number(ledger.cashIn.cash || 0) -
@@ -2297,7 +2329,7 @@ export const startCashierDay = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const latest = await getLatestClosingBalance(connection);
+    const latest = await getLatestClosingBalance(connection, req.user.agency_id);
 
     if (latest !== null && Number(totalAmount) !== Number(latest)) {
       return res.status(400).json({
@@ -2310,8 +2342,8 @@ export const startCashierDay = async (req, res) => {
     // reset to 0 and only the opening balance carries into the new day.
     await ensureCashierOpeningsTable(connection);
     const [result] = await connection.execute(
-      `INSERT INTO cashier_openings (opening_amount, denominations) VALUES (?, ?)`,
-      [Number(totalAmount) || 0, JSON.stringify(denominations)],
+      `INSERT INTO cashier_openings (opening_amount, denominations, agency_id) VALUES (?, ?, ?)`,
+      [Number(totalAmount) || 0, JSON.stringify(denominations), req.user.agency_id],
     );
 
     cashierDayLog.opening = {
@@ -2377,10 +2409,10 @@ export const closeCashierDay = async (req, res) => {
     await connection.beginTransaction();
     const [result] = await connection.execute(
       `
-      INSERT INTO cashier_closings (total_cash, petty_cash)
-      VALUES (?, ?)
+      INSERT INTO cashier_closings (total_cash, petty_cash, agency_id)
+      VALUES (?, ?, ?)
       `,
-      [closingAmount, pettyCashAmount],
+      [closingAmount, pettyCashAmount, req.user.agency_id],
     );
 
     await connection.commit();
@@ -2500,6 +2532,7 @@ export const recordOfficeSale = async (req, res) => {
         connection,
         item.product_id,
         item.quantity,
+        req.user.agency_id
       );
       deductedStockAreaIds.push(sourceStockAreaId);
     }
@@ -2536,10 +2569,10 @@ export const recordOfficeSale = async (req, res) => {
       const [customerResult] = await connection.execute(
         `
         INSERT INTO users
-          (name, phone, role, created_at, updated_at)
-        VALUES (?, ?, 'CUSTOMER', NOW(), NOW())
+          (name, phone, role, created_at, updated_at, agency_id)
+        VALUES (?, ?, 'CUSTOMER', NOW(), NOW(), ?)
         `,
-        [customer_name, phone || null],
+        [customer_name, phone || null, req.user.agency_id],
       );
       customerId = customerResult.insertId;
     }
@@ -2578,10 +2611,10 @@ export const recordOfficeSale = async (req, res) => {
     const [saleResult] = await connection.execute(
       `
       INSERT INTO sales
-        (customer_id, driver_id, address_id, total_amount, payment_method, status, created_at, assigned_at, updated_at, empty_cylinder_qty, empty_cylinder_status, sale_type, sales_from)
-      VALUES (?, NULL, ?, ?, ?, 'DELIVERED', NOW(), NOW(), NOW(), ?, 'DELIVERED', 'SALE', 'CASHIER')
+        (customer_id, driver_id, address_id, total_amount, payment_method, status, created_at, assigned_at, updated_at, empty_cylinder_qty, empty_cylinder_status, sale_type, sales_from, agency_id)
+      VALUES (?, NULL, ?, ?, ?, 'DELIVERED', NOW(), NOW(), NOW(), ?, 'DELIVERED', 'SALE', 'CASHIER', ?)
       `,
-      [customerId, addressId, totalAmount, payment_method, totalQuantity],
+      [customerId, addressId, totalAmount, payment_method, totalQuantity, req.user.agency_id],
     );
 
     const saleId = saleResult.insertId;
@@ -2592,8 +2625,8 @@ export const recordOfficeSale = async (req, res) => {
       await connection.execute(
         `
         INSERT INTO sales_items
-          (sale_id, product_id, quantity, price, status, delivered_qty, empty_cylinder_qty, empty_cylinder_status, defective_qty)
-        VALUES (?, ?, ?, ?, 'DELIVERED', ?, ?, 'DELIVERED', 0)
+          (sale_id, product_id, quantity, price, status, delivered_qty, empty_cylinder_qty, empty_cylinder_status, defective_qty, agency_id)
+        VALUES (?, ?, ?, ?, 'DELIVERED', ?, ?, 'DELIVERED', 0, ?)
         `,
         [
           saleId,
@@ -2602,6 +2635,7 @@ export const recordOfficeSale = async (req, res) => {
           item.price,
           item.quantity,
           item.quantity,
+          req.user.agency_id,
         ],
       );
 
@@ -2618,9 +2652,10 @@ export const recordOfficeSale = async (req, res) => {
           created_by,
           driver_id,
           stock_from,
-          is_defective
+          is_defective,
+          agency_id
         )
-        VALUES (?, ?, 'ADJUSTMENT_SUBTRACT', ?, 1, ?, ?, NULL, 'godown', 0)
+        VALUES (?, ?, 'ADJUSTMENT_SUBTRACT', ?, 1, ?, ?, NULL, 'godown', 0, ?)
         `,
         [
           item.product_id,
@@ -2628,6 +2663,7 @@ export const recordOfficeSale = async (req, res) => {
           item.quantity,
           saleId,
           cashierUserId,
+          req.user.agency_id,
         ],
       );
 
@@ -2645,11 +2681,12 @@ export const recordOfficeSale = async (req, res) => {
           created_by,
           driver_id,
           stock_from,
-          is_defective
+          is_defective,
+          agency_id
         )
-        VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, ?, NULL, 'godown', 0)
+        VALUES (?, NULL, 'EMPTY_RETURN', ?, 0, ?, ?, NULL, 'godown', 0, ?)
         `,
-        [item.product_id, item.quantity, saleId, cashierUserId],
+        [item.product_id, item.quantity, saleId, cashierUserId, req.user.agency_id],
       );
     }
 
@@ -2671,10 +2708,10 @@ export const recordOfficeSale = async (req, res) => {
           await connection.execute(
             `
             INSERT INTO payments
-              (sale_id, amount, method, status, type, created_at)
-            VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW())
+              (sale_id, amount, method, status, type, created_at, agency_id)
+            VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW(), ?)
             `,
-            [saleId, Number(p.amount), p.method || "CASH"],
+            [saleId, Number(p.amount), p.method || "CASH", req.user.agency_id],
           );
         }
       }
@@ -2691,10 +2728,10 @@ export const recordOfficeSale = async (req, res) => {
         await connection.execute(
           `
           INSERT INTO payments
-            (sale_id, amount, method, status, type, created_at)
-          VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW())
+            (sale_id, amount, method, status, type, created_at, agency_id)
+          VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW(), ?)
           `,
-          [saleId, cashPart],
+          [saleId, cashPart, req.user.agency_id],
         );
       }
 
@@ -2702,10 +2739,10 @@ export const recordOfficeSale = async (req, res) => {
         await connection.execute(
           `
           INSERT INTO payments
-            (sale_id, amount, method, status, type, created_at)
-          VALUES (?, ?, 'UPI', 'SUCCESS', 'COMPANY', NOW())
+            (sale_id, amount, method, status, type, created_at, agency_id)
+          VALUES (?, ?, 'UPI', 'SUCCESS', 'COMPANY', NOW(), ?)
           `,
-          [saleId, bankPart],
+          [saleId, bankPart, req.user.agency_id],
         );
       }
 
@@ -2714,10 +2751,10 @@ export const recordOfficeSale = async (req, res) => {
         await connection.execute(
           `
           INSERT INTO payments
-            (sale_id, amount, method, status, type, created_at)
-          VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW())
+            (sale_id, amount, method, status, type, created_at, agency_id)
+          VALUES (?, ?, 'CASH', 'SUCCESS', 'COMPANY', NOW(), ?)
           `,
-          [saleId, 0],
+          [saleId, 0, req.user.agency_id],
         );
       }
     } else {
@@ -2731,10 +2768,10 @@ export const recordOfficeSale = async (req, res) => {
       await connection.execute(
         `
         INSERT INTO payments
-          (sale_id, amount, method, status, type, created_at)
-        VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW())
+          (sale_id, amount, method, status, type, created_at, agency_id)
+        VALUES (?, ?, ?, 'SUCCESS', 'COMPANY', NOW(), ?)
         `,
-        [saleId, totalAmount, paymentMethodForRow],
+        [saleId, totalAmount, paymentMethodForRow, req.user.agency_id],
       );
     }
 
@@ -2784,7 +2821,10 @@ export const getTodayOfficeSales = async (req, res) => {
     const dateClause = hasRange
       ? "AND DATE(s.created_at) BETWEEN ? AND ?"
       : "AND DATE(s.created_at) = CURDATE()";
-    const queryParams = hasRange ? [startDate, endDate] : [];
+    const queryParams = [req.user.agency_id];
+    if (hasRange) {
+      queryParams.push(startDate, endDate);
+    }
 
     const [rows] = await connection.query(
       `
@@ -2798,7 +2838,7 @@ export const getTodayOfficeSales = async (req, res) => {
       LEFT JOIN users u ON u.id = s.customer_id
       LEFT JOIN sales_items si ON si.sale_id = s.id
       LEFT JOIN products p ON p.id = si.product_id
-      WHERE s.sales_from = 'CASHIER'
+      WHERE s.sales_from = 'CASHIER' AND s.agency_id = ?
         ${dateClause}
       GROUP BY s.id, u.name, s.total_amount
       ORDER BY s.created_at DESC
@@ -2888,7 +2928,7 @@ export const recordOfficeExpense = async (req, res) => {
 
     // A cash payout can never exceed the cash currently in the drawer.
     if (paymentMode === "CASH") {
-      const availableCash = await getAvailableCashBalance(connection);
+      const availableCash = await getAvailableCashBalance(connection, req.user.agency_id);
       if (numericAmount > availableCash) {
         return res.status(400).json({
           success: false,
@@ -2921,11 +2961,11 @@ export const recordOfficeExpense = async (req, res) => {
     // Ensure the payment columns exist so mode + reference can be persisted.
     await ensureOfficeExpensePaymentColumns(connection);
 
-    const extraCols = `${hasBillUrl ? ", bill_url" : ""}, payment_mode, payment_reference`;
-    const extraPlaceholder = `${hasBillUrl ? ", ?" : ""}, ?, ?`;
+    const extraCols = `${hasBillUrl ? ", bill_url" : ""}, payment_mode, payment_reference, agency_id`;
+    const extraPlaceholder = `${hasBillUrl ? ", ?" : ""}, ?, ?, ?`;
     const baseParams = [adminId, category, numericAmount, description || null];
     const billParams = hasBillUrl ? [billUrl || null] : [];
-    const paymentParams = [paymentMode, paymentReference || null];
+    const paymentParams = [paymentMode, paymentReference || null, req.user.agency_id];
 
     let result;
 
@@ -2989,9 +3029,10 @@ export const getTodayOfficeExpenses = async (req, res) => {
           COALESCE(o.status, 'PENDING') AS status
         FROM office_expenses o
         LEFT JOIN users u ON u.id = o.admin_id
-        WHERE DATE(o.created_at) = CURDATE()
+        WHERE DATE(o.created_at) = CURDATE() AND o.agency_id = ?
         ORDER BY o.created_at DESC
         `,
+        [req.user.agency_id]
       );
     } catch (queryError) {
       if (queryError?.code !== "ER_BAD_FIELD_ERROR") {
@@ -3009,9 +3050,10 @@ export const getTodayOfficeExpenses = async (req, res) => {
           COALESCE(u.name, 'Unknown') AS createdBy
         FROM office_expenses o
         LEFT JOIN users u ON u.id = o.admin_id
-        WHERE DATE(o.created_at) = CURDATE()
+        WHERE DATE(o.created_at) = CURDATE() AND o.agency_id = ?
         ORDER BY o.created_at DESC
         `,
+        [req.user.agency_id]
       );
     }
 
@@ -3070,9 +3112,9 @@ export const getCashOutExpenseRequests = async (req, res) => {
         COALESCE(SUM(CASE WHEN e.status = 'APPROVED' AND DATE(e.created_at) = CURDATE() THEN e.amount ELSE 0 END), 0) AS approvedToday
       FROM expenses e
       INNER JOIN users u ON u.id = e.created_by
-      WHERE u.role = 'PURCHASE_MANAGER'
+      WHERE u.role = 'PURCHASE_MANAGER' AND e.agency_id = ?
       `,
-      queryParams,
+      [req.user.agency_id, ...queryParams],
     );
 
     const [rows] = await connection.query(
@@ -3098,8 +3140,10 @@ export const getCashOutExpenseRequests = async (req, res) => {
       ${purchaseExpenseTripJoin}
       WHERE u.role = 'PURCHASE_MANAGER'
         AND e.status = 'PENDING'
+        AND e.agency_id = ?
       ORDER BY e.created_at DESC, e.id DESC
       `,
+      [req.user.agency_id]
     );
 
     return res.status(200).json({
@@ -3189,9 +3233,10 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
       INNER JOIN users u ON u.id = e.created_by
       WHERE e.id = ?
         AND u.role = 'PURCHASE_MANAGER'
+        AND e.agency_id = ?
       LIMIT 1
       `,
-      [expenseId],
+      [expenseId, req.user.agency_id],
     );
 
     if (!rows.length) {
@@ -3232,18 +3277,18 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
           SET status = ?,
               payment_mode = ?,
               payment_reference = ?
-          WHERE id = ?
+          WHERE id = ? AND agency_id = ?
           `,
-          [status, paymentMode, transactionId || null, expenseId],
+          [status, paymentMode, transactionId || null, expenseId, req.user.agency_id],
         );
       } else {
         await connection.query(
           `
           UPDATE expenses
           SET status = ?
-          WHERE id = ?
+          WHERE id = ? AND agency_id = ?
           `,
-          [status, expenseId],
+          [status, expenseId, req.user.agency_id],
         );
       }
 
@@ -3268,18 +3313,18 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
           UPDATE expenses
           SET status = ?,
               description = ?
-          WHERE id = ?
+          WHERE id = ? AND agency_id = ?
           `,
-          [status, nextDescription, expenseId],
+          [status, nextDescription, expenseId, req.user.agency_id],
         );
       } else {
         await connection.query(
           `
           UPDATE expenses
           SET status = ?
-          WHERE id = ?
+          WHERE id = ? AND agency_id = ?
           `,
-          [status, expenseId],
+          [status, expenseId, req.user.agency_id],
         );
       }
     }
@@ -3323,11 +3368,11 @@ export const recordCashierReceipt = async (req, res) => {
     const [saleResult] = await connection.execute(
       `
       INSERT INTO sales
-        (customer_id, driver_id, total_amount, payment_method, status, address_id, created_at, assigned_at, updated_at, sale_type, sales_from)
+        (customer_id, driver_id, total_amount, payment_method, status, address_id, created_at, assigned_at, updated_at, sale_type, sales_from, agency_id)
       VALUES
-        (?, NULL, ?, ?, 'DELIVERED', NULL, NOW(), NOW(), NOW(), 'SALE', 'CASHIER')
+        (?, NULL, ?, ?, 'DELIVERED', NULL, NOW(), NOW(), NOW(), 'SALE', 'CASHIER', ?)
       `,
-      [customer_id, amount, payment_method],
+      [customer_id, amount, payment_method, req.user.agency_id],
     );
 
     const saleId = saleResult.insertId;
@@ -3335,11 +3380,11 @@ export const recordCashierReceipt = async (req, res) => {
     await connection.execute(
       `
       INSERT INTO payments
-        (sale_id, amount, method, status, type, created_at)
+        (sale_id, amount, method, status, type, created_at, agency_id)
       VALUES
-        (?, ?, ?, 'SUCCESS', ?, NOW())
+        (?, ?, ?, 'SUCCESS', ?, NOW(), ?)
       `,
-      [saleId, amount, payment_method, receipt_type || "COMPANY"],
+      [saleId, amount, payment_method, receipt_type || "COMPANY", req.user.agency_id],
     );
 
     await connection.commit();
@@ -3528,7 +3573,8 @@ export const createCashierReceipt = async (req, res) => {
         split_payments,
         transfer_id,
         created_at,
-        updated_at
+        updated_at,
+        agency_id
       )
       VALUES (
         ?,
@@ -3539,7 +3585,8 @@ export const createCashierReceipt = async (req, res) => {
         ?,
         ?,
         NOW(),
-        NOW()
+        NOW(),
+        ?
       )
       `,
       [
@@ -3550,6 +3597,7 @@ export const createCashierReceipt = async (req, res) => {
         normalizedMode,
         splitPaymentsJson,
         trimmedTransferId,
+        req.user.agency_id,
       ],
     );
 
@@ -3606,9 +3654,9 @@ export const getRecentCashierReceipts = async (req, res) => {
 
     // No explicit range => today, which is what the panel shows by default.
     const whereClause = startDate
-      ? "WHERE DATE(created_at) BETWEEN ? AND ?"
-      : "WHERE ${dateClause}";
-    const whereParams = startDate ? [startDate, endDate] : [];
+      ? "WHERE DATE(created_at) BETWEEN ? AND ? AND agency_id = ?"
+      : "WHERE DATE(created_at) = CURDATE() AND agency_id = ?";
+    const whereParams = startDate ? [startDate, endDate, req.user.agency_id] : [req.user.agency_id];
 
     const requestedLimit = Number(req.query.limit);
     const limit =
@@ -3661,15 +3709,16 @@ export const getTodaysCashFlow = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const lastClosing = await getLatestClosingBalance(connection);
+    const lastClosing = await getLatestClosingBalance(connection, req.user.agency_id);
     const openingBalance = lastClosing ?? 0;
 
     // Everything for the current running day (resets to 0 at Close Day and at
     // Start Day, per spec), anchored at the latest of last close / last start.
-    const anchorAt = await getCurrentDayAnchor(connection);
+    const anchorAt = await getCurrentDayAnchor(connection, req.user.agency_id);
     const ledger = await getCashLedger(
       connection,
       makeSinceCloseDateCond(anchorAt),
+      req.user.agency_id
     );
 
     // Inflow = CASH received for the current running day (cash only, per spec).
@@ -3752,6 +3801,7 @@ export const findCustomerForCashierApp = async (req, res) => {
         ) AS address
       FROM users u
       WHERE u.role = 'CUSTOMER'
+        AND u.agency_id = ?
         AND (
           u.name LIKE ?
           OR u.phone LIKE ?
@@ -3761,8 +3811,8 @@ export const findCustomerForCashierApp = async (req, res) => {
       LIMIT 20
       `,
       !Number.isNaN(numericId)
-        ? [likeValue, likeValue, numericId]
-        : [likeValue, likeValue],
+        ? [req.user.agency_id, likeValue, likeValue, numericId]
+        : [req.user.agency_id, likeValue, likeValue],
     );
 
     if (!rows.length) {
@@ -3814,6 +3864,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
     const summary = await getCashLedger(
       connection,
       makeRangeDateCond(date, date),
+      req.user.agency_id
     );
 
     const [expModeCol] = await connection.query(
@@ -3838,7 +3889,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         COALESCE(sh.settled_at, sh.created_at) as timestamp,
         'Driver Collection Settlement' as description
       FROM settlement_history sh
-      WHERE sh.status = 'SETTLED' AND DATE(COALESCE(sh.settled_at, sh.created_at)) = ?
+      WHERE sh.status = 'SETTLED' AND DATE(COALESCE(sh.settled_at, sh.created_at)) = ? AND sh.agency_id = ?
 
       UNION ALL
 
@@ -3852,7 +3903,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         'Office Sale Payment' as description
       FROM payments p
       INNER JOIN sales s ON s.id = p.sale_id
-      WHERE p.status = 'SUCCESS' AND s.sales_from = 'CASHIER' AND DATE(p.created_at) = ?
+      WHERE p.status = 'SUCCESS' AND s.sales_from = 'CASHIER' AND DATE(p.created_at) = ? AND p.agency_id = ?
 
       UNION ALL
 
@@ -3865,7 +3916,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         pr.paid_at as timestamp,
         'PR Penalty Collection' as description
       FROM customer_pr_penalties pr
-      WHERE pr.payment_status = 'PAID' AND DATE(pr.paid_at) = ?
+      WHERE pr.payment_status = 'PAID' AND DATE(pr.paid_at) = ? AND pr.agency_id = ?
 
       UNION ALL
 
@@ -3878,7 +3929,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         nc.approved_at as timestamp,
         'Name Change Request Fee' as description
       FROM customer_name_change_requests nc
-      WHERE nc.status = 'APPROVED' AND DATE(nc.approved_at) = ?
+      WHERE nc.status = 'APPROVED' AND DATE(nc.approved_at) = ? AND nc.agency_id = ?
 
       UNION ALL
 
@@ -3891,7 +3942,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         cnc.paid_at as timestamp,
         'New Connection Payment' as description
       FROM customer_new_connections cnc
-      WHERE cnc.payment_status = 'PAID' AND DATE(cnc.paid_at) = ?
+      WHERE cnc.payment_status = 'PAID' AND DATE(cnc.paid_at) = ? AND cnc.agency_id = ?
 
       UNION ALL
 
@@ -3904,7 +3955,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         e.created_at as timestamp,
         e.description as description
       FROM expenses e
-      WHERE e.status = 'APPROVED' AND DATE(e.created_at) = ?
+      WHERE e.status = 'APPROVED' AND DATE(e.created_at) = ? AND e.agency_id = ?
 
       UNION ALL
 
@@ -3917,7 +3968,7 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         oe.updated_at as timestamp,
         oe.description as description
       FROM office_expenses oe
-      WHERE oe.status = 'APPROVED' AND DATE(oe.updated_at) = ?
+      WHERE oe.status = 'APPROVED' AND DATE(oe.updated_at) = ? AND oe.agency_id = ?
 
       UNION ALL
 
@@ -3930,12 +3981,21 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         t.updated_at as timestamp,
         'Transfer Voucher Deposit Refund' as description
       FROM customer_connection_transfers t
-      WHERE t.status = 'APPROVED' AND DATE(t.updated_at) = ?
+      WHERE t.status = 'APPROVED' AND DATE(t.updated_at) = ? AND t.agency_id = ?
 
       ORDER BY timestamp DESC
     `;
 
-    const params = [date, date, date, date, date, date, date, date];
+    const params = [
+      date, req.user.agency_id,
+      date, req.user.agency_id,
+      date, req.user.agency_id,
+      date, req.user.agency_id,
+      date, req.user.agency_id,
+      date, req.user.agency_id,
+      date, req.user.agency_id,
+      date, req.user.agency_id
+    ];
     const [entries] = await connection.query(query, params);
 
     return res.status(200).json({

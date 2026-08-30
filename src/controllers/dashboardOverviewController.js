@@ -23,57 +23,70 @@ const normalizeIssueType = (issueType) => {
   return toTitleCase(text.replaceAll("_", " "));
 };
 
-export const getDashboardOverview = async (_req, res) => {
+export const getDashboardOverview = async (req, res) => {
   const connection = await db.getConnection();
+  const agencyId = req.user.agency_id;
 
   try {
     const [pendingComplaintsRows] = await connection.query(
       `
       SELECT COUNT(*) AS count
       FROM customer_complaints
-      WHERE UPPER(COALESCE(status, 'PENDING')) IN ('OPEN', 'PENDING', 'ASSIGNED', 'IN_PROGRESS')
-      `
+      WHERE agency_id = ?
+        AND UPPER(COALESCE(status, 'PENDING')) IN ('OPEN', 'PENDING', 'ASSIGNED', 'IN_PROGRESS')
+      `,
+      [agencyId]
     );
 
     const [leakageComplaintsRows] = await connection.query(
       `
       SELECT COUNT(*) AS count
       FROM customer_complaints
-      WHERE UPPER(COALESCE(issue_type, '')) = 'LEAKAGE'
+      WHERE agency_id = ?
+        AND UPPER(COALESCE(issue_type, '')) = 'LEAKAGE'
         AND UPPER(COALESCE(status, 'PENDING')) IN ('OPEN', 'PENDING', 'ASSIGNED', 'IN_PROGRESS')
-      `
+      `,
+      [agencyId]
     );
 
     const [totalConnectionsRows] = await connection.query(
       `
       SELECT COUNT(*) AS count
       FROM users
-      WHERE UPPER(COALESCE(role, '')) = 'CUSTOMER'
-      `
+      WHERE agency_id = ?
+        AND UPPER(COALESCE(role, '')) = 'CUSTOMER'
+      `,
+      [agencyId]
     );
 
     const [transferRequestsRows] = await connection.query(
       `
       SELECT COUNT(*) AS count
       FROM customer_connection_transfers
-      WHERE UPPER(COALESCE(status, 'PENDING_MANAGER')) IN ('PENDING_MANAGER', 'PENDING')
-      `
+      WHERE agency_id = ?
+        AND UPPER(COALESCE(status, 'PENDING_MANAGER')) IN ('PENDING_MANAGER', 'PENDING')
+      `,
+      [agencyId]
     );
 
     const [nameChangeRequestsRows] = await connection.query(
       `
       SELECT COUNT(*) AS count
       FROM customer_name_change_requests
-      WHERE UPPER(COALESCE(status, 'PENDING')) = 'PENDING'
-      `
+      WHERE agency_id = ?
+        AND UPPER(COALESCE(status, 'PENDING')) = 'PENDING'
+      `,
+      [agencyId]
     );
 
     const [pendingManagerVerificationRows] = await connection.query(
       `
       SELECT COUNT(*) AS count
       FROM customer_connection_transfers
-      WHERE UPPER(COALESCE(status, 'PENDING_MANAGER')) = 'PENDING_MANAGER'
-      `
+      WHERE agency_id = ?
+        AND UPPER(COALESCE(status, 'PENDING_MANAGER')) = 'PENDING_MANAGER'
+      `,
+      [agencyId]
     );
 
     const [recentComplaintRows] = await connection.query(
@@ -88,9 +101,11 @@ export const getDashboardOverview = async (_req, res) => {
         DATE_FORMAT(cc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
       FROM customer_complaints cc
       INNER JOIN users u ON u.id = cc.customer_id
+      WHERE cc.agency_id = ?
       ORDER BY cc.created_at DESC, cc.id DESC
       LIMIT 8
-      `
+      `,
+      [agencyId]
     );
 
     return res.status(200).json({
@@ -126,3 +141,4 @@ export const getDashboardOverview = async (_req, res) => {
     connection.release();
   }
 };
+

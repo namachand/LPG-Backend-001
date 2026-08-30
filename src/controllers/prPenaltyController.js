@@ -8,7 +8,7 @@ const parseConsumerNumberToId = (consumerNumber = "") => {
   return Number.parseInt(digits, 10);
 };
 
-const lookupCustomer = async (connection, { consumerNumber, customerName }) => {
+const lookupCustomer = async (connection, { consumerNumber, customerName, agencyId }) => {
   const consumerId = parseConsumerNumberToId(consumerNumber);
 
   if (consumerId) {
@@ -20,10 +20,10 @@ const lookupCustomer = async (connection, { consumerNumber, customerName }) => {
         u.phone,
         u.consumer_number AS consumer_number
       FROM users u
-      WHERE u.id = ? AND u.role = 'CUSTOMER'
+      WHERE u.id = ? AND u.role = 'CUSTOMER' AND u.agency_id = ?
       LIMIT 1
       `,
-      [consumerId]
+      [consumerId, agencyId]
     );
 
     return rows[0] || null;
@@ -41,11 +41,11 @@ const lookupCustomer = async (connection, { consumerNumber, customerName }) => {
       u.phone,
       u.consumer_number AS consumer_number
     FROM users u
-    WHERE u.role = 'CUSTOMER' AND u.name LIKE ?
+    WHERE u.role = 'CUSTOMER' AND u.name LIKE ? AND u.agency_id = ?
     ORDER BY u.created_at DESC, u.id DESC
     LIMIT 1
     `,
-    [`%${String(customerName).trim()}%`]
+    [`%${String(customerName).trim()}%`, agencyId]
   );
 
   return rows[0] || null;
@@ -65,7 +65,8 @@ export const lookupPenaltyCustomer = async (req, res) => {
       });
     }
 
-    const customer = await lookupCustomer(connection, { consumerNumber, customerName });
+    const agencyId = req.user.agency_id;
+    const customer = await lookupCustomer(connection, { consumerNumber, customerName, agencyId });
 
     if (!customer) {
       return res.status(404).json({
@@ -123,6 +124,8 @@ export const createCustomerPenalty = async (req, res) => {
       });
     }
 
+    const agencyId = req.user.agency_id;
+
     const [customerRows] = await connection.query(
       `
       SELECT
@@ -130,10 +133,10 @@ export const createCustomerPenalty = async (req, res) => {
         name,
         consumer_number AS consumer_number
       FROM users
-      WHERE id = ? AND role = 'CUSTOMER'
+      WHERE id = ? AND role = 'CUSTOMER' AND agency_id = ?
       LIMIT 1
       `,
-      [Number(customerId)]
+      [Number(customerId), agencyId]
     );
 
     if (!customerRows.length) {
@@ -153,8 +156,9 @@ export const createCustomerPenalty = async (req, res) => {
         customer_name_snapshot,
         penalty_reason,
         penalty_amount,
-        payment_status
-      ) VALUES (?, ?, ?, ?, ?, 'UNPAID')
+        payment_status,
+        agency_id
+      ) VALUES (?, ?, ?, ?, ?, 'UNPAID', ?)
       `,
       [
         Number(customer.id),
@@ -162,6 +166,7 @@ export const createCustomerPenalty = async (req, res) => {
         customer.name,
         String(penaltyReason).trim(),
         Number(amount.toFixed(2)),
+        agencyId,
       ]
     );
 
@@ -201,9 +206,11 @@ export const getRecentCustomerPenalties = async (_req, res) => {
         p.payment_status,
         DATE_FORMAT(p.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
       FROM customer_pr_penalties p
+      WHERE p.agency_id = ?
       ORDER BY p.created_at DESC, p.id DESC
       LIMIT 8
-      `
+      `,
+      [req.user.agency_id]
     );
 
     return res.status(200).json({
@@ -239,9 +246,9 @@ export const markPenaltyAsPaid = async (req, res) => {
       `
       UPDATE customer_pr_penalties
       SET payment_status = 'PAID', paid_at = NOW()
-      WHERE id = ? AND payment_status = 'UNPAID'
+      WHERE id = ? AND payment_status = 'UNPAID' AND agency_id = ?
       `,
-      [penaltyId]
+      [penaltyId, req.user.agency_id]
     );
 
     if (!result.affectedRows) {
