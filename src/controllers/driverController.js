@@ -317,8 +317,9 @@ export const getDriverDashboard = async (req, res) => {
       JOIN users u ON d.user_id = u.id
       LEFT JOIN sales s ON s.driver_id = d.id
       LEFT JOIN sales_items si ON si.sale_id = s.id
+      WHERE d.agency_id = ?
       `,
-      dateValues,
+      [...dateValues, req.user.agency_id]
     );
 
     // =========================
@@ -351,7 +352,7 @@ export const getDriverDashboard = async (req, res) => {
       LEFT JOIN sales s ON s.driver_id = d.id
       LEFT JOIN sales_items si ON si.sale_id = s.id
 
-      WHERE 1=1
+      WHERE d.agency_id = ?
       ${searchFilter}
 
       GROUP BY d.id, u.name, u.phone, d.rating, u.status, d.is_available, d.vehicle_number
@@ -359,7 +360,7 @@ export const getDriverDashboard = async (req, res) => {
 
       LIMIT ? OFFSET ?
       `,
-      [...dateValues, ...searchValues, Number(limit), Number(offset)],
+      [...dateValues, req.user.agency_id, ...searchValues, Number(limit), Number(offset)],
     );
 
     console.log({ drivers });
@@ -371,10 +372,10 @@ export const getDriverDashboard = async (req, res) => {
       SELECT COUNT(*) AS total
       FROM drivers d
       JOIN users u ON d.user_id = u.id
-      WHERE 1=1
+      WHERE d.agency_id = ?
       ${searchFilter}
       `,
-      searchValues,
+      [req.user.agency_id, ...searchValues],
     );
 
     return res.json({
