@@ -273,7 +273,7 @@ export const createCustomerConnection = async (req, res) => {
   }
 };
 
-export const getRecentCustomerConnections = async (_req, res) => {
+export const getRecentCustomerConnections = async (req, res) => {
   const connection = await db.getConnection();
 
   try {

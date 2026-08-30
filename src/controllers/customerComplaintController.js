@@ -114,10 +114,10 @@ export const getCustomerComplaints = async (req, res) => {
 
     if (search) {
       filters.push(
-        "(u.name LIKE ? OR cc.issue_type LIKE ? OR cc.description LIKE ? OR CONCAT('CMP-', LPAD(cc.id, 4, '0')) LIKE ?)"
+        "(u.name LIKE ? OR cc.issue_type LIKE ? OR cc.description LIKE ? OR CONCAT('CMP-', LPAD(cc.id, 4, '0')) LIKE ? OR u.consumer_number LIKE ? OR u.phone LIKE ?)"
       );
       const likeSearch = `%${search}%`;
-      params.push(likeSearch, likeSearch, likeSearch, likeSearch);
+      params.push(likeSearch, likeSearch, likeSearch, likeSearch, likeSearch, likeSearch);
     }
 
     const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";

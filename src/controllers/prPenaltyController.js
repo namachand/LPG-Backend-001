@@ -190,7 +190,7 @@ export const createCustomerPenalty = async (req, res) => {
   }
 };
 
-export const getRecentCustomerPenalties = async (_req, res) => {
+export const getRecentCustomerPenalties = async (req, res) => {
   const connection = await db.getConnection();
 
   try {

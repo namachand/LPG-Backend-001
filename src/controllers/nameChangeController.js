@@ -197,7 +197,7 @@ export const createNameChangeRequest = async (req, res) => {
   }
 };
 
-export const getRecentNameChangeRequests = async (_req, res) => {
+export const getRecentNameChangeRequests = async (req, res) => {
   const connection = await db.getConnection();
 
   try {

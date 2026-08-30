@@ -427,7 +427,7 @@ export const createCustomerTransfer = async (req, res) => {
   }
 };
 
-export const getRecentCustomerTransfers = async (_req, res) => {
+export const getRecentCustomerTransfers = async (req, res) => {
   const connection = await db.getConnection();
 
   try {

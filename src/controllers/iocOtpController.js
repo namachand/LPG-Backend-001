@@ -45,7 +45,7 @@ const addSystemQuantity = async (connection, productId, qty) => {
   }
 };
 
-export const getIocOtpSummary = async (_req, res) => {
+export const getIocOtpSummary = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
