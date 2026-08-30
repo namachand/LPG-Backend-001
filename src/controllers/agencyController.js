@@ -4,18 +4,29 @@ export const registerAgency = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    // Support both snake_case and camelCase inputs
-    const agency_name = req.body.agency_name || req.body.agencyName;
-    const gst_number = req.body.gst_number || req.body.gstNumber;
-    const phone_number = req.body.phone_number || req.body.phoneNumber;
-    const email_id = req.body.email_id || req.body.emailId;
-    const address = req.body.address;
-    const state = req.body.state;
-    const district = req.body.district;
-    const pin_code = req.body.pin_code || req.body.pinCode;
-    const subscription_plan =
-      req.body.subscription_plan || req.body.subscriptionPlan;
-    const terms_accepted = req.body.terms_accepted ?? req.body.agreedToTerms;
+    // 0. Handle empty body
+    if (!req.body || Object.keys(req.body).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields.",
+      });
+    }
+
+    // Support both snake_case and camelCase inputs, safely trim strings
+    const agency_name = (req.body.agency_name || req.body.agencyName || "").toString().trim();
+    const gst_number = (req.body.gst_number || req.body.gstNumber || "").toString().trim();
+    const phone_number = (req.body.phone_number || req.body.phoneNumber || "").toString().trim();
+    const email_id = (req.body.email_id || req.body.emailId || "").toString().trim();
+    const address = (req.body.address || "").toString().trim();
+    const state = (req.body.state || "").toString().trim();
+    const district = (req.body.district || "").toString().trim();
+    const pin_code = (req.body.pin_code || req.body.pinCode || "").toString().trim();
+    const subscription_plan = (req.body.subscription_plan || req.body.subscriptionPlan || "").toString().trim();
+    
+    // Handle boolean or string boolean for terms
+    let terms_accepted = req.body.terms_accepted ?? req.body.agreedToTerms;
+    if (terms_accepted === "true") terms_accepted = true;
+    if (terms_accepted === "false") terms_accepted = false;
 
     // 1. Basic validation
     if (
@@ -30,7 +41,7 @@ export const registerAgency = async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Please provide all required fields.",
+        message: "Missing required fields.",
       });
     }
 
