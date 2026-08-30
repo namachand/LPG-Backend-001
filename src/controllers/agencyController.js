@@ -4,18 +4,18 @@ export const registerAgency = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const {
-      agency_name,
-      gst_number,
-      phone_number,
-      email_id,
-      address,
-      state,
-      district,
-      pin_code,
-      subscription_plan,
-      terms_accepted,
-    } = req.body;
+    // Support both snake_case and camelCase inputs
+    const agency_name = req.body.agency_name || req.body.agencyName;
+    const gst_number = req.body.gst_number || req.body.gstNumber;
+    const phone_number = req.body.phone_number || req.body.phoneNumber;
+    const email_id = req.body.email_id || req.body.emailId;
+    const address = req.body.address;
+    const state = req.body.state;
+    const district = req.body.district;
+    const pin_code = req.body.pin_code || req.body.pinCode;
+    const subscription_plan =
+      req.body.subscription_plan || req.body.subscriptionPlan;
+    const terms_accepted = req.body.terms_accepted ?? req.body.agreedToTerms;
 
     // 1. Basic validation
     if (
@@ -46,7 +46,7 @@ export const registerAgency = async (req, res) => {
     // 2. Check if agency email or phone already exists in users table
     const [existingUsers] = await connection.execute(
       "SELECT id FROM users WHERE email = ? OR phone = ?",
-      [email_id, phone_number]
+      [email_id, phone_number],
     );
 
     if (existingUsers.length > 0) {
@@ -76,7 +76,7 @@ export const registerAgency = async (req, res) => {
         pin_code,
         subscription_plan || null,
         terms_accepted ? 1 : 0,
-      ]
+      ],
     );
 
     const agencyId = agencyResult.insertId;
@@ -94,7 +94,7 @@ export const registerAgency = async (req, res) => {
         email_id,
         phone_number,
         agencyId,
-      ]
+      ],
     );
 
     await connection.commit();
@@ -104,7 +104,6 @@ export const registerAgency = async (req, res) => {
       message: "Agency registered successfully! You can now log in.",
       agency_id: agencyId,
     });
-
   } catch (error) {
     await connection.rollback();
     console.error("Error registering agency:", error);
