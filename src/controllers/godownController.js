@@ -1829,7 +1829,7 @@ export const getDeliveryDrivers = async (req, res) => {
       carryForwardBoundary = CARRY_FORWARD_DATE_EXPR.WEEK_START;
     }
 
-    // Get all drivers from the database
+    // Get all drivers from the database for the current agency
     const [allDrivers] = await db.execute(`
       SELECT
         d.id AS driver_id,
@@ -1837,8 +1837,9 @@ export const getDeliveryDrivers = async (req, res) => {
         u.name AS driver_name
       FROM drivers d
       JOIN users u ON u.id = d.user_id
+      WHERE u.agency_id = ?
       ORDER BY u.name ASC
-    `);
+    `, [req.user.agency_id]);
 
     // Get allocation stats for each driver within date range
     const [allocationStats] = await db.execute(`
