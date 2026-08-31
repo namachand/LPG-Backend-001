@@ -536,12 +536,11 @@ export const getOwnerStockItemContext = async (req, res) => {
 
   try {
     const itemId = Number(req.query.itemId || 0);
-    const stockAreaId = Number(req.query.stockAreaId || 0);
 
-    if (!itemId || !stockAreaId) {
+    if (!itemId) {
       return res.status(400).json({
         success: false,
-        message: "itemId and stockAreaId are required",
+        message: "itemId is required",
       });
     }
 
@@ -562,15 +561,25 @@ export const getOwnerStockItemContext = async (req, res) => {
       });
     }
 
-    const [[stockRow]] = await connection.query(
-      `
-      SELECT quantity
-      FROM stock
-      WHERE product_id = ? AND stock_area_id = ? AND agency_id = ?
-      LIMIT 1
-      `,
-      [itemId, stockAreaId, req.user.agency_id]
+    const [[existingArea]] = await connection.query(
+      `SELECT id FROM stock_areas WHERE agency_id = ? LIMIT 1`,
+      [req.user.agency_id]
     );
+
+    let stockAreaId = existingArea ? existingArea.id : null;
+
+    let stockRow = null;
+    if (stockAreaId) {
+      [[stockRow]] = await connection.query(
+        `
+        SELECT quantity
+        FROM stock
+        WHERE product_id = ? AND stock_area_id = ? AND agency_id = ?
+        LIMIT 1
+        `,
+        [itemId, stockAreaId, req.user.agency_id]
+      );
+    }
 
     return res.status(200).json({
       success: true,
@@ -755,16 +764,15 @@ export const upsertOwnerStockEntry = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const stockAreaId = Number(req.body.stockAreaId || 0);
     const itemId = Number(req.body.itemId || 0);
     const quantity = Number(req.body.quantity);
     const price = Number(req.body.price);
     const note = String(req.body.note || "").trim();
 
-    if (!stockAreaId || !itemId) {
+    if (!itemId) {
       return res.status(400).json({
         success: false,
-        message: "stockAreaId and itemId are required",
+        message: "itemId is required",
       });
     }
 
@@ -797,15 +805,20 @@ export const upsertOwnerStockEntry = async (req, res) => {
     }
 
     const [[existingArea]] = await connection.query(
-      `SELECT id FROM stock_areas WHERE id = ? AND agency_id = ? LIMIT 1`,
-      [stockAreaId, req.user.agency_id]
+      `SELECT id FROM stock_areas WHERE agency_id = ? LIMIT 1`,
+      [req.user.agency_id]
     );
+    let stockAreaId;
+
     if (!existingArea) {
-      await connection.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Stock area not found",
-      });
+      const areaName = 'Main Godown - ' + req.user.agency_id;
+      const [insertResult] = await connection.query(
+        `INSERT INTO stock_areas (agency_id, name, address) VALUES (?, ?, 'Default Address')`,
+        [req.user.agency_id, areaName]
+      );
+      stockAreaId = insertResult.insertId;
+    } else {
+      stockAreaId = existingArea.id;
     }
 
     await connection.query(`UPDATE products SET price = ? WHERE id = ?`, [price, itemId]);
