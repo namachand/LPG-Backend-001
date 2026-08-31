@@ -695,6 +695,25 @@ export const getStockDetailByType = async (req, res) => {
       0
     );
 
+    // Stock breakdown: godown on-hand vs allocated (driver in-hand)
+    let godownPhysical = 0;
+    let godownSystem = 0;
+    let allocatedPhysical = 0;
+    let allocatedSystem = 0;
+
+    if (!isEmptyView) {
+      rows.forEach((row) => {
+        const qty = Math.max(Number(row.quantity || 0), 0);
+        const inHand = driverInHandByProduct[Number(row.product_id)] ?? 0;
+        const pendingOtp = pendingOtpByProduct[Number(row.product_id)] ?? 0;
+
+        godownPhysical += qty;
+        godownSystem += qty + pendingOtp;
+        allocatedPhysical += inHand;
+        allocatedSystem += inHand;
+      });
+    }
+
     const titleMap = {
       domestic: "Domestic Available",
       commercial: "Commercial Available",
@@ -721,6 +740,13 @@ export const getStockDetailByType = async (req, res) => {
         diff: totalPhysical - totalSystem,
         showBookings: rawType === "commercial",
         items,
+        ...(!isEmptyView ? {
+          stockBreakdown: {
+            godownStock: { physical: godownPhysical, system: godownSystem },
+            allocatedStock: { physical: allocatedPhysical, system: allocatedSystem },
+            totalStock: { physical: totalPhysical, system: totalSystem },
+          },
+        } : {}),
       },
     });
   } catch (error) {

@@ -137,14 +137,13 @@ export const getOwnerDashboard = async (req, res) => {
       pendingCollectionRows[0]?.pending_amount || 0,
     );
 
-    // Total Stock Available & Empty Stock (Domestic and Commercial only)
+    // Godown on-hand stock (Domestic and Commercial only)
     const [stockRows] = await db.execute(
       `
       SELECT
         p.type AS product_type,
         COALESCE(SUM(s.quantity), 0) AS total_quantity,
-        COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity,
-        COALESCE(SUM(s.system_quantity), 0) AS otp_sent_quantity
+        COALESCE(SUM(s.empty_quantity), 0) AS empty_quantity
       FROM stock s
       INNER JOIN products p ON p.id = s.product_id
       WHERE p.type IN ('DOMESTIC', 'COMMERCIAL')
@@ -154,18 +153,70 @@ export const getOwnerDashboard = async (req, res) => {
       [req.user.agency_id]
     );
 
-    // Total Approved Purchase Stock across all time (for system stock calculation)
-    const [purchaseStockRows] = await db.execute(
+    // Cylinders currently in-hand with drivers (allocated but not yet delivered/returned)
+    // Same logic as godown stock-detail controller.
+    const [driverInHandRows] = await db.execute(
       `
       SELECT
         p.type AS product_type,
-        COALESCE(SUM(st.quantity), 0) AS purchase_stock
-      FROM stock_transactions st
-      INNER JOIN products p ON p.id = st.product_id
-      WHERE st.type IN ('PURCHASE', 'NEW_VALUE', 'ADJUSTMENT_ADD')
-        AND COALESCE(st.isApproved, 0) = 1
-        AND COALESCE(st.is_defective, 0) = 0
-        AND st.agency_id = ?
+        COALESCE(SUM(GREATEST(
+          COALESCE(asi.quantity, 0)
+          - COALESCE(delivered_data.delivered_qty, 0)
+          - COALESCE(return_data.return_qty, 0)
+          - COALESCE(return_data.defective_qty, 0), 0
+        )), 0) AS in_hand
+      FROM sales_items asi
+      INNER JOIN sales a ON a.id = asi.sale_id
+      INNER JOIN products p ON p.id = asi.product_id
+      LEFT JOIN (
+        SELECT child.allocation_sales_item_id,
+               SUM(COALESCE(child.delivered_qty, child.quantity, 0)) AS delivered_qty
+        FROM sales_items child
+        INNER JOIN sales cs ON cs.id = child.sale_id
+        WHERE child.allocation_sales_item_id IS NOT NULL
+          AND cs.status = 'DELIVERED'
+          AND cs.agency_id = ?
+        GROUP BY child.allocation_sales_item_id
+      ) delivered_data ON delivered_data.allocation_sales_item_id = asi.id
+      LEFT JOIN (
+        SELECT st.allocation_sales_item_id,
+               SUM(CASE WHEN st.is_defective = 0 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS return_qty,
+               SUM(CASE WHEN st.is_defective = 1 THEN COALESCE(st.quantity, 0) ELSE 0 END) AS defective_qty
+        FROM stock_transactions st
+        WHERE st.stock_from = 'driver'
+          AND st.type = 'PURCHASE_RETURN'
+          AND st.isApproved IN (0, 1)
+          AND st.agency_id = ?
+          AND st.allocation_sales_item_id IS NOT NULL
+        GROUP BY st.allocation_sales_item_id
+      ) return_data ON return_data.allocation_sales_item_id = asi.id
+      WHERE a.status = 'ASSIGNED'
+        AND a.agency_id = ?
+        AND asi.allocation_sales_item_id IS NULL
+        AND p.type IN ('DOMESTIC', 'COMMERCIAL')
+      GROUP BY p.type
+      `,
+      [req.user.agency_id, req.user.agency_id, req.user.agency_id]
+    );
+
+    // Cylinders sold whose OTP is still pending (system sees them as sold, physical still counts them)
+    // Same logic as godown stock-detail controller.
+    const [pendingOtpRows] = await db.execute(
+      `
+      SELECT
+        p.type AS product_type,
+        COALESCE(SUM(COALESCE(si.delivered_qty, si.quantity, 0)), 0) AS pending_otp
+      FROM sales_items si
+      INNER JOIN sales s ON s.id = si.sale_id
+      INNER JOIN products p ON p.id = si.product_id
+      WHERE si.allocation_sales_item_id IS NOT NULL
+        AND s.status = 'DELIVERED'
+        AND s.agency_id = ?
+        AND p.type IN ('DOMESTIC', 'COMMERCIAL')
+        AND EXISTS (
+          SELECT 1 FROM driver_sale_otps dso
+          WHERE dso.sale_id = s.id AND dso.status = 'PENDING'
+        )
       GROUP BY p.type
       `,
       [req.user.agency_id]
@@ -175,40 +226,51 @@ export const getOwnerDashboard = async (req, res) => {
     let commercialStock = 0;
     let emptyDomestic = 0;
     let emptyCommercial = 0;
-    let systemDomestic = 0;
-    let systemCommercial = 0;
+    let allocatedDomestic = 0;
+    let allocatedCommercial = 0;
     let otpSentDomestic = 0;
     let otpSentCommercial = 0;
-
-    let purchaseDomestic = 0;
-    let purchaseCommercial = 0;
-
-    purchaseStockRows.forEach((row) => {
-      if (row.product_type === "DOMESTIC") {
-        purchaseDomestic = Number(row.purchase_stock || 0);
-      } else if (row.product_type === "COMMERCIAL") {
-        purchaseCommercial = Number(row.purchase_stock || 0);
-      }
-    });
 
     stockRows.forEach((row) => {
       if (row.product_type === "DOMESTIC") {
         domesticStock = Number(row.total_quantity || 0);
         emptyDomestic = Number(row.empty_quantity || 0);
-        otpSentDomestic = Number(row.otp_sent_quantity || 0);
-        systemDomestic = Math.max(purchaseDomestic - otpSentDomestic, 0);
       } else if (row.product_type === "COMMERCIAL") {
         commercialStock = Number(row.total_quantity || 0);
         emptyCommercial = Number(row.empty_quantity || 0);
-        otpSentCommercial = Number(row.otp_sent_quantity || 0);
-        systemCommercial = Math.max(purchaseCommercial - otpSentCommercial, 0);
       }
     });
 
-    const totalStock = domesticStock + commercialStock;
+    driverInHandRows.forEach((row) => {
+      if (row.product_type === "DOMESTIC") {
+        allocatedDomestic = Number(row.in_hand || 0);
+      } else if (row.product_type === "COMMERCIAL") {
+        allocatedCommercial = Number(row.in_hand || 0);
+      }
+    });
+
+    pendingOtpRows.forEach((row) => {
+      if (row.product_type === "DOMESTIC") {
+        otpSentDomestic = Number(row.pending_otp || 0);
+      } else if (row.product_type === "COMMERCIAL") {
+        otpSentCommercial = Number(row.pending_otp || 0);
+      }
+    });
+
+    // Physical = godown on-hand + cylinders in-hand with drivers (same as godown stock-detail)
+    const physicalDomestic = domesticStock + allocatedDomestic;
+    const physicalCommercial = commercialStock + allocatedCommercial;
+
+    // System = physical + cylinders sold with OTP still pending (same as godown stock-detail)
+    const systemDomestic = physicalDomestic + otpSentDomestic;
+    const systemCommercial = physicalCommercial + otpSentCommercial;
+
+    const totalGodownStock = domesticStock + commercialStock;
+    const totalPhysical = physicalDomestic + physicalCommercial;
     const totalEmpty = emptyDomestic + emptyCommercial;
     const totalSystem = systemDomestic + systemCommercial;
     const totalOtpSent = otpSentDomestic + otpSentCommercial;
+    const totalAllocated = allocatedDomestic + allocatedCommercial;
 
     // Total Expenses (Driver Expense from expenses table + Office Expense from office_expenses table)
     const [driverExpenseRows] = await db.execute(
@@ -388,7 +450,7 @@ export const getOwnerDashboard = async (req, res) => {
         stock: {
           domestic: domesticStock,
           commercial: commercialStock,
-          total: totalStock,
+          total: totalGodownStock,
         },
         empty: {
           domestic: emptyDomestic,
@@ -402,7 +464,12 @@ export const getOwnerDashboard = async (req, res) => {
           godownStock: {
             domestic: domesticStock,
             commercial: commercialStock,
-            total: totalStock,
+            total: totalGodownStock,
+          },
+          allocatedStock: {
+            domestic: allocatedDomestic,
+            commercial: allocatedCommercial,
+            total: totalAllocated,
           },
           otpSent: {
             domestic: otpSentDomestic,

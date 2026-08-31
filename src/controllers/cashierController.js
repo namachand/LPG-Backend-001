@@ -3707,17 +3707,35 @@ export const getRecentCashierReceipts = async (req, res) => {
 
 export const getTodaysCashFlow = async (req, res) => {
   const connection = await db.getConnection();
+  const { date } = req.query;
 
   try {
-    const lastClosing = await getLatestClosingBalance(connection, req.user.agency_id);
-    const openingBalance = lastClosing ?? 0;
+    let openingBalance = 0;
+    let anchorCond;
 
-    // Everything for the current running day (resets to 0 at Close Day and at
-    // Start Day, per spec), anchored at the latest of last close / last start.
-    const anchorAt = await getCurrentDayAnchor(connection, req.user.agency_id);
+    if (date) {
+      const [rows] = await connection.query(
+        `SELECT total_cash FROM cashier_closings WHERE agency_id = ? AND DATE(created_at) < ? ORDER BY id DESC LIMIT 1`,
+        [req.user.agency_id, date]
+      );
+      openingBalance = rows.length ? Number(rows[0].total_cash || 0) : 0;
+      
+      anchorCond = (dateExpr) => {
+        return { sql: `AND DATE(${dateExpr}) = ?`, params: [date] };
+      };
+    } else {
+      const lastClosing = await getLatestClosingBalance(connection, req.user.agency_id);
+      openingBalance = lastClosing ?? 0;
+
+      // Everything for the current running day (resets to 0 at Close Day and at
+      // Start Day, per spec), anchored at the latest of last close / last start.
+      const anchorAt = await getCurrentDayAnchor(connection, req.user.agency_id);
+      anchorCond = makeSinceCloseDateCond(anchorAt);
+    }
+
     const ledger = await getCashLedger(
       connection,
-      makeSinceCloseDateCond(anchorAt),
+      anchorCond,
       req.user.agency_id
     );
 
