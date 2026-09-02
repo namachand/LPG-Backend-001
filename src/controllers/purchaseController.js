@@ -87,7 +87,19 @@ const formatTripStatus = (status) => {
   }
 };
 
-const getFirstPurchaseManager = async (connection, agencyId) => {
+const getFirstPurchaseManager = async (connection, agencyId, preferredUserId = null) => {
+  if (preferredUserId) {
+    const [rows] = await connection.query(
+      `
+      SELECT id, name, company_name, phone
+      FROM users
+      WHERE id = ? AND role = 'PURCHASE_MANAGER' AND agency_id = ?
+      `,
+      [preferredUserId, agencyId]
+    );
+    if (rows.length) return rows[0];
+  }
+
   const [rows] = await connection.query(
     `
     SELECT id, name, company_name, phone
@@ -329,7 +341,7 @@ export const getPurchaseBootstrap = async (req, res) => {
 
   try {
     const [manager, stockArea, productRows] = await Promise.all([
-      getFirstPurchaseManager(connection, req.user.agency_id),
+      getFirstPurchaseManager(connection, req.user.agency_id, req.user.id),
       getDefaultStockArea(connection, req.user.agency_id),
       connection.query(
         `

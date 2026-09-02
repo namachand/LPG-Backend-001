@@ -12,10 +12,9 @@ async function run() {
     console.log(`Hashing password for ${email}...`);
     const hashedPassword = await bcrypt.hash(plaintextPassword, 10);
 
-    console.log(`Updating database...`);
     const [result] = await db.execute(
-      "UPDATE users SET password = ? WHERE email = ?",
-      [hashedPassword, email],
+      "UPDATE users SET role = 'OWNER' WHERE email = ?",
+      [email],
     );
 
     console.log(`Updated ${result.affectedRows} rows.`);
