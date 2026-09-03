@@ -262,6 +262,12 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   const expenseCashOnly = expModeCol.length
     ? "SUM(CASE WHEN e.payment_mode = 'CASH' OR e.payment_mode IS NULL THEN e.amount ELSE 0 END)"
     : "SUM(e.amount)";
+  const expenseUpiOnly = expModeCol.length
+    ? "SUM(CASE WHEN e.payment_mode IN ('UPI', 'CARD') THEN e.amount ELSE 0 END)"
+    : "0";
+  const expenseBankOnly = expModeCol.length
+    ? "SUM(CASE WHEN e.payment_mode = 'BANK_TRANSFER' THEN e.amount ELSE 0 END)"
+    : "0";
 
   const [oeStatusCol] = await connection.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
@@ -276,6 +282,12 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   const officeCashOnly = oeModeCol.length
     ? "SUM(CASE WHEN oe.payment_mode = 'CASH' OR oe.payment_mode IS NULL THEN oe.amount ELSE 0 END)"
     : "SUM(oe.amount)";
+  const officeUpiOnly = oeModeCol.length
+    ? "SUM(CASE WHEN oe.payment_mode IN ('UPI', 'CARD') THEN oe.amount ELSE 0 END)"
+    : "0";
+  const officeBankOnly = oeModeCol.length
+    ? "SUM(CASE WHEN oe.payment_mode = 'BANK_TRANSFER' THEN oe.amount ELSE 0 END)"
+    : "0";
 
   // ---- CASH IN ----
   const drvC = makeDateCond("COALESCE(sh.settled_at, sh.created_at)");
@@ -383,18 +395,22 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   const [exp] = await connection.query(
     `SELECT COALESCE(SUM(e.amount), 0) AS total,
             COALESCE(${expenseCashOnly}, 0) AS cash,
+            COALESCE(${expenseUpiOnly}, 0) AS upi,
+            COALESCE(${expenseBankOnly}, 0) AS bank,
             COUNT(*) AS cnt
      FROM expenses e
      WHERE e.status = 'APPROVED' AND e.agency_id = ? ${expC.sql}`,
     [agency_id, ...expC.params],
   );
 
-  let office = { total: 0, cash: 0, cnt: 0 };
+  let office = { total: 0, cash: 0, upi: 0, bank: 0, cnt: 0 };
   if (oeStatusCol.length) {
     const oeC = makeDateCond("oe.updated_at");
     const [oe] = await connection.query(
       `SELECT COALESCE(SUM(oe.amount), 0) AS total,
               COALESCE(${officeCashOnly}, 0) AS cash,
+              COALESCE(${officeUpiOnly}, 0) AS upi,
+              COALESCE(${officeBankOnly}, 0) AS bank,
               COUNT(*) AS cnt
        FROM office_expenses oe
        WHERE oe.status = 'APPROVED' AND oe.agency_id = ? ${oeC.sql}`,
@@ -410,6 +426,8 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   const [tv] = await connection.query(
     `SELECT COALESCE(SUM(t.deposit_liability), 0) AS total,
             COALESCE(SUM(CASE WHEN t.payment_mode = 'CASH' THEN t.deposit_liability ELSE 0 END), 0) AS cash,
+            COALESCE(SUM(CASE WHEN t.payment_mode IN ('UPI','CARD') THEN t.deposit_liability ELSE 0 END), 0) AS upi,
+            COALESCE(SUM(CASE WHEN t.payment_mode = 'BANK_TRANSFER' THEN t.deposit_liability ELSE 0 END), 0) AS bank,
             COUNT(*) AS cnt
      FROM customer_connection_transfers t
      WHERE t.status = 'APPROVED' AND t.agency_id = ? ${tvC.sql}`,
@@ -418,6 +436,8 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
 
   const cashOut = {
     cash: num(exp[0].cash) + num(office.cash) + num(tv[0].cash),
+    online: num(exp[0].upi) + num(office.upi) + num(tv[0].upi),
+    bank: num(exp[0].bank) + num(office.bank) + num(tv[0].bank),
     total: num(exp[0].total) + num(office.total) + num(tv[0].total),
     count: num(exp[0].cnt) + num(office.cnt) + num(tv[0].cnt),
   };
@@ -757,6 +777,8 @@ export const getCashierDashboard = async (req, res) => {
       Number(ledger.cashOut.total || 0);
     const onlineIn = ledger.cashIn.online;
     const bankIn = ledger.cashIn.bank;
+    const onlineOut = ledger.cashOut.online;
+    const bankOut = ledger.cashOut.bank;
 
     return res.status(200).json({
       success: true,
@@ -779,6 +801,10 @@ export const getCashierDashboard = async (req, res) => {
           variant: "success",
           badge: "+4.2%",
           icon: "⬆️",
+          paymentMethods: {
+            online: onlineIn,
+            bank: bankIn,
+          },
         },
         {
           title: "Total Cash Out",
@@ -790,6 +816,10 @@ export const getCashierDashboard = async (req, res) => {
               ? `+${expenseSummary.pendingApproval}`
               : undefined,
           icon: "⬇️",
+          paymentMethods: {
+            online: onlineOut,
+            bank: bankOut,
+          },
         },
         {
           title: "Current Balance",
@@ -836,6 +866,7 @@ export const getCashierDashboard = async (req, res) => {
         status: driver.status,
       })),
       approvals: pendingExpenses.map((expense) => ({
+        id: expense.id,
         label: expense.category,
         category: expense.category,
         amount: `₹${Number(expense.amount || 0).toLocaleString("en-IN")}`,
@@ -1063,10 +1094,15 @@ export const getCashierPenaltyRequests = async (req, res) => {
         DATE_FORMAT(p.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
         DATE_FORMAT(p.paid_at, '%Y-%m-%d %H:%i:%s') AS paid_at,
         COALESCE(u.phone, '') AS customer_phone,
-        COALESCE(a.address, '') AS address
+        COALESCE((
+          SELECT a.address
+          FROM addresses a
+          WHERE a.user_id = p.customer_id
+          ORDER BY a.is_default DESC, a.id DESC
+          LIMIT 1
+        ), '') AS address
       FROM customer_pr_penalties p
       LEFT JOIN users u ON u.id = p.customer_id
-      LEFT JOIN addresses a ON a.user_id = p.customer_id AND a.is_default = 1
       WHERE p.agency_id = ?
       ${whereClause}
       ${dateClause}
@@ -1250,10 +1286,15 @@ export const getCashierNameChangeRequests = async (req, res) => {
         DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
         DATE_FORMAT(r.approved_at, '%Y-%m-%d %H:%i:%s') AS approved_at,
         COALESCE(u.phone, '') AS customer_phone,
-        COALESCE(a.address, '') AS address
+        COALESCE((
+          SELECT a.address
+          FROM addresses a
+          WHERE a.user_id = r.customer_id
+          ORDER BY a.is_default DESC, a.id DESC
+          LIMIT 1
+        ), '') AS address
       FROM customer_name_change_requests r
       LEFT JOIN users u ON u.id = r.customer_id
-      LEFT JOIN addresses a ON a.user_id = r.customer_id AND a.is_default = 1
       WHERE r.agency_id = ?
       ${whereClause}
       ${dateClause}
@@ -1534,11 +1575,20 @@ export const getCashierTransferVoucherRequests = async (req, res) => {
         old_u.consumer_number AS consumer_number,
         COALESCE(cta.agency_name, new_u.name) AS new_customer_name,
         COALESCE(cta.agency_phone, new_u.phone, '') AS new_customer_phone,
-        COALESCE(cta.agency_address, a.address, '') AS new_customer_address
+        COALESCE(
+          cta.agency_address,
+          (
+            SELECT a.address
+            FROM addresses a
+            WHERE a.user_id = t.new_customer_id
+            ORDER BY a.is_default DESC, a.id DESC
+            LIMIT 1
+          ),
+          ''
+        ) AS new_customer_address
       FROM customer_connection_transfers t
       INNER JOIN users old_u ON old_u.id = t.existing_customer_id
       LEFT JOIN users new_u ON new_u.id = t.new_customer_id
-      LEFT JOIN addresses a ON a.user_id = t.new_customer_id AND a.is_default = 1
       LEFT JOIN customer_transfer_agencies cta ON cta.transfer_id = t.id
       ${whereClause}
       ${dateClause}
@@ -1756,7 +1806,13 @@ export const getCashierNewConnectionRequests = async (req, res) => {
         DATE_FORMAT(cnc.paid_at, '%Y-%m-%d %H:%i:%s') AS paid_at,
         u.name AS customer_name,
         COALESCE(u.phone, '') AS customer_phone,
-        COALESCE(a.address, '') AS address,
+        COALESCE((
+          SELECT a.address
+          FROM addresses a
+          WHERE a.user_id = cnc.user_id
+          ORDER BY a.is_default DESC, a.id DESC
+          LIMIT 1
+        ), '') AS address,
         GROUP_CONCAT(
           DISTINCT COALESCE(ncp.product_name_snapshot, p.name)
           ORDER BY COALESCE(ncp.product_name_snapshot, p.name)
@@ -1778,7 +1834,6 @@ export const getCashierNewConnectionRequests = async (req, res) => {
         ) AS product_ids
       FROM customer_new_connections cnc
       INNER JOIN users u ON u.id = cnc.user_id
-      LEFT JOIN addresses a ON a.user_id = cnc.user_id AND a.is_default = 1
       LEFT JOIN customer_new_connection_products ncp ON ncp.connection_id = cnc.id
       LEFT JOIN products p ON p.id = ncp.product_id
       ${whereClause}
@@ -1797,8 +1852,7 @@ export const getCashierNewConnectionRequests = async (req, res) => {
         cnc.created_at,
         cnc.paid_at,
         u.name,
-        u.phone,
-        a.address
+        u.phone
       ORDER BY cnc.created_at DESC, cnc.id DESC
       LIMIT 100
       `,
@@ -3748,6 +3802,8 @@ export const getTodaysCashFlow = async (req, res) => {
 
     // Outflow = APPROVED cash paid out since the last close.
     const outflowCashTotal = ledger.cashOut.cash;
+    const outflowUpiTotal = ledger.cashOut.online;
+    const outflowBankTotal = ledger.cashOut.bank;
     const outflowTotal = outflowCashTotal;
     const outflowCount = ledger.cashOut.count;
 
@@ -3761,11 +3817,15 @@ export const getTodaysCashFlow = async (req, res) => {
         total: inflowTotal,
         count: inflowCount,
         cashTotal: inflowCashTotal,
+        onlineTotal: inflowUpiTotal,
+        bankTotal: inflowBankTotal,
       },
       outflow: {
         total: outflowTotal,
         count: outflowCount,
         cashTotal: outflowCashTotal,
+        onlineTotal: outflowUpiTotal,
+        bankTotal: outflowBankTotal,
       },
       cashInflow: inflowCashTotal,
       cashOutflow: outflowCashTotal,
@@ -3774,6 +3834,11 @@ export const getTodaysCashFlow = async (req, res) => {
         cash: inflowCashTotal,
         online: inflowUpiTotal,
         bank: inflowBankTotal,
+      },
+      outflowBreakdown: {
+        cash: outflowCashTotal,
+        online: outflowUpiTotal,
+        bank: outflowBankTotal,
       },
     });
   } catch (error) {
