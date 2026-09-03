@@ -47,8 +47,9 @@ const increaseStock = async (
     emptyQuantity = 0,
     defectiveQuantity = 0,
   },
-  agencyId
+  agencyId = 1
 ) => {
+  const effectiveAgencyId = agencyId || 1;
   const qty = Number(quantity || 0);
   const returnQty = Number(returnQuantity || 0);
   const emptyQty = Number(emptyQuantity || 0);
@@ -67,7 +68,7 @@ const increaseStock = async (
     LIMIT 1
     FOR UPDATE
     `,
-    [productId, agencyId, DEFAULT_STOCK_AREA_ID]
+    [productId, effectiveAgencyId, DEFAULT_STOCK_AREA_ID]
   );
 
   if (rows.length) {
@@ -101,7 +102,7 @@ const increaseStock = async (
     )
     VALUES (?, NULL, ?, ?, ?, ?, ?)
     `,
-    [productId, qty, returnQty, emptyQty, defectiveQty, agencyId]
+    [productId, qty, returnQty, emptyQty, defectiveQty, effectiveAgencyId]
   );
 };
 
@@ -2720,6 +2721,7 @@ export const approveReturnByCondition = async (req, res) => {
 
   try {
     const { driver_id, condition } = req.body;
+    const agencyId = req.user?.agency_id || 1;
 
     if (!driver_id || !condition) {
       return res.status(400).json({
@@ -2752,7 +2754,7 @@ export const approveReturnByCondition = async (req, res) => {
 
     const [rows] = await connection.execute(
       `
-      SELECT st.id, st.product_id, st.quantity, st.type, st.is_defective
+      SELECT st.id, st.product_id, st.quantity, st.type, st.is_defective, st.agency_id
       FROM stock_transactions st
       LEFT JOIN sales linked_sale
         ON linked_sale.id = st.reference_id
@@ -2777,25 +2779,26 @@ export const approveReturnByCondition = async (req, res) => {
     }
 
     for (const row of rows) {
+      const rowAgencyId = row.agency_id || agencyId;
       if (condition === "empty") {
         await increaseStock(connection, {
           productId: Number(row.product_id),
           emptyQuantity: Number(row.quantity || 0),
-        });
+        }, rowAgencyId);
       }
 
       if (condition === "normal") {
         await increaseStock(connection, {
           productId: Number(row.product_id),
           quantity: Number(row.quantity || 0),
-        });
+        }, rowAgencyId);
       }
 
       if (condition === "defective") {
         await increaseStock(connection, {
           productId: Number(row.product_id),
           defectiveQuantity: Number(row.quantity || 0),
-        });
+        }, rowAgencyId);
       }
     }
 
@@ -2931,11 +2934,12 @@ export const approveTransferEmptyReturn = async (req, res) => {
     }
 
     const row = rows[0];
+    const agencyId = req.user?.agency_id || row.agency_id || 1;
 
     await increaseStock(connection, {
       productId: Number(row.product_id),
       emptyQuantity: Number(row.quantity || 0),
-    });
+    }, agencyId);
 
     await connection.execute(
       `UPDATE stock_transactions SET isApproved = 1 WHERE id = ?`,
@@ -2966,6 +2970,7 @@ export const cancelStockOutLoad = async (req, res) => {
 
   try {
     const { loadId } = req.params;
+    const agencyId = req.user?.agency_id || 1;
 
     await connection.beginTransaction();
 
@@ -2977,7 +2982,8 @@ export const cancelStockOutLoad = async (req, res) => {
         quantity,
         type,
         is_defective,
-        isApproved
+        isApproved,
+        agency_id
       FROM stock_transactions
       WHERE COALESCE(reference_id, driver_id) = ?
         AND stock_from IN ('godown', 'stock_out')
@@ -3001,19 +3007,20 @@ export const cancelStockOutLoad = async (req, res) => {
     for (const row of rows) {
       const productId = Number(row.product_id);
       const qty = Number(row.quantity || 0);
+      const rowAgencyId = row.agency_id || agencyId;
 
       if (row.type === "EMPTY_RETURN") {
         await increaseStock(connection, {
           productId,
           emptyQuantity: qty,
-        });
+        }, rowAgencyId);
       }
 
       if (row.type === "PURCHASE_RETURN" && Number(row.is_defective) === 1) {
         await increaseStock(connection, {
           productId,
           defectiveQuantity: qty,
-        });
+        }, rowAgencyId);
       }
     }
 
