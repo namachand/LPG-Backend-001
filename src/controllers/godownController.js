@@ -761,54 +761,124 @@ export const getStockDetailByType = async (req, res) => {
 
 export const getStockInLoads = async (req, res) => {
   try {
-    const [rows] = await db.execute(`
+    const agencyId = req.user?.agency_id || 1;
+
+    // 1. Primary source: purchase_loads (from Purchase Manager load trip requests)
+    const [purchaseLoads] = await db.execute(`
+      SELECT
+        pl.id AS load_id,
+        DATE_FORMAT(pl.created_at, '%Y-%m-%d') AS load_date,
+        pl.created_at,
+        COALESCE(pl.total_quantity, SUM(pli.quantity), 0) AS total_quantity,
+        pl.status AS load_status,
+        pl.invoice_number,
+        pl.invoice_url,
+        pt.id AS trip_id,
+        pt.status AS trip_status,
+        pu.id AS driver_id,
+        pu.name AS driver_name,
+        COALESCE(ujp.vehicle_number, d.vehicle_number, 'N/A') AS vehicle_number
+      FROM purchase_loads pl
+      LEFT JOIN purchase_load_items pli ON pli.load_id = pl.id
+      LEFT JOIN purchase_trips pt ON pt.id = pl.trip_id
+      LEFT JOIN users pu ON pu.id = COALESCE(pl.created_by, pt.purchase_manager_id)
+      LEFT JOIN user_job_profiles ujp ON ujp.user_id = pu.id
+      LEFT JOIN drivers d ON d.user_id = pu.id
+      WHERE pl.agency_id = ? AND pl.status <> 'CANCELLED'
+      GROUP BY
+        pl.id,
+        DATE_FORMAT(pl.created_at, '%Y-%m-%d'),
+        pl.created_at,
+        pl.total_quantity,
+        pl.status,
+        pl.invoice_number,
+        pl.invoice_url,
+        pt.id,
+        pt.status,
+        pu.id,
+        pu.name,
+        ujp.vehicle_number,
+        d.vehicle_number
+      ORDER BY pl.created_at DESC
+    `, [agencyId]);
+
+    const mapStatus = (status) => {
+      if (status === "APPROVED") return "APPROVED";
+      if (status === "PENDING") return "WAITING_APPROVAL";
+      return "IN_PROGRESS";
+    };
+
+    const loadIdSet = new Set(purchaseLoads.map((r) => Number(r.load_id)));
+
+    // 2. Fallback query for any standalone stock_transactions with type = 'PURCHASE' not linked to a purchase_load
+    const [txRows] = await db.execute(`
       SELECT
         COALESCE(st.reference_id, st.driver_id) AS load_id,
-        DATE(st.created_at) AS load_date,
+        DATE_FORMAT(st.created_at, '%Y-%m-%d') AS load_date,
         MAX(st.created_at) AS created_at,
         SUM(st.quantity) AS total_quantity,
         MIN(st.isApproved) AS isApproved,
-        MAX(pl.invoice_number) AS invoice_number,
-
         d.id AS driver_id,
-        d.vehicle_number,
-        u.name AS driver_name,
-        pu.name AS purchase_manager_name
+        COALESCE(ujp.vehicle_number, d.vehicle_number, 'N/A') AS vehicle_number,
+        COALESCE(pu.name, u.name, 'Unknown Driver') AS driver_name
       FROM stock_transactions st
       LEFT JOIN drivers d ON d.id = st.driver_id
       LEFT JOIN users u ON u.id = d.user_id
-      LEFT JOIN purchase_loads pl ON pl.id = st.reference_id
-      LEFT JOIN purchase_trips pt ON pt.id = pl.trip_id
-      LEFT JOIN users pu ON pu.id = pt.purchase_manager_id
+      LEFT JOIN users pu ON pu.id = st.created_by
+      LEFT JOIN user_job_profiles ujp ON ujp.user_id = COALESCE(pu.id, u.id)
       WHERE st.type = 'PURCHASE' AND st.agency_id = ?
       GROUP BY
         COALESCE(st.reference_id, st.driver_id),
-        DATE(st.created_at),
+        DATE_FORMAT(st.created_at, '%Y-%m-%d'),
         d.id,
+        ujp.vehicle_number,
         d.vehicle_number,
-        u.name,
-        pu.name
+        pu.name,
+        u.name
       ORDER BY created_at DESC
-    `, [req.user.agency_id]);
+    `, [agencyId]);
 
-    return res.json({
-      success: true,
-      data: rows.map((row, index) => ({
+    const result = [];
+    let index = 1;
+
+    for (const row of purchaseLoads) {
+      result.push({
         id: row.load_id,
-        load: `Load-${index + 1}`,
+        load: `Load-${index++}`,
         date: row.load_date,
         driver_id: row.driver_id,
-        driver: row.purchase_manager_name || row.driver_name || "Unknown Driver",
+        driver: row.driver_name || "Unknown Driver",
         invoice: row.invoice_number || `INV-${row.load_id}`,
         vehicle: row.vehicle_number || "N/A",
         qty: Number(row.total_quantity || 0),
-        status:
-          Number(row.isApproved) === 1
-            ? "APPROVED"
-            : Number(row.isApproved) === 2
-              ? "WAITING_APPROVAL"
-              : "IN_PROGRESS",
-      })),
+        status: mapStatus(row.load_status),
+      });
+    }
+
+    for (const row of txRows) {
+      if (!loadIdSet.has(Number(row.load_id))) {
+        result.push({
+          id: row.load_id,
+          load: `Load-${index++}`,
+          date: row.load_date,
+          driver_id: row.driver_id,
+          driver: row.driver_name || "Unknown Driver",
+          invoice: `INV-${row.load_id}`,
+          vehicle: row.vehicle_number || "N/A",
+          qty: Number(row.total_quantity || 0),
+          status:
+            Number(row.isApproved) === 1
+              ? "APPROVED"
+              : Number(row.isApproved) === 2
+                ? "WAITING_APPROVAL"
+                : "IN_PROGRESS",
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: result,
     });
   } catch (error) {
     console.error("getStockInLoads error:", error);
@@ -822,7 +892,78 @@ export const getStockInLoads = async (req, res) => {
 export const getStockInLoadDetail = async (req, res) => {
   try {
     const { loadId } = req.params;
+    const agencyId = req.user?.agency_id || 1;
 
+    // 1. Check purchase_loads
+    const [loadRows] = await db.execute(
+      `
+      SELECT
+        pli.id AS item_id,
+        pli.product_id,
+        pli.quantity,
+        pl.id AS load_id,
+        pl.created_at,
+        pl.status AS load_status,
+        pl.invoice_url,
+        pl.invoice_number,
+        pl.stock_area_id,
+        p.name AS product_name,
+        p.type AS product_type,
+        c.name AS category_name,
+        pu.name AS driver_name,
+        COALESCE(ujp.vehicle_number, d.vehicle_number, 'N/A') AS vehicle_number
+      FROM purchase_loads pl
+      JOIN purchase_load_items pli ON pli.load_id = pl.id
+      JOIN products p ON p.id = pli.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN purchase_trips pt ON pt.id = pl.trip_id
+      LEFT JOIN users pu ON pu.id = COALESCE(pl.created_by, pt.purchase_manager_id)
+      LEFT JOIN user_job_profiles ujp ON ujp.user_id = pu.id
+      LEFT JOIN drivers d ON d.user_id = pu.id
+      WHERE pl.id = ? AND pl.agency_id = ?
+      ORDER BY pli.id ASC
+      `,
+      [loadId, agencyId]
+    );
+
+    if (loadRows.length) {
+      const totalQty = loadRows.reduce(
+        (sum, row) => sum + Number(row.quantity || 0),
+        0
+      );
+
+      const mapStatus = (status) => {
+        if (status === "APPROVED") return "APPROVED";
+        if (status === "PENDING") return "WAITING_APPROVAL";
+        return "IN_PROGRESS";
+      };
+
+      return res.json({
+        success: true,
+        data: {
+          id: loadId,
+          load: `Load-${loadId}`,
+          date: loadRows[0].created_at,
+          driver: loadRows[0].driver_name || "Unknown Driver",
+          vehicle: loadRows[0].vehicle_number || "N/A",
+          depot: "HP Gas Depot - Sector 12",
+          invoice: loadRows[0].invoice_number || `INV-${loadId}`,
+          invoiceImageUrl: loadRows[0].invoice_url || null,
+          qty: totalQty,
+          status: mapStatus(loadRows[0].load_status),
+          items: loadRows.map((row) => ({
+            transaction_id: row.item_id,
+            product_id: row.product_id,
+            item: row.product_name,
+            category: row.category_name,
+            type: row.product_type,
+            quantity: Number(row.quantity || 0),
+          })),
+        },
+      });
+    }
+
+    // 2. Fallback: check stock_transactions
     const [rows] = await db.execute(
       `
       SELECT
@@ -839,9 +980,8 @@ export const getStockInLoadDetail = async (req, res) => {
         p.type AS product_type,
         c.name AS category_name,
 
-        d.vehicle_number,
-        u.name AS driver_name,
-        pu.name AS purchase_manager_name,
+        COALESCE(ujp.vehicle_number, d.vehicle_number, 'N/A') AS vehicle_number,
+        COALESCE(pu.name, u.name, 'Unknown Driver') AS driver_name,
         pl.invoice_url,
         pl.invoice_number
       FROM stock_transactions st
@@ -851,13 +991,14 @@ export const getStockInLoadDetail = async (req, res) => {
       LEFT JOIN users u ON u.id = d.user_id
       LEFT JOIN purchase_loads pl ON pl.id = st.reference_id
       LEFT JOIN purchase_trips pt ON pt.id = pl.trip_id
-      LEFT JOIN users pu ON pu.id = pt.purchase_manager_id
+      LEFT JOIN users pu ON pu.id = COALESCE(pl.created_by, pt.purchase_manager_id)
+      LEFT JOIN user_job_profiles ujp ON ujp.user_id = pu.id
       WHERE st.type = 'PURCHASE'
         AND COALESCE(st.reference_id, st.driver_id) = ?
         AND st.agency_id = ?
       ORDER BY st.id ASC
       `,
-      [loadId, req.user.agency_id]
+      [loadId, agencyId]
     );
 
     if (!rows.length) {
@@ -876,10 +1017,10 @@ export const getStockInLoadDetail = async (req, res) => {
       success: true,
       data: {
         id: loadId,
-        load: "Load-1",
+        load: `Load-${loadId}`,
         date: rows[0].created_at,
-        driver: rows[0].purchase_manager_name || rows[0].driver_name || "Unknown Driver",
-        vehicle: rows[0].vehicle_number || "N/A",
+        driver: rows[0].driver_name,
+        vehicle: rows[0].vehicle_number,
         depot: "HP Gas Depot - Sector 12",
         invoice: rows[0].invoice_number || `INV-${loadId}`,
         invoiceImageUrl: rows[0].invoice_url || null,
@@ -914,22 +1055,68 @@ export const approveStockInLoad = async (req, res) => {
 
   try {
     const { loadId } = req.params;
+    const agencyId = req.user?.agency_id || 1;
 
     await connection.beginTransaction();
 
-    const [rows] = await connection.execute(
+    // 1. Check purchase_loads first
+    const [loadRows] = await connection.execute(
       `
-      SELECT id, product_id, quantity
-      FROM stock_transactions
-      WHERE type = 'PURCHASE'
-        AND COALESCE(reference_id, driver_id) = ?
-        AND isApproved = 2
-        AND agency_id = ?
+      SELECT pl.id, pl.status, pl.stock_area_id, pl.created_by, pl.trip_id
+      FROM purchase_loads pl
+      WHERE pl.id = ? AND pl.agency_id = ?
       `,
-      [loadId, req.user.agency_id]
+      [loadId, agencyId]
     );
 
-    if (!rows.length) {
+    let itemsToApprove = [];
+    let isPurchaseLoad = false;
+
+    if (loadRows.length) {
+      isPurchaseLoad = true;
+      if (loadRows[0].status === "APPROVED") {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "This load has already been approved",
+        });
+      }
+
+      if (loadRows[0].status === "CANCELLED") {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "Cannot approve a cancelled load",
+        });
+      }
+
+      const [itemRows] = await connection.execute(
+        `
+        SELECT id, product_id, quantity
+        FROM purchase_load_items
+        WHERE load_id = ?
+        `,
+        [loadId]
+      );
+
+      itemsToApprove = itemRows;
+    } else {
+      // Fallback: check stock_transactions
+      const [txRows] = await connection.execute(
+        `
+        SELECT id, product_id, quantity
+        FROM stock_transactions
+        WHERE type = 'PURCHASE'
+          AND COALESCE(reference_id, driver_id) = ?
+          AND isApproved = 2
+          AND agency_id = ?
+        `,
+        [loadId, agencyId]
+      );
+      itemsToApprove = txRows;
+    }
+
+    if (!itemsToApprove.length) {
       await connection.rollback();
       return res.status(404).json({
         success: false,
@@ -937,26 +1124,57 @@ export const approveStockInLoad = async (req, res) => {
       });
     }
 
-    for (const row of rows) {
+    // Increase stock in godown
+    for (const row of itemsToApprove) {
       await increaseStock(connection, {
         productId: Number(row.product_id),
         quantity: Number(row.quantity || 0),
-      }, req.user.agency_id);
+      }, agencyId);
     }
 
-    await connection.execute(
-      `
-      UPDATE stock_transactions
-      SET isApproved = 1
-      WHERE type = 'PURCHASE'
-        AND COALESCE(reference_id, driver_id) = ?
-        AND isApproved = 2
-        AND agency_id = ?
-      `,
-      [loadId, req.user.agency_id]
-    );
+    // Ensure stock_transactions are marked approved (isApproved = 1)
+    if (isPurchaseLoad) {
+      for (const row of itemsToApprove) {
+        const [txCheck] = await connection.execute(
+          `SELECT id FROM stock_transactions WHERE type = 'PURCHASE' AND reference_id = ? AND product_id = ? LIMIT 1`,
+          [loadId, row.product_id]
+        );
+        if (txCheck.length) {
+          await connection.execute(
+            `UPDATE stock_transactions SET isApproved = 1 WHERE id = ?`,
+            [txCheck[0].id]
+          );
+        } else {
+          await connection.execute(
+            `INSERT INTO stock_transactions (product_id, stock_area_id, type, quantity, isApproved, reference_id, created_by, stock_from, agency_id, created_at)
+             VALUES (?, ?, 'PURCHASE', ?, 1, ?, ?, 'depot', ?, NOW())`,
+            [
+              row.product_id,
+              loadRows[0]?.stock_area_id || null,
+              row.quantity,
+              loadId,
+              loadRows[0]?.created_by || null,
+              agencyId,
+            ]
+          );
+        }
+      }
 
-    await syncPurchaseApprovalState(connection, loadId, req.user.agency_id);
+      await syncPurchaseApprovalState(connection, loadId, agencyId);
+    } else {
+      await connection.execute(
+        `
+        UPDATE stock_transactions
+        SET isApproved = 1
+        WHERE type = 'PURCHASE'
+          AND COALESCE(reference_id, driver_id) = ?
+          AND isApproved = 2
+          AND agency_id = ?
+        `,
+        [loadId, agencyId]
+      );
+      await syncPurchaseApprovalState(connection, loadId, agencyId);
+    }
 
     await connection.commit();
 

@@ -140,7 +140,20 @@ const getDefaultStockArea = async (connection, agencyId) => {
     [agencyId]
   );
 
-  return rows[0] || null;
+  if (rows.length) {
+    return rows[0];
+  }
+
+  // Auto-create default stock area if none exists for this agency
+  try {
+    const [result] = await connection.query(
+      `INSERT INTO stock_areas (agency_id, name, address) VALUES (?, 'Main Godown', 'Default Godown')`,
+      [agencyId]
+    );
+    return { id: result.insertId, name: 'Main Godown' };
+  } catch (err) {
+    return null;
+  }
 };
 
 const derivePurchaseLoadType = (productRows) => {
@@ -1593,7 +1606,7 @@ const getPurchaseLoadDetailData = async (connection, loadId, agencyId) => {
  * Must be called inside an active transaction.
  */
 const _markLoadStockWaiting = async (connection, loadId) => {
-  await connection.query(
+  const [updated] = await connection.query(
     `
     UPDATE stock_transactions
     SET isApproved = 2, created_at = CURRENT_TIMESTAMP
@@ -1603,6 +1616,42 @@ const _markLoadStockWaiting = async (connection, loadId) => {
     `,
     [loadId],
   );
+
+  if (updated.affectedRows === 0) {
+    const [loadRows] = await connection.query(
+      `SELECT pl.id, pl.agency_id, pl.created_by, pl.stock_area_id, pt.stock_area_id as trip_stock_area_id, pt.agency_id as trip_agency_id
+       FROM purchase_loads pl
+       LEFT JOIN purchase_trips pt ON pt.id = pl.trip_id
+       WHERE pl.id = ?`,
+      [loadId]
+    );
+
+    if (loadRows.length) {
+      const agencyId = loadRows[0].agency_id || loadRows[0].trip_agency_id || 1;
+      let stockAreaId = loadRows[0].stock_area_id || loadRows[0].trip_stock_area_id;
+      if (!stockAreaId) {
+        const defaultArea = await getDefaultStockArea(connection, agencyId);
+        stockAreaId = defaultArea ? defaultArea.id : null;
+        if (stockAreaId) {
+          await connection.query(`UPDATE purchase_loads SET stock_area_id = ? WHERE id = ?`, [stockAreaId, loadId]);
+        }
+      }
+
+      const [items] = await connection.query(
+        `SELECT product_id, quantity FROM purchase_load_items WHERE load_id = ?`,
+        [loadId]
+      );
+
+      for (const item of items) {
+        await connection.query(
+          `INSERT INTO stock_transactions (
+            product_id, stock_area_id, type, quantity, isApproved, reference_id, created_by, stock_from, agency_id, created_at
+          ) VALUES (?, ?, 'PURCHASE', ?, 2, ?, ?, 'depot', ?, NOW())`,
+          [item.product_id, stockAreaId, item.quantity, loadId, loadRows[0].created_by, agencyId]
+        );
+      }
+    }
+  }
 };
 
 /**

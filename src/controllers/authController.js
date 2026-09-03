@@ -35,8 +35,9 @@ const maskEmail = (email = "") => {
   return `${visible}${hidden}@${domain}`;
 };
 
-const normalizeUser = (user) => ({
+const normalizeUser = (user, driverId = null) => ({
   id: Number(user.id),
+  driver_id: driverId ? Number(driverId) : (user.driver_id ? Number(user.driver_id) : null),
   name: user.name || "",
   email: user.email || "",
   phone: user.phone || "",
@@ -101,8 +102,31 @@ const validateRoleAndStatus = (user) => {
   return { ok: true };
 };
 
-const respondWithLogin = (res, user) => {
-  const normalized = normalizeUser(user);
+const respondWithLogin = async (res, user) => {
+  let driverId = null;
+  if (user.role === "DRIVER" || user.role === "DELIVERY_AGENT") {
+    try {
+      const [dRows] = await db.execute(
+        "SELECT id FROM drivers WHERE user_id = ? LIMIT 1",
+        [user.id]
+      );
+      if (dRows.length) {
+        driverId = Number(dRows[0].id);
+      } else {
+        const [ins] = await db.execute(
+          "INSERT INTO drivers (user_id, is_available, rating, created_at) VALUES (?, 1, 0.0, NOW())",
+          [user.id]
+        );
+        if (ins.insertId) {
+          driverId = Number(ins.insertId);
+        }
+      }
+    } catch (err) {
+      console.warn("Could not find or create driver record for user:", user.id, err);
+    }
+  }
+
+  const normalized = normalizeUser(user, driverId);
   return res.status(200).json({
     success: true,
     token: generateToken(normalized),
@@ -232,7 +256,7 @@ export const loginWithPassword = async (req, res) => {
       });
     }
 
-    return respondWithLogin(res, user);
+    return await respondWithLogin(res, user);
   } catch (error) {
     console.error("loginWithPassword error:", error);
     return res.status(500).json({
@@ -322,7 +346,7 @@ export const verifyOtpLogin = async (req, res) => {
       stage: "VERIFY",
     });
 
-    return respondWithLogin(res, user);
+    return await respondWithLogin(res, user);
   } catch (error) {
     console.error("verifyOtpLogin error:", error);
     return res.status(500).json({

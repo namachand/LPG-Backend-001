@@ -100,6 +100,35 @@ const resolveDriverId = async (value, queryRunner = db) => {
     return Number(userMappedRows[0].id);
   }
 
+  // Self-healing: if the user is a driver in users table but missing from drivers table, create the driver record
+  try {
+    const [userRows] = await queryRunner.execute(
+      `
+      SELECT id, role
+      FROM users
+      WHERE id = ?
+        AND role IN ('DRIVER', 'DELIVERY_AGENT')
+      LIMIT 1
+      `,
+      [numericValue],
+    );
+
+    if (userRows.length) {
+      const [insertRes] = await queryRunner.execute(
+        `
+        INSERT INTO drivers (user_id, is_available, rating, created_at)
+        VALUES (?, 1, 0.0, NOW())
+        `,
+        [userRows[0].id],
+      );
+      if (insertRes.insertId) {
+        return Number(insertRes.insertId);
+      }
+    }
+  } catch (err) {
+    console.warn("Could not auto-create missing driver record:", err);
+  }
+
   return null;
 };
 
