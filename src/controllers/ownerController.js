@@ -199,13 +199,12 @@ export const getOwnerDashboard = async (req, res) => {
       [req.user.agency_id, req.user.agency_id, req.user.agency_id]
     );
 
-    // Cylinders sold whose OTP is still pending (system sees them as sold, physical still counts them)
-    // Same logic as godown stock-detail controller.
-    const [pendingOtpRows] = await db.execute(
+    // Cylinders sold whose OTP has been submitted to IOC within the date range
+    const [sentOtpRows] = await db.execute(
       `
       SELECT
         p.type AS product_type,
-        COALESCE(SUM(COALESCE(si.delivered_qty, si.quantity, 0)), 0) AS pending_otp
+        COALESCE(SUM(COALESCE(si.delivered_qty, si.quantity, 0)), 0) AS sent_otp
       FROM sales_items si
       INNER JOIN sales s ON s.id = si.sale_id
       INNER JOIN products p ON p.id = si.product_id
@@ -215,11 +214,13 @@ export const getOwnerDashboard = async (req, res) => {
         AND p.type IN ('DOMESTIC', 'COMMERCIAL')
         AND EXISTS (
           SELECT 1 FROM driver_sale_otps dso
-          WHERE dso.sale_id = s.id AND dso.status = 'PENDING'
+          WHERE dso.sale_id = s.id
+            AND dso.status = 'SENT'
+            AND DATE(dso.created_at) BETWEEN ? AND ?
         )
       GROUP BY p.type
       `,
-      [req.user.agency_id]
+      [req.user.agency_id, startDate, endDate]
     );
 
     let domesticStock = 0;
@@ -249,11 +250,11 @@ export const getOwnerDashboard = async (req, res) => {
       }
     });
 
-    pendingOtpRows.forEach((row) => {
+    sentOtpRows.forEach((row) => {
       if (row.product_type === "DOMESTIC") {
-        otpSentDomestic = Number(row.pending_otp || 0);
+        otpSentDomestic = Number(row.sent_otp || 0);
       } else if (row.product_type === "COMMERCIAL") {
-        otpSentCommercial = Number(row.pending_otp || 0);
+        otpSentCommercial = Number(row.sent_otp || 0);
       }
     });
 
@@ -304,9 +305,9 @@ export const getOwnerDashboard = async (req, res) => {
     const [paymentSummaryRows] = await db.execute(
       `
       SELECT
-        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash_sales,
-        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS gpay_sales,
-        COALESCE(SUM(CASE WHEN (p.type = 'COMPANY' OR p.method = 'CARD') AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS online_sales
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash_sales,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS gpay_sales,
+        COALESCE(SUM(CASE WHEN (p.type = 'COMPANY' OR p.method = 'CARD' OR s.payment_method = 'ONLINE') AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS online_sales
       FROM payments p
       INNER JOIN sales s ON s.id = p.sale_id
       WHERE s.status = 'DELIVERED'
@@ -329,9 +330,9 @@ export const getOwnerDashboard = async (req, res) => {
         d.id AS driver_id,
         u.name AS driver_name,
         COUNT(DISTINCT s.id) AS deliveries,
-        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash,
-        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS gpay,
-        COALESCE(SUM(CASE WHEN p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS total_sales
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS gpay,
+        COALESCE(SUM(CASE WHEN p.method IN ('CASH', 'UPI') AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS total_sales
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
       LEFT JOIN sales s
@@ -641,6 +642,8 @@ export const getOwnerDashboardInsights = async (req, res) => {
         FROM sales s
         INNER JOIN payments p ON p.sale_id = s.id
         WHERE s.status = 'DELIVERED' AND p.type = 'DRIVER' AND p.status = 'SUCCESS'
+          AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL)
+          AND p.method IN ('CASH', 'UPI')
           AND s.agency_id = ?
           AND DATE(COALESCE(s.delivered_at, s.created_at)) BETWEEN ? AND ?
         GROUP BY s.driver_id

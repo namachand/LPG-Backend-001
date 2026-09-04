@@ -80,6 +80,8 @@ export const getCashSettlementDashboard = async (req, res) => {
           INNER JOIN sales sa ON sa.id = p.sale_id
           WHERE sa.status = 'DELIVERED'
             AND p.status = 'SUCCESS'
+            AND (sa.payment_method != 'ONLINE' OR sa.payment_method IS NULL)
+            AND p.method IN ('CASH', 'UPI')
             AND sa.agency_id = ?
             ${paymentDateWhereClause}
           GROUP BY sa.driver_id
@@ -137,6 +139,8 @@ export const getCashSettlementDashboard = async (req, res) => {
         INNER JOIN sales sa ON sa.id = p.sale_id
         WHERE sa.status = 'DELIVERED'
           AND p.status = 'SUCCESS'
+          AND (sa.payment_method != 'ONLINE' OR sa.payment_method IS NULL)
+          AND p.method IN ('CASH', 'UPI')
           AND sa.agency_id = ?
           ${paymentDateWhereClause}
         GROUP BY sa.driver_id

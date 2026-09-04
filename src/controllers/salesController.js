@@ -39,9 +39,9 @@ export const getSalesDashboard = async (req, res) => {
     // =========================
     const [summary] = await db.query(
       `SELECT 
-        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END), 0) AS cash,
-        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END), 0) AS gpay,
-        COALESCE(SUM(CASE WHEN p.type = 'COMPANY' THEN p.amount ELSE 0 END), 0) AS online
+        COALESCE(SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS cash,
+        COALESCE(SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS gpay,
+        COALESCE(SUM(CASE WHEN (p.type = 'COMPANY' OR p.method = 'CARD' OR s.payment_method = 'ONLINE') AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS online
         FROM payments p
         JOIN sales s ON p.sale_id = s.id
         WHERE s.status = 'DELIVERED' AND s.agency_id = ?
@@ -59,9 +59,9 @@ export const getSalesDashboard = async (req, res) => {
         d.id,
         u.name AS driver_name,
         COUNT(DISTINCT s.id) AS deliveries,
-        SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END) AS cash,
-        SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' THEN p.amount ELSE 0 END) AS gpay,
-        SUM(p.amount) AS total
+        SUM(CASE WHEN p.method = 'CASH' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END) AS cash,
+        SUM(CASE WHEN p.method = 'UPI' AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END) AS gpay,
+        SUM(CASE WHEN p.method IN ('CASH', 'UPI') AND p.type = 'DRIVER' AND (s.payment_method != 'ONLINE' OR s.payment_method IS NULL) AND p.status = 'SUCCESS' THEN p.amount ELSE 0 END) AS total
       FROM drivers d
       JOIN users u ON d.user_id = u.id
       LEFT JOIN sales s ON s.driver_id = d.id AND s.status = 'DELIVERED'

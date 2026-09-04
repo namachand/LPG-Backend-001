@@ -210,6 +210,48 @@ const ensureOfficeExpensePaymentColumns = async (connection) => {
   }
 };
 
+// Safely resolve a valid user ID referencing users(id) to avoid foreign key violations
+// when sessions hold obsolete user IDs (e.g. after database cleanup/reseeding).
+const resolveValidUserId = async (
+  connection,
+  preferredUserId,
+  agencyId,
+  preferredRole = "CASHIER",
+) => {
+  if (preferredUserId) {
+    try {
+      const [rows] = await connection.query(
+        "SELECT id FROM users WHERE id = ? LIMIT 1",
+        [preferredUserId],
+      );
+      if (rows.length > 0) {
+        return rows[0].id;
+      }
+    } catch (err) {
+      console.warn("resolveValidUserId check error:", err.message);
+    }
+  }
+
+  if (agencyId) {
+    try {
+      const [fallbackRows] = await connection.query(
+        `SELECT id FROM users 
+         WHERE agency_id = ? AND status = 'ACTIVE' AND role IN (?, 'CASHIER', 'OWNER', 'SUPER_ADMIN')
+         ORDER BY (role = ?) DESC, id ASC 
+         LIMIT 1`,
+        [agencyId, preferredRole, preferredRole],
+      );
+      if (fallbackRows.length > 0) {
+        return fallbackRows[0].id;
+      }
+    } catch (err) {
+      console.warn("resolveValidUserId fallback error:", err.message);
+    }
+  }
+
+  return null;
+};
+
 // Dashboard window: honor an optional [startDate,endDate]; no range => today.
 const makeRangeDateCond = (startDate, endDate) => (dateExpr) => {
   if (startDate && endDate) {
@@ -404,18 +446,19 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   );
 
   let office = { total: 0, cash: 0, upi: 0, bank: 0, cnt: 0 };
-  if (oeStatusCol.length) {
-    const oeC = makeDateCond("oe.updated_at");
-    const [oe] = await connection.query(
-      `SELECT COALESCE(SUM(oe.amount), 0) AS total,
-              COALESCE(${officeCashOnly}, 0) AS cash,
-              COALESCE(${officeUpiOnly}, 0) AS upi,
-              COALESCE(${officeBankOnly}, 0) AS bank,
-              COUNT(*) AS cnt
-       FROM office_expenses oe
-       WHERE oe.status = 'APPROVED' AND oe.agency_id = ? ${oeC.sql}`,
-      [agency_id, ...oeC.params],
-    );
+  const oeStatusFilter = oeStatusCol.length ? "AND oe.status = 'APPROVED'" : "";
+  const oeC = makeDateCond("COALESCE(oe.created_at, oe.updated_at)");
+  const [oe] = await connection.query(
+    `SELECT COALESCE(SUM(oe.amount), 0) AS total,
+            COALESCE(${officeCashOnly}, 0) AS cash,
+            COALESCE(${officeUpiOnly}, 0) AS upi,
+            COALESCE(${officeBankOnly}, 0) AS bank,
+            COUNT(*) AS cnt
+     FROM office_expenses oe
+     WHERE oe.agency_id = ? ${oeStatusFilter} ${oeC.sql}`,
+    [agency_id, ...oeC.params],
+  );
+  if (oe.length) {
     office = oe[0];
   }
 
@@ -450,10 +493,10 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
 // all since the last Close Day. This is the same figure the Live Position /
 // dashboard shows as "Current Balance", and it is the ceiling for any new cash
 // payout: you can never pay out more cash than you are holding.
-const getAvailableCashBalance = async (connection, agency_id) => {
-  const openingBalance = Number(
-    (await getLatestClosingBalance(connection, agency_id)) ?? 0,
-  );
+const getAvailableCashBalance = async (connection, agency_id = 1) => {
+  const dayOpening = await getCurrentDayOpeningBalance(connection, agency_id);
+  const lastClosing = await getLatestClosingBalance(connection, agency_id);
+  const openingBalance = Number(dayOpening || lastClosing || 0);
   const anchorAt = await getCurrentDayAnchor(connection, agency_id);
   const ledger = await getCashLedger(
     connection,
@@ -763,7 +806,8 @@ export const getCashierDashboard = async (req, res) => {
       ? makeSinceCloseDateCond(await getCurrentDayAnchor(connection, req.user.agency_id))
       : makeRangeDateCond(startDate, endDate);
     const ledger = await getCashLedger(connection, ledgerCond, req.user.agency_id);
-    const openingBalance = Number(lastClosing ?? 0);
+    const dayOpening = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
+    const openingBalance = Number(dayOpening || lastClosing || 0);
     const totalCashIn = ledger.cashIn.cash;
     const totalCashOut = ledger.cashOut.cash;
     // Current Balance reflects the FULL money position across ALL payment modes
@@ -786,11 +830,13 @@ export const getCashierDashboard = async (req, res) => {
       metrics: [
         {
           title: "Opening Balance",
-          value: `₹${Number(lastClosing ?? 0).toLocaleString("en-IN")}`,
+          value: `₹${Number(openingBalance).toLocaleString("en-IN")}`,
           description:
-            lastClosing !== null
-              ? "Last closing balance"
-              : "No previous closing",
+            dayOpening
+              ? "Today's opening cash"
+              : lastClosing !== null
+                ? "Last closing balance"
+                : "No previous closing",
           variant: "neutral",
           icon: "💼",
         },
@@ -1699,7 +1745,10 @@ export const collectCashierTransferVoucherRequest = async (req, res) => {
       }
 
       const transferAmount = Number(transferRows[0].deposit_liability || 0);
-      const availableCash = await getAvailableCashBalance(connection);
+      const availableCash = await getAvailableCashBalance(
+        connection,
+        req.user?.agency_id || 1,
+      );
       if (transferAmount > availableCash) {
         return res.status(400).json({
           success: false,
@@ -2015,7 +2064,6 @@ export const collectCashierNewConnectionRequest = async (req, res) => {
 
 export const recordOtherPayment = async (req, res) => {
   const connection = await db.getConnection();
-  const cashierId = req.user?.id || 6;
   const { customer_name, method, transfer_id, amount, note } = req.body;
 
   if (!customer_name || !method || amount === undefined || amount === null) {
@@ -2043,31 +2091,76 @@ export const recordOtherPayment = async (req, res) => {
   }
 
   try {
-    const [result] = await connection.query(
-      `
-      INSERT INTO other_payments (
-        cashier_id,
-        customer_name,
-        method,
-        transfer_id,
-        amount,
-        note,
-        status,
-        created_at,
-        updated_at,
-        agency_id
-      ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
-      `,
-      [
-        cashierId,
-        customer_name.trim(),
-        normalizedMethod,
-        transfer_id?.trim() || null,
-        numericAmount,
-        note?.trim() || null,
-        req.user.agency_id,
-      ],
+    const rawCashierId = req.user?.id;
+    const cashierId = await resolveValidUserId(
+      connection,
+      rawCashierId,
+      req.user?.agency_id,
+      "CASHIER",
     );
+
+    let result;
+    try {
+      [result] = await connection.query(
+        `
+        INSERT INTO other_payments (
+          cashier_id,
+          customer_name,
+          method,
+          transfer_id,
+          amount,
+          note,
+          status,
+          created_at,
+          updated_at,
+          agency_id
+        ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+        `,
+        [
+          cashierId,
+          customer_name.trim(),
+          normalizedMethod,
+          transfer_id?.trim() || null,
+          numericAmount,
+          note?.trim() || null,
+          req.user.agency_id,
+        ],
+      );
+    } catch (queryErr) {
+      if (queryErr?.code === "ER_NO_REFERENCED_ROW_2" || queryErr?.errno === 1452) {
+        console.warn(
+          "other_payments foreign key constraint failed on cashier_id. Retrying with cashier_id = null:",
+          queryErr.message,
+        );
+        [result] = await connection.query(
+          `
+          INSERT INTO other_payments (
+            cashier_id,
+            customer_name,
+            method,
+            transfer_id,
+            amount,
+            note,
+            status,
+            created_at,
+            updated_at,
+            agency_id
+          ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+          `,
+          [
+            null,
+            customer_name.trim(),
+            normalizedMethod,
+            transfer_id?.trim() || null,
+            numericAmount,
+            note?.trim() || null,
+            req.user.agency_id,
+          ],
+        );
+      } else {
+        throw queryErr;
+      }
+    }
 
     return res.status(201).json({
       success: true,
@@ -2591,7 +2684,12 @@ export const recordOfficeSale = async (req, res) => {
       deductedStockAreaIds.push(sourceStockAreaId);
     }
 
-    const cashierUserId = req.user?.id || null;
+    const cashierUserId = await resolveValidUserId(
+      connection,
+      req.user?.id,
+      req.user?.agency_id,
+      "CASHIER",
+    );
 
     let customerId = null;
 
@@ -2935,9 +3033,9 @@ export const recordOfficeExpense = async (req, res) => {
       transaction_id: rawTransactionId,
       payment_reference: rawPaymentReference,
     } = req.body;
-    const adminId = req.user?.id;
+    const rawAdminId = req.user?.id;
 
-    if (!adminId) {
+    if (!rawAdminId && !req.user?.agency_id) {
       return res
         .status(400)
         .json({
@@ -2945,6 +3043,13 @@ export const recordOfficeExpense = async (req, res) => {
           message: "admin_id is required. Please ensure you are logged in.",
         });
     }
+
+    const adminId = await resolveValidUserId(
+      connection,
+      rawAdminId,
+      req.user?.agency_id,
+      req.user?.role || "CASHIER",
+    );
 
     if (!category || amount === undefined) {
       return res
@@ -2982,7 +3087,10 @@ export const recordOfficeExpense = async (req, res) => {
 
     // A cash payout can never exceed the cash currently in the drawer.
     if (paymentMode === "CASH") {
-      const availableCash = await getAvailableCashBalance(connection, req.user.agency_id);
+      const availableCash = await getAvailableCashBalance(
+        connection,
+        req.user?.agency_id || 1,
+      );
       if (numericAmount > availableCash) {
         return res.status(400).json({
           success: false,
@@ -3017,32 +3125,58 @@ export const recordOfficeExpense = async (req, res) => {
 
     const extraCols = `${hasBillUrl ? ", bill_url" : ""}, payment_mode, payment_reference, agency_id`;
     const extraPlaceholder = `${hasBillUrl ? ", ?" : ""}, ?, ?, ?`;
-    const baseParams = [adminId, category, numericAmount, description || null];
     const billParams = hasBillUrl ? [billUrl || null] : [];
     const paymentParams = [paymentMode, paymentReference || null, req.user.agency_id];
+
+    const executeInsert = async (withStatus, effectiveAdminId) => {
+      const currentBaseParams = [effectiveAdminId, category, numericAmount, description || null];
+      const statusSql = withStatus ? ", status" : "";
+      const statusVal = withStatus ? ", 'APPROVED'" : "";
+      return connection.execute(
+        `
+        INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}${statusSql}, created_at, updated_at)
+        VALUES (?, ?, ?, ?${extraPlaceholder}${statusVal}, NOW(), NOW())
+        `,
+        [...currentBaseParams, ...billParams, ...paymentParams],
+      );
+    };
 
     let result;
 
     try {
-      [result] = await connection.execute(
-        `
-        INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?${extraPlaceholder}, 'PENDING', NOW(), NOW())
-        `,
-        [...baseParams, ...billParams, ...paymentParams],
-      );
+      [result] = await executeInsert(true, adminId);
     } catch (queryError) {
-      if (queryError?.code !== "ER_BAD_FIELD_ERROR") {
+      const isBadField = queryError?.code === "ER_BAD_FIELD_ERROR";
+      const isFkError =
+        queryError?.code === "ER_NO_REFERENCED_ROW_2" || queryError?.errno === 1452;
+
+      if (isFkError) {
+        console.warn(
+          "office_expenses foreign key constraint failed on admin_id. Retrying with admin_id = null:",
+          queryError.message,
+        );
+        try {
+          [result] = await executeInsert(true, null);
+        } catch (retryErr) {
+          if (retryErr?.code === "ER_BAD_FIELD_ERROR") {
+            [result] = await executeInsert(false, null);
+          } else {
+            throw retryErr;
+          }
+        }
+      } else if (isBadField) {
+        try {
+          [result] = await executeInsert(false, adminId);
+        } catch (retryErr) {
+          if (retryErr?.code === "ER_NO_REFERENCED_ROW_2" || retryErr?.errno === 1452) {
+            [result] = await executeInsert(false, null);
+          } else {
+            throw retryErr;
+          }
+        }
+      } else {
         throw queryError;
       }
-
-      [result] = await connection.execute(
-        `
-        INSERT INTO office_expenses (admin_id, category, amount, description${extraCols}, created_at, updated_at)
-        VALUES (?, ?, ?, ?${extraPlaceholder}, NOW(), NOW())
-        `,
-        [...baseParams, ...billParams, ...paymentParams],
-      );
     }
 
     return res.status(201).json({
@@ -3310,7 +3444,10 @@ export const reviewCashOutExpenseRequest = async (req, res) => {
     // A cash payout can never exceed the cash currently in the drawer.
     if (status === "APPROVED" && paymentMode === "CASH") {
       const expenseAmount = Number(rows[0].amount || 0);
-      const availableCash = await getAvailableCashBalance(connection);
+      const availableCash = await getAvailableCashBalance(
+        connection,
+        req.user?.agency_id || 1,
+      );
       if (expenseAmount > availableCash) {
         return res.status(400).json({
           success: false,
@@ -3611,7 +3748,12 @@ export const createCashierReceipt = async (req, res) => {
     await ensureCashierReceiptsTable(connection);
     await ensureSplitPaymentsColumns(connection);
 
-    const cashierId = req.user?.id || null;
+    const cashierId = await resolveValidUserId(
+      connection,
+      req.user?.id,
+      req.user?.agency_id,
+      "CASHIER",
+    );
     const trimmedDescription = String(description || "").trim() || null;
     const trimmedTransferId =
       String(transfer_id ?? transferId ?? "").trim() || null;
@@ -3778,8 +3920,9 @@ export const getTodaysCashFlow = async (req, res) => {
         return { sql: `AND DATE(${dateExpr}) = ?`, params: [date] };
       };
     } else {
+      const dayOpening = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
       const lastClosing = await getLatestClosingBalance(connection, req.user.agency_id);
-      openingBalance = lastClosing ?? 0;
+      openingBalance = Number(dayOpening || lastClosing || 0);
 
       // Everything for the current running day (resets to 0 at Close Day and at
       // Start Day, per spec), anchored at the latest of last close / last start.
@@ -3962,6 +4105,12 @@ export const getCashFlowEntriesByDate = async (req, res) => {
     );
     const oePaymentMode = oeModeCol.length ? "oe.payment_mode" : "NULL";
 
+    const [oeStatusCol] = await connection.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'office_expenses' AND COLUMN_NAME = 'status'`,
+    );
+    const oeStatusFilter = oeStatusCol.length ? "AND oe.status = 'APPROVED'" : "";
+
     const query = `
       SELECT 
         'DRIVER_SETTLEMENT' as type,
@@ -4048,10 +4197,10 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         oe.amount,
         ${oePaymentMode} as payment_mode,
         'OUT' as direction,
-        oe.updated_at as timestamp,
+        COALESCE(oe.created_at, oe.updated_at) as timestamp,
         oe.description as description
       FROM office_expenses oe
-      WHERE oe.status = 'APPROVED' AND DATE(oe.updated_at) = ? AND oe.agency_id = ?
+      WHERE DATE(COALESCE(oe.created_at, oe.updated_at)) = ? AND oe.agency_id = ? ${oeStatusFilter}
 
       UNION ALL
 
