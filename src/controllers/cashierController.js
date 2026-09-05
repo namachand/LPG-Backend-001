@@ -20,17 +20,53 @@ const ensureCashierClosingPettyCashColumn = async (connection) => {
   }
 };
 
-const getLatestClosingBalance = async (connection, agency_id) => {
+const ensureCashierClosingColumns = async (connection) => {
+  await ensureCashierClosingPettyCashColumn(connection);
+
+  const requiredColumns = {
+    difference_reason:
+      "ALTER TABLE cashier_closings ADD COLUMN difference_reason VARCHAR(255) NULL AFTER petty_cash",
+    reason_disposition:
+      "ALTER TABLE cashier_closings ADD COLUMN reason_disposition VARCHAR(100) NULL AFTER difference_reason",
+    note:
+      "ALTER TABLE cashier_closings ADD COLUMN note TEXT NULL AFTER reason_disposition",
+    denominations:
+      "ALTER TABLE cashier_closings ADD COLUMN denominations JSON NULL AFTER note",
+  };
+
   const [rows] = await connection.query(
-    `SELECT total_cash FROM cashier_closings WHERE agency_id = ? ORDER BY id DESC LIMIT 1`,
-    [agency_id]
+    `
+    SELECT COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'cashier_closings'
+      AND COLUMN_NAME IN ('difference_reason', 'reason_disposition', 'note', 'denominations')
+    `,
   );
-  return rows.length ? Number(rows[0].total_cash || 0) : null;
+
+  const existing = new Set(rows.map((row) => String(row.COLUMN_NAME)));
+  for (const [columnName, ddl] of Object.entries(requiredColumns)) {
+    if (existing.has(columnName)) continue;
+    try {
+      await connection.query(ddl);
+    } catch (error) {
+      if (error?.code !== "ER_DUP_FIELDNAME") {
+        throw error;
+      }
+    }
+  }
 };
 
-// The most recent closing row, including the petty cash carried over from it.
+// Returns the retained in-office cash (petty cash) carried forward from the latest close.
+// This is the cash that remains under cashier custody and becomes tomorrow's required opening.
+const getLatestClosingBalance = async (connection, agency_id) => {
+  const latest = await getLatestClosing(connection, agency_id);
+  return latest ? Number(latest.pettyCash || 0) : null;
+};
+
+// The most recent closing row, including total cash and the petty cash carried over from it.
 const getLatestClosing = async (connection, agency_id) => {
-  await ensureCashierClosingPettyCashColumn(connection);
+  await ensureCashierClosingColumns(connection);
 
   const [rows] = await connection.query(
     `SELECT total_cash, petty_cash, created_at FROM cashier_closings WHERE agency_id = ? ORDER BY id DESC LIMIT 1`,
@@ -55,6 +91,16 @@ const getLastClosingAt = async (connection, agency_id) => {
     [agency_id]
   );
   return rows.length ? rows[0].created_at : null;
+};
+
+// Checks whether the cashier day is currently OPEN:
+// A day is open if started_at is more recent than closed_at (or if it was started and never closed).
+const isCashierDayOpen = async (connection, agency_id) => {
+  const closeAt = await getLastClosingAt(connection, agency_id);
+  const openAt = await getLastOpeningAt(connection, agency_id);
+  if (!openAt) return false;
+  if (!closeAt) return true;
+  return new Date(openAt).getTime() >= new Date(closeAt).getTime();
 };
 
 // Persists each "Start Day" so the running-day window can be anchored at the
@@ -488,15 +534,19 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   return { cashIn, cashOut };
 };
 
-// Cash physically available in the drawer right now =
-//   opening balance (last closing) + approved cash in − approved cash out,
-// all since the last Close Day. This is the same figure the Live Position /
-// dashboard shows as "Current Balance", and it is the ceiling for any new cash
-// payout: you can never pay out more cash than you are holding.
+// Cash physically available in the drawer right now:
+// - If the day is closed, only the retained in-office cash (petty cash) remains in cashier custody.
+// - If the day is open, opening balance (amount declared at Start Day) + approved cash in − approved cash out.
+// This is the ceiling for any new cash payout: you can never pay out more cash than you are holding.
 const getAvailableCashBalance = async (connection, agency_id = 1) => {
+  const dayIsOpen = await isCashierDayOpen(connection, agency_id);
+  if (!dayIsOpen) {
+    const latest = await getLatestClosing(connection, agency_id);
+    return Number(latest?.pettyCash || 0);
+  }
+
   const dayOpening = await getCurrentDayOpeningBalance(connection, agency_id);
-  const lastClosing = await getLatestClosingBalance(connection, agency_id);
-  const openingBalance = Number(dayOpening || lastClosing || 0);
+  const openingBalance = Number(dayOpening || 0);
   const anchorAt = await getCurrentDayAnchor(connection, agency_id);
   const ledger = await getCashLedger(
     connection,
@@ -802,50 +852,90 @@ export const getCashierDashboard = async (req, res) => {
       requestIsTodayOnly = Number(todayCheck[0]?.isToday) === 1;
     }
     const useRunningDay = !hasRange || requestIsTodayOnly;
+    const dayIsOpen = await isCashierDayOpen(connection, req.user.agency_id);
+    const latestClosing = await getLatestClosing(connection, req.user.agency_id);
+
     const ledgerCond = useRunningDay
       ? makeSinceCloseDateCond(await getCurrentDayAnchor(connection, req.user.agency_id))
       : makeRangeDateCond(startDate, endDate);
     const ledger = await getCashLedger(connection, ledgerCond, req.user.agency_id);
-    const dayOpening = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
-    const openingBalance = Number(dayOpening || lastClosing || 0);
-    const totalCashIn = ledger.cashIn.cash;
-    const totalCashOut = ledger.cashOut.cash;
-    // Current Balance reflects the FULL money position across ALL payment modes
-    // (cash + online + bank) on both sides — every cash-in mode (driver sales,
-    // office sales, PR penalty / name change / new connection) minus every
-    // cash-out mode (driver/office expenses + transfer vouchers). The Total Cash
-    // In / Out cards above stay cash-only; only this figure spans all modes.
-    const currentBalance =
-      openingBalance +
-      Number(ledger.cashIn.total || 0) -
-      Number(ledger.cashOut.total || 0);
-    const onlineIn = ledger.cashIn.online;
-    const bankIn = ledger.cashIn.bank;
-    const onlineOut = ledger.cashOut.online;
-    const bankOut = ledger.cashOut.bank;
+
+    let openingBalance = 0;
+    let totalCashIn = 0;
+    let totalCashOut = 0;
+    let currentBalance = 0;
+    let onlineIn = 0;
+    let bankIn = 0;
+    let onlineOut = 0;
+    let bankOut = 0;
+
+    if (!useRunningDay) {
+      // Historical date range view
+      openingBalance = 0;
+      totalCashIn = ledger.cashIn.cash;
+      totalCashOut = ledger.cashOut.cash;
+      currentBalance =
+        Number(ledger.cashIn.total || 0) - Number(ledger.cashOut.total || 0);
+      onlineIn = ledger.cashIn.online;
+      bankIn = ledger.cashIn.bank;
+      onlineOut = ledger.cashOut.online;
+      bankOut = ledger.cashOut.bank;
+    } else if (dayIsOpen) {
+      // Running day is OPEN
+      const dayOpening = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
+      openingBalance = Number(dayOpening || 0);
+      totalCashIn = ledger.cashIn.cash;
+      totalCashOut = ledger.cashOut.cash;
+      currentBalance =
+        openingBalance +
+        Number(ledger.cashIn.total || 0) -
+        Number(ledger.cashOut.total || 0);
+      onlineIn = ledger.cashIn.online;
+      bankIn = ledger.cashIn.bank;
+      onlineOut = ledger.cashOut.online;
+      bankOut = ledger.cashOut.bank;
+    } else {
+      // Running day is CLOSED:
+      // Cash handed over to Owner / Bank has left cashier custody.
+      // Current balance retained under cashier custody is the in-office petty cash.
+      const retainedCash = Number(latestClosing?.pettyCash || 0);
+      openingBalance = retainedCash;
+      totalCashIn = 0;
+      totalCashOut = 0;
+      currentBalance = retainedCash;
+      onlineIn = 0;
+      bankIn = 0;
+      onlineOut = 0;
+      bankOut = 0;
+    }
 
     return res.status(200).json({
       success: true,
-      lastClosingBalance: lastClosing ?? 0,
+      lastClosingBalance: latestClosing?.pettyCash ?? 0,
+      lastClosingTotal: latestClosing?.totalCash ?? 0,
+      isDayOpen: dayIsOpen,
       metrics: [
         {
           title: "Opening Balance",
           value: `₹${Number(openingBalance).toLocaleString("en-IN")}`,
-          description:
-            dayOpening
+          description: !useRunningDay
+            ? "Filtered date range"
+            : dayIsOpen
               ? "Today's opening cash"
-              : lastClosing !== null
-                ? "Last closing balance"
-                : "No previous closing",
+              : latestClosing !== null
+                ? "In-office cash (Day closed)"
+                : "Day not started",
           variant: "neutral",
           icon: "💼",
         },
         {
           title: "Total Cash In",
           value: `₹${totalCashIn.toLocaleString("en-IN")}`,
-          description: `${driverRows.length} driver entries`,
+          description: !useRunningDay || dayIsOpen
+            ? `${driverRows.length} driver entries`
+            : "Day is closed",
           variant: "success",
-          badge: "+4.2%",
+          badge: !useRunningDay || dayIsOpen ? "+4.2%" : undefined,
           icon: "⬆️",
           paymentMethods: {
             online: onlineIn,
@@ -855,10 +945,12 @@ export const getCashierDashboard = async (req, res) => {
         {
           title: "Total Cash Out",
           value: `₹${totalCashOut.toLocaleString("en-IN")}`,
-          description: `${expenseSummary.pendingApproval} pending approvals`,
+          description: !useRunningDay || dayIsOpen
+            ? `${expenseSummary.pendingApproval} pending approvals`
+            : "Day is closed",
           variant: "danger",
           badge:
-            expenseSummary.pendingApproval > 0
+            (!useRunningDay || dayIsOpen) && expenseSummary.pendingApproval > 0
               ? `+${expenseSummary.pendingApproval}`
               : undefined,
           icon: "⬇️",
@@ -870,7 +962,11 @@ export const getCashierDashboard = async (req, res) => {
         {
           title: "Current Balance",
           value: `₹${currentBalance.toLocaleString("en-IN")}`,
-          description: "Live · last sync just now",
+          description: !useRunningDay
+            ? "Date range net balance"
+            : dayIsOpen
+              ? "Live · last sync just now"
+              : "In-office cash · Day closed",
           variant: currentBalance >= 0 ? "success" : "danger",
           icon: "💚",
         },
@@ -2402,9 +2498,12 @@ export const getLastClosingBalance = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      total_cash: latest?.totalCash ?? 0,
-      // Petty cash held back at the last Close Day, so Start Day can show/reuse
-      // it. Exposed in both shapes to match the existing snake_case payload.
+      // The required opening balance for tomorrow is the in-office cash retained:
+      total_cash: latest?.pettyCash ?? 0,
+      expected_opening: latest?.pettyCash ?? 0,
+      carried_forward: latest?.pettyCash ?? 0,
+      // The total physical cash counted at the last close (before handover/deposit):
+      last_closing_total: latest?.totalCash ?? 0,
       petty_cash: latest?.pettyCash ?? 0,
       pettyCash: latest?.pettyCash ?? 0,
       hasPrevious: latest !== null,
@@ -2425,25 +2524,23 @@ export const getClosingSummary = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    // System Calculated = opening balance + approved CASH in − approved CASH out
-    // for the current running day (same as the Live Position "Current Balance").
-    //   opening   = amount entered at Start Day (0 while the day is closed).
-    //   CASH in   = driver-collection cash + office cash sales + approved
-    //               cashier-request cash (excl. transfer voucher).
-    //   CASH out  = approved driver/purchase expense cash + approved office
-    //               expenses + approved cash transfer vouchers.
-    // Right after Close Day: opening = 0 and the running window is empty, so it
-    // is 0. Right after Start Day: cash in/out are 0, so it equals the opening
-    // balance. Then it moves as new billing/expenses happen.
+    const dayIsOpen = await isCashierDayOpen(connection, req.user.agency_id);
+    if (!dayIsOpen) {
+      return res.status(200).json({
+        success: true,
+        cashTotal: 0,
+      });
+    }
+
     const anchorAt = await getCurrentDayAnchor(connection, req.user.agency_id);
     const ledger = await getCashLedger(
       connection,
       makeSinceCloseDateCond(anchorAt),
       req.user.agency_id
     );
-    const openingBalance = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
+    const dayOpening = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
     const cashTotal =
-      openingBalance +
+      Number(dayOpening || 0) +
       Number(ledger.cashIn.cash || 0) -
       Number(ledger.cashOut.cash || 0);
 
@@ -2476,12 +2573,13 @@ export const startCashierDay = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const latest = await getLatestClosingBalance(connection, req.user.agency_id);
+    const latest = await getLatestClosing(connection, req.user.agency_id);
+    const expectedOpening = latest !== null ? Number(latest.pettyCash || 0) : null;
 
-    if (latest !== null && Number(totalAmount) !== Number(latest)) {
+    if (expectedOpening !== null && expectedOpening > 0 && Number(totalAmount) !== expectedOpening) {
       return res.status(400).json({
         success: false,
-        message: `Opening balance must match last closing balance of ₹${latest.toLocaleString("en-IN")}`,
+        message: `Opening balance must match retained in-office cash of ₹${expectedOpening.toLocaleString("en-IN")}`,
       });
     }
 
@@ -2504,7 +2602,7 @@ export const startCashierDay = async (req, res) => {
       success: true,
       message: "Cashier day started successfully",
       opening: cashierDayLog.opening,
-      lastClosingBalance: latest ?? 0,
+      lastClosingBalance: expectedOpening ?? 0,
     });
   } catch (error) {
     console.error("startCashierDay error:", error);
@@ -2551,15 +2649,31 @@ export const closeCashierDay = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    await ensureCashierClosingPettyCashColumn(connection);
+    await ensureCashierClosingColumns(connection);
 
     await connection.beginTransaction();
     const [result] = await connection.execute(
       `
-      INSERT INTO cashier_closings (total_cash, petty_cash, agency_id)
-      VALUES (?, ?, ?)
+      INSERT INTO cashier_closings (
+        total_cash,
+        petty_cash,
+        difference_reason,
+        reason_disposition,
+        note,
+        denominations,
+        agency_id
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       `,
-      [closingAmount, pettyCashAmount, req.user.agency_id],
+      [
+        closingAmount,
+        pettyCashAmount,
+        differenceReason || null,
+        reasonDisposition || null,
+        note || null,
+        JSON.stringify(denominations),
+        req.user.agency_id,
+      ],
     );
 
     await connection.commit();
@@ -2579,6 +2693,8 @@ export const closeCashierDay = async (req, res) => {
       success: true,
       message: "Cashier day closed successfully",
       closing: cashierDayLog.closing,
+      retainedCash: pettyCashAmount,
+      handoverAmount: Math.max(0, Number(closingAmount) - pettyCashAmount),
     });
   } catch (error) {
     await connection.rollback();
@@ -3911,21 +4027,27 @@ export const getTodaysCashFlow = async (req, res) => {
 
     if (date) {
       const [rows] = await connection.query(
-        `SELECT total_cash FROM cashier_closings WHERE agency_id = ? AND DATE(created_at) < ? ORDER BY id DESC LIMIT 1`,
+        `SELECT total_cash, petty_cash FROM cashier_closings WHERE agency_id = ? AND DATE(created_at) < ? ORDER BY id DESC LIMIT 1`,
         [req.user.agency_id, date]
       );
-      openingBalance = rows.length ? Number(rows[0].total_cash || 0) : 0;
+      openingBalance = rows.length ? Number(rows[0].petty_cash ?? rows[0].total_cash ?? 0) : 0;
       
       anchorCond = (dateExpr) => {
         return { sql: `AND DATE(${dateExpr}) = ?`, params: [date] };
       };
     } else {
-      const dayOpening = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
-      const lastClosing = await getLatestClosingBalance(connection, req.user.agency_id);
-      openingBalance = Number(dayOpening || lastClosing || 0);
+      const dayIsOpen = await isCashierDayOpen(connection, req.user.agency_id);
+      const latestClosing = await getLatestClosing(connection, req.user.agency_id);
 
-      // Everything for the current running day (resets to 0 at Close Day and at
-      // Start Day, per spec), anchored at the latest of last close / last start.
+      if (dayIsOpen) {
+        const dayOpening = await getCurrentDayOpeningBalance(connection, req.user.agency_id);
+        openingBalance = Number(dayOpening || 0);
+      } else {
+        // Day is closed: in-office petty cash retained from the last close remains under custody
+        openingBalance = Number(latestClosing?.pettyCash || 0);
+      }
+
+      // Everything for the current running day, anchored at the latest of last close / last start.
       const anchorAt = await getCurrentDayAnchor(connection, req.user.agency_id);
       anchorCond = makeSinceCloseDateCond(anchorAt);
     }
