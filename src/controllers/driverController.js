@@ -2141,15 +2141,16 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
     // from being accidentally settled.
     const [rows] = await connection.execute(
       `
-      SELECT id, amount, method AS original_method
-      FROM settlement_history
-      WHERE driver_id = ?
-        AND status = 'ASSIGNED'
-        AND DATE(created_at) = CURDATE()
-      ORDER BY created_at DESC
+      SELECT sh.id, sh.amount, sh.method AS original_method, s.payment_method AS sale_payment_method
+      FROM settlement_history sh
+      LEFT JOIN sales s ON s.id = sh.sale_id
+      WHERE sh.driver_id = ?
+        AND sh.status = 'ASSIGNED'
+        AND DATE(sh.created_at) = CURDATE()
+      ORDER BY (CASE WHEN (s.payment_method = ? OR (s.payment_method IS NULL AND sh.method = ?)) THEN 0 ELSE 1 END), sh.created_at ASC
       FOR UPDATE
       `,
-      [driverId],
+      [driverId, method, method],
     );
 
     if (!rows.length) {
@@ -2200,10 +2201,19 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
     for (const row of rows) {
       if (remainingToSettle <= 0) break;
       const rowAmount = Number(row.amount);
+      const isOriginalOnline =
+        ["UPI", "ONLINE"].includes(row.sale_payment_method) ||
+        ["UPI", "ONLINE"].includes(row.original_method);
+      const newMethod = isOriginalOnline
+        ? ["UPI", "ONLINE"].includes(row.sale_payment_method)
+          ? row.sale_payment_method
+          : row.original_method
+        : method;
+
       if (rowAmount <= remainingToSettle) {
         await connection.execute(
           `UPDATE settlement_history SET status = 'PENDING', method = ? WHERE id = ?`,
-          [method, row.id],
+          [newMethod, row.id],
         );
         remainingToSettle -= rowAmount;
       } else {
@@ -2215,7 +2225,7 @@ export const settleDriverCollectionsByMethod = async (req, res) => {
           `INSERT INTO settlement_history (driver_id, sale_id, payment_id, method, amount, status, created_at)
            SELECT driver_id, sale_id, payment_id, ?, ?, 'PENDING', created_at
            FROM settlement_history WHERE id = ?`,
-          [method, remainingToSettle, row.id],
+          [newMethod, remainingToSettle, row.id],
         );
         remainingToSettle = 0;
       }
@@ -2610,12 +2620,13 @@ export const getDriverCollectionHistory = async (req, res) => {
       const [summaryRows] = await db.execute(
         `
         SELECT
-          COALESCE(SUM(CASE WHEN method = 'CASH' THEN amount ELSE 0 END), 0) AS cash_amount,
-          COALESCE(SUM(CASE WHEN method = 'UPI' THEN amount ELSE 0 END), 0) AS upi_amount
-        FROM settlement_history
-        WHERE driver_id = ?
-          AND status = 'SETTLED'
-          AND DATE(created_at) = ?
+          COALESCE(SUM(CASE WHEN (s.payment_method = 'CASH' OR (s.payment_method IS NULL AND sh.method = 'CASH')) THEN sh.amount ELSE 0 END), 0) AS cash_amount,
+          COALESCE(SUM(CASE WHEN (s.payment_method IN ('UPI', 'ONLINE') OR sh.method IN ('UPI', 'ONLINE')) THEN sh.amount ELSE 0 END), 0) AS upi_amount
+        FROM settlement_history sh
+        LEFT JOIN sales s ON s.id = sh.sale_id
+        WHERE sh.driver_id = ?
+          AND sh.status = 'SETTLED'
+          AND DATE(sh.created_at) = ?
         `,
         [numericDriverId, collectionDate],
       );
@@ -2639,7 +2650,11 @@ export const getDriverCollectionHistory = async (req, res) => {
           sh.id,
           sh.sale_id,
           sh.amount,
-          sh.method AS payment_mode,
+          CASE 
+            WHEN s.payment_method IN ('UPI', 'ONLINE') THEN s.payment_method
+            WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') THEN sh.method
+            ELSE 'CASH'
+          END AS payment_mode,
           sh.status AS settlement_history_status,
           sh.created_at,
           u.name AS customer_name,
@@ -2654,7 +2669,7 @@ export const getDriverCollectionHistory = async (req, res) => {
         WHERE sh.driver_id = ?
           AND sh.status IN ('SETTLED', 'PENDING')
           AND DATE(sh.created_at) = ?
-        GROUP BY sh.id, sh.sale_id, sh.amount, sh.method, sh.status, sh.created_at, u.name
+        GROUP BY sh.id, sh.sale_id, sh.amount, sh.method, s.payment_method, sh.status, sh.created_at, u.name
         ORDER BY sh.created_at DESC, sh.id DESC
         `,
         [numericDriverId, collectionDate],

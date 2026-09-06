@@ -376,10 +376,17 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   const drvC = makeDateCond("COALESCE(sh.settled_at, sh.created_at)");
   const [drv] = await connection.query(
     `SELECT
-       COALESCE(SUM(CASE WHEN sh.method = 'CASH' THEN sh.amount ELSE 0 END), 0) AS cash,
-       COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') THEN sh.amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE 
+         WHEN s.payment_method IN ('UPI', 'ONLINE') OR sh.method IN ('UPI', 'ONLINE', 'CARD') THEN 0
+         ELSE sh.amount 
+       END), 0) AS cash,
+       COALESCE(SUM(CASE 
+         WHEN s.payment_method IN ('UPI', 'ONLINE') OR sh.method IN ('UPI', 'ONLINE', 'CARD') THEN sh.amount 
+         ELSE 0 
+       END), 0) AS upi,
        COUNT(*) AS cnt
      FROM settlement_history sh
+     LEFT JOIN sales s ON s.id = sh.sale_id
      WHERE sh.status = 'SETTLED' AND sh.agency_id = ? ${drvC.sql}`,
     [agency_id, ...drvC.params],
   );
@@ -804,11 +811,11 @@ export const getCashierDashboard = async (req, res) => {
       SELECT
         d.id AS driver_id,
         u.name AS driverName,
-        COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS cashAssigned,
-        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS upiAssigned,
+        COALESCE(SUM(CASE WHEN (s.payment_method = 'CASH' OR (s.payment_method IS NULL AND sh.method = 'CASH')) AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS cashAssigned,
+        COALESCE(SUM(CASE WHEN (s.payment_method IN ('UPI', 'ONLINE') OR sh.method IN ('UPI', 'ONLINE', 'CARD')) AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS upiAssigned,
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS totalAssigned,
-        COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cashPending,
-        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
+        COALESCE(SUM(CASE WHEN (s.payment_method = 'CASH' OR (s.payment_method IS NULL AND sh.method = 'CASH')) AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cashPending,
+        COALESCE(SUM(CASE WHEN (s.payment_method IN ('UPI', 'ONLINE') OR sh.method IN ('UPI', 'ONLINE', 'CARD')) AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS totalPending,
         COALESCE(SUM(CASE WHEN sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS totalSettled,
         CASE
@@ -820,6 +827,7 @@ export const getCashierDashboard = async (req, res) => {
       FROM drivers d
       INNER JOIN users u ON u.id = d.user_id
       LEFT JOIN settlement_history sh ON sh.driver_id = d.id AND sh.status IN ('ASSIGNED', 'PENDING', 'SETTLED') ${settlementDateClause}
+      LEFT JOIN sales s ON s.id = sh.sale_id
       ${driverWhereClause}
       GROUP BY d.id, u.name
       ORDER BY totalPending DESC, u.name ASC
@@ -1087,11 +1095,11 @@ export const getCashierDriverCollections = async (req, res) => {
         -- total collected = ALL statuses (ASSIGNED + PENDING + SETTLED)
         COALESCE(SUM(sh.amount), 0) AS totalCollected,
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS totalAssigned,
-        COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cashPending,
-        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
+        COALESCE(SUM(CASE WHEN (s.payment_method = 'CASH' OR (s.payment_method IS NULL AND sh.method = 'CASH')) AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cashPending,
+        COALESCE(SUM(CASE WHEN (s.payment_method IN ('UPI', 'ONLINE') OR sh.method IN ('UPI', 'ONLINE')) AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS totalPending,
-        COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS cashSettled,
-        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE') AND sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS upiSettled,
+        COALESCE(SUM(CASE WHEN (s.payment_method = 'CASH' OR (s.payment_method IS NULL AND sh.method = 'CASH')) AND sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS cashSettled,
+        COALESCE(SUM(CASE WHEN (s.payment_method IN ('UPI', 'ONLINE') OR sh.method IN ('UPI', 'ONLINE')) AND sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS upiSettled,
         COALESCE(SUM(CASE WHEN sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS totalSettled,
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN 1 ELSE 0 END), 0) AS assignedCount,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pendingCount,
@@ -4233,12 +4241,17 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         'DRIVER_SETTLEMENT' as type,
         sh.id as reference_id,
         sh.amount,
-        sh.method as payment_mode,
+        CASE 
+          WHEN s.payment_method IN ('UPI', 'ONLINE') THEN s.payment_method
+          WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') THEN sh.method
+          ELSE 'CASH'
+        END as payment_mode,
         'IN' as direction,
         COALESCE(sh.settled_at, sh.created_at) as timestamp,
         'Driver Collection Settlement' as description,
         COALESCE(u.name, 'Driver') as source
       FROM settlement_history sh
+      LEFT JOIN sales s ON s.id = sh.sale_id
       LEFT JOIN drivers d ON d.id = sh.driver_id
       LEFT JOIN users u ON u.id = d.user_id
       WHERE sh.status = 'SETTLED' AND DATE(COALESCE(sh.settled_at, sh.created_at)) = ? AND sh.agency_id = ?
