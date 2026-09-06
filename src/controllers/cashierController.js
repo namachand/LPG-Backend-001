@@ -129,22 +129,17 @@ const getLastOpeningAt = async (connection, agency_id) => {
   return rows.length ? rows[0].started_at : null;
 };
 
-// Anchor for the current running day = the latest of (last close, last start).
-// The window counts only activity AFTER this point, so:
-//   • right after a Close Day → anchor is the close → cash in/out start at 0;
-//   • after a Start Day       → anchor is the start → cash in/out start at 0
-//     again and only accumulate from the freshly opened day.
-// Null only when the cashier has never closed nor started a day (=> falls back
-// to "today" in makeSinceCloseDateCond).
+// Anchor for the current running day = the timestamp of the last day-close.
+// All transactions after this close belong to the current running day.
+// We do NOT anchor to openAt (Start Day) because driver collections, office
+// sales, or other transactions may occur earlier on the day before the cashier
+// formally enters opening cash, or Start Day may be re-submitted. Anchoring to
+// openAt would erase those real cash inflows/outflows from the dashboard.
+// If the day has never been closed, returns null (which falls back to CURDATE()
+// in makeSinceCloseDateCond).
 const getCurrentDayAnchor = async (connection, agency_id) => {
   const closeAt = await getLastClosingAt(connection, agency_id);
-  const openAt = await getLastOpeningAt(connection, agency_id);
-  if (!closeAt && !openAt) return null;
-  if (!closeAt) return openAt;
-  if (!openAt) return closeAt;
-  return new Date(openAt).getTime() >= new Date(closeAt).getTime()
-    ? openAt
-    : closeAt;
+  return closeAt;
 };
 
 // Opening balance of the CURRENT open day (the amount entered at Start Day).
@@ -382,7 +377,7 @@ const getCashLedger = async (connection, makeDateCond, agency_id) => {
   const [drv] = await connection.query(
     `SELECT
        COALESCE(SUM(CASE WHEN sh.method = 'CASH' THEN sh.amount ELSE 0 END), 0) AS cash,
-       COALESCE(SUM(CASE WHEN sh.method = 'UPI'  THEN sh.amount ELSE 0 END), 0) AS upi,
+       COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') THEN sh.amount ELSE 0 END), 0) AS upi,
        COUNT(*) AS cnt
      FROM settlement_history sh
      WHERE sh.status = 'SETTLED' AND sh.agency_id = ? ${drvC.sql}`,
@@ -810,10 +805,10 @@ export const getCashierDashboard = async (req, res) => {
         d.id AS driver_id,
         u.name AS driverName,
         COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS cashAssigned,
-        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS upiAssigned,
+        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') AND sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS upiAssigned,
         COALESCE(SUM(CASE WHEN sh.status = 'ASSIGNED' THEN sh.amount ELSE 0 END), 0) AS totalAssigned,
         COALESCE(SUM(CASE WHEN sh.method = 'CASH' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS cashPending,
-        COALESCE(SUM(CASE WHEN sh.method = 'UPI' AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
+        COALESCE(SUM(CASE WHEN sh.method IN ('UPI', 'ONLINE', 'CARD') AND sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS upiPending,
         COALESCE(SUM(CASE WHEN sh.status = 'PENDING' THEN sh.amount ELSE 0 END), 0) AS totalPending,
         COALESCE(SUM(CASE WHEN sh.status = 'SETTLED' THEN sh.amount ELSE 0 END), 0) AS totalSettled,
         CASE
@@ -875,7 +870,7 @@ export const getCashierDashboard = async (req, res) => {
       totalCashIn = ledger.cashIn.cash;
       totalCashOut = ledger.cashOut.cash;
       currentBalance =
-        Number(ledger.cashIn.total || 0) - Number(ledger.cashOut.total || 0);
+        Number(ledger.cashIn.cash || 0) - Number(ledger.cashOut.cash || 0);
       onlineIn = ledger.cashIn.online;
       bankIn = ledger.cashIn.bank;
       onlineOut = ledger.cashOut.online;
@@ -888,8 +883,8 @@ export const getCashierDashboard = async (req, res) => {
       totalCashOut = ledger.cashOut.cash;
       currentBalance =
         openingBalance +
-        Number(ledger.cashIn.total || 0) -
-        Number(ledger.cashOut.total || 0);
+        Number(ledger.cashIn.cash || 0) -
+        Number(ledger.cashOut.cash || 0);
       onlineIn = ledger.cashIn.online;
       bankIn = ledger.cashIn.bank;
       onlineOut = ledger.cashOut.online;
@@ -4241,8 +4236,11 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         sh.method as payment_mode,
         'IN' as direction,
         COALESCE(sh.settled_at, sh.created_at) as timestamp,
-        'Driver Collection Settlement' as description
+        'Driver Collection Settlement' as description,
+        COALESCE(u.name, 'Driver') as source
       FROM settlement_history sh
+      LEFT JOIN drivers d ON d.id = sh.driver_id
+      LEFT JOIN users u ON u.id = d.user_id
       WHERE sh.status = 'SETTLED' AND DATE(COALESCE(sh.settled_at, sh.created_at)) = ? AND sh.agency_id = ?
 
       UNION ALL
@@ -4254,9 +4252,11 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         p.method as payment_mode,
         'IN' as direction,
         p.created_at as timestamp,
-        'Office Sale Payment' as description
+        'Office Sale Payment' as description,
+        COALESCE(cu.name, 'Customer') as source
       FROM payments p
       INNER JOIN sales s ON s.id = p.sale_id
+      LEFT JOIN users cu ON cu.id = s.customer_id
       WHERE p.status = 'SUCCESS' AND s.sales_from = 'CASHIER' AND DATE(p.created_at) = ? AND p.agency_id = ?
 
       UNION ALL
@@ -4268,8 +4268,10 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         pr.payment_mode,
         'IN' as direction,
         pr.paid_at as timestamp,
-        'PR Penalty Collection' as description
+        'PR Penalty Collection' as description,
+        COALESCE(u.name, 'Customer') as source
       FROM customer_pr_penalties pr
+      LEFT JOIN users u ON u.id = pr.customer_id
       WHERE pr.payment_status = 'PAID' AND DATE(pr.paid_at) = ? AND pr.agency_id = ?
 
       UNION ALL
@@ -4281,8 +4283,10 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         nc.payment_mode,
         'IN' as direction,
         nc.approved_at as timestamp,
-        'Name Change Request Fee' as description
+        'Name Change Request Fee' as description,
+        COALESCE(u.name, 'Customer') as source
       FROM customer_name_change_requests nc
+      LEFT JOIN users u ON u.id = nc.customer_id
       WHERE nc.status = 'APPROVED' AND DATE(nc.approved_at) = ? AND nc.agency_id = ?
 
       UNION ALL
@@ -4294,9 +4298,25 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         cnc.payment_mode,
         'IN' as direction,
         cnc.paid_at as timestamp,
-        'New Connection Payment' as description
+        'New Connection Payment' as description,
+        COALESCE(u.name, 'Customer') as source
       FROM customer_new_connections cnc
+      LEFT JOIN users u ON u.id = cnc.user_id
       WHERE cnc.payment_status = 'PAID' AND DATE(cnc.paid_at) = ? AND cnc.agency_id = ?
+
+      UNION ALL
+
+      SELECT 
+        'CASHIER_RECEIPT' as type,
+        cr.id as reference_id,
+        cr.amount,
+        cr.payment_mode,
+        'IN' as direction,
+        cr.created_at as timestamp,
+        COALESCE(cr.description, 'Cashier Other Receipt') as description,
+        COALESCE(cr.receipt_type, 'Receipt') as source
+      FROM cashier_receipts cr
+      WHERE DATE(cr.created_at) = ? AND cr.agency_id = ?
 
       UNION ALL
 
@@ -4307,8 +4327,10 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         ${ePaymentMode} as payment_mode,
         'OUT' as direction,
         e.created_at as timestamp,
-        e.description as description
+        e.description as description,
+        COALESCE(u.name, 'Staff') as source
       FROM expenses e
+      LEFT JOIN users u ON u.id = e.created_by
       WHERE e.status = 'APPROVED' AND DATE(e.created_at) = ? AND e.agency_id = ?
 
       UNION ALL
@@ -4320,7 +4342,8 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         ${oePaymentMode} as payment_mode,
         'OUT' as direction,
         COALESCE(oe.created_at, oe.updated_at) as timestamp,
-        oe.description as description
+        oe.description as description,
+        COALESCE(oe.category, 'Office Expense') as source
       FROM office_expenses oe
       WHERE DATE(COALESCE(oe.created_at, oe.updated_at)) = ? AND oe.agency_id = ? ${oeStatusFilter}
 
@@ -4333,14 +4356,17 @@ export const getCashFlowEntriesByDate = async (req, res) => {
         t.payment_mode,
         'OUT' as direction,
         t.updated_at as timestamp,
-        'Transfer Voucher Deposit Refund' as description
+        'Transfer Voucher Deposit Refund' as description,
+        COALESCE(u.name, 'Customer') as source
       FROM customer_connection_transfers t
+      LEFT JOIN users u ON u.id = t.existing_customer_id
       WHERE t.status = 'APPROVED' AND DATE(t.updated_at) = ? AND t.agency_id = ?
 
       ORDER BY timestamp DESC
     `;
 
     const params = [
+      date, req.user.agency_id,
       date, req.user.agency_id,
       date, req.user.agency_id,
       date, req.user.agency_id,
